@@ -967,7 +967,7 @@ pub fn add_to_module(to: &mut Module) {
     // conversions
     to.add_native_concrete_impl(
         cast_trait_id,
-        [int_type(), float_type()],
+        [float_type(), int_type()],
         [],
         [b(NativeFallibleOutFnN::from_rust_infallible(
             saturating_cast_int_to_float::<Int>,
@@ -975,7 +975,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_native_concrete_impl(
         cast_trait_id,
-        [float_type(), int_type()],
+        [int_type(), float_type()],
         [],
         [b(NativeFallibleOutFnN::from_rust_infallible(
             saturating_trunc::<Int>,

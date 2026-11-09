@@ -157,12 +157,9 @@ pub(crate) fn check_trait_impl(
 
     check_impl_leaves_effects_open(trait_id, input_tys, span)?;
 
-    if is_value_trait(trait_id, trait_def)
-        && current.module_id() != trait_id.module
-        && !input_tys
-            .iter()
-            .any(|&ty| has_local_named_head(current, ty))
-    {
+    // An implementation of a trait of another module owns the applications it matches through
+    // its owning input, so modules that do not know each other cannot both implement one.
+    if !trait_is_local && current.owning_input(input_tys).is_none() {
         return Err(internal_compilation_error!(TraitImplOrphanRuleViolation {
             trait_ref: trait_id,
             input_tys: input_tys.to_vec(),
@@ -170,16 +167,21 @@ pub(crate) fn check_trait_impl(
         }));
     }
 
-    if !trait_is_local
-        && !input_tys
+    // A public implementation is part of its module's contract, so it may not hide behind a
+    // private type: an implementation is private only through its owning input.
+    if current.is_trait_impl_exportable(trait_id, input_tys, others)
+        && let Some(&private_ty) = input_tys
             .iter()
-            .any(|&ty| has_local_named_head(current, ty))
+            .chain(output_tys)
+            .find(|&&ty| !current.is_type_public(ty, others))
     {
-        return Err(internal_compilation_error!(TraitImplOrphanRuleViolation {
-            trait_ref: trait_id,
-            input_tys: input_tys.to_vec(),
-            impl_span: span,
-        }));
+        return Err(internal_compilation_error!(
+            PublicTraitImplMentionsPrivateType {
+                trait_ref: trait_id,
+                private_ty,
+                impl_span: span,
+            }
+        ));
     }
 
     if let Some(output_ty) = undetermined_output(input_tys, output_tys, constraints) {
@@ -330,13 +332,6 @@ pub(crate) fn check_module_coherence(
         }
     }
     Ok(())
-}
-
-fn has_local_named_head(current: &Module, ty: Type) -> bool {
-    let ty_data = ty.data();
-    ty_data
-        .as_named()
-        .is_some_and(|named| current.owns_type_def(named.def))
 }
 
 fn has_anonymous_structural_head(ty: Type) -> bool {

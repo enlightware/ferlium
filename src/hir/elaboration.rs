@@ -211,12 +211,17 @@ fn trait_dictionary_node_kind(
     let impl_data = ctx.trait_solver.get_impl_data_by_id(dictionary);
     let ty = impl_data.dictionary_ty;
     let capture_schema = impl_data.dictionary_value.capture_schema().to_vec();
+    // The prerequisites of an impl of another module are solved in its private scope.
+    let scope = ctx.trait_solver.prerequisite_scope(dictionary);
+    ctx.trait_solver.push_private_impl_scope(scope);
     let capture_infos = extra_arg_kind_from_inst_data(
         &hir::FnInstData::new(capture_schema, Vec::new(), Vec::new()),
         span,
         ctx,
         arena,
-    )?;
+    );
+    ctx.trait_solver.pop_private_impl_scope(scope);
+    let capture_infos = capture_infos?;
     let captures = capture_infos
         .into_iter()
         .map(|(kind, ty, _)| arena.alloc(Node::new(kind, ty, no_effects(), span)))
@@ -315,15 +320,15 @@ pub(crate) fn trait_dictionary_evidence_binding(
     let definition = TraitDictionaryId::new(selected.module, selected.impl_id);
     let impl_data = ctx.trait_solver.get_impl_data_by_id(selected);
     let capture_schema = impl_data.dictionary_value.capture_schema().to_vec();
-    let mut captures = Vec::with_capacity(capture_schema.len());
-    for requirement in &capture_schema {
-        captures.push(evidence_binding_for_requirement(
-            arena,
-            requirement,
-            span,
-            ctx,
-        )?);
-    }
+    // The prerequisites of an impl of another module are solved in its private scope.
+    let scope = ctx.trait_solver.prerequisite_scope(selected);
+    ctx.trait_solver.push_private_impl_scope(scope);
+    let captures = capture_schema
+        .iter()
+        .map(|requirement| evidence_binding_for_requirement(arena, requirement, span, ctx))
+        .collect::<Result<Vec<_>, _>>();
+    ctx.trait_solver.pop_private_impl_scope(scope);
+    let captures = captures?;
     let requirement = DictionaryReq::new_trait_impl(trait_id, input_tys, output_tys, output_effs);
     let static_captures = captures
         .iter()

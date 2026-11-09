@@ -335,6 +335,12 @@ pub(crate) fn effect_arguments_message(
     message
 }
 
+/// How to satisfy the orphan rule.
+pub(crate) const ORPHAN_RULE_HINT: &str = "an implementation of a trait of another module needs an input whose outermost type is defined in this module, with no bare type parameter in the inputs before it; wrap a generic input in a type of this module, or declare the trait's parameters in another order";
+
+/// When an implementation is private.
+pub(crate) const PRIVATE_IMPL_HINT: &str = "an implementation is private only when its first input defined in this module, with no bare type parameter before it, is a private type; otherwise it is public, and its inputs and outputs must be public";
+
 /// Why requirements on effects do not keep two impls apart, if they might be meant to.
 pub(crate) fn overlap_effects_hint(effects_ignored: bool) -> &'static str {
     if effects_ignored {
@@ -1277,6 +1283,11 @@ pub enum CompilationErrorImpl<S: Scope> {
     TraitImplOrphanRuleViolation {
         trait_ref: S::TraitName,
         input_tys: Vec<S::Type>,
+        impl_span: Location,
+    },
+    PublicTraitImplMentionsPrivateType {
+        trait_ref: S::TraitName,
+        private_ty: S::Type,
         impl_span: Location,
     },
     TraitImplForAnonymousStructuralType {
@@ -2224,9 +2235,22 @@ impl FormatWith<SourceTable> for CompilationError {
             } => {
                 write!(
                     f,
-                    "Implementation of foreign trait `{}` over types `{}` violates the orphan rule in {}",
+                    "Implementation of foreign trait `{}` over types `{}` violates the orphan rule in {}: {ORPHAN_RULE_HINT}",
                     trait_ref,
                     input_tys.join(", "),
+                    fmt_span(impl_span)
+                )
+            }
+            PublicTraitImplMentionsPrivateType {
+                trait_ref,
+                private_ty,
+                impl_span,
+            } => {
+                write!(
+                    f,
+                    "Public implementation of trait `{}` mentions private type `{}` in {}: {PRIVATE_IMPL_HINT}",
+                    trait_ref,
+                    private_ty,
                     fmt_span(impl_span)
                 )
             }
@@ -3080,6 +3104,15 @@ impl CompilationError {
                     .zip(env.trait_def(trait_ref).input_type_names.iter())
                     .map(|(ty, name)| format!("{name} = {}", ty.format_with(env)))
                     .collect(),
+                impl_span,
+            }),
+            PublicTraitImplMentionsPrivateType {
+                trait_ref,
+                private_ty,
+                impl_span,
+            } => compilation_error!(PublicTraitImplMentionsPrivateType {
+                trait_ref: env.trait_name(trait_ref).to_string(),
+                private_ty: private_ty.format_with(env).to_string(),
                 impl_span,
             }),
             TraitImplForAnonymousStructuralType {

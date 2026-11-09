@@ -10,9 +10,9 @@ use crate::{
     CompilationError, DiagnosticSeverity, Location, SourceId,
     compiler::error::{
         CompilationErrorImpl, ImportKind, InfiniteTypeKind, InvalidRecordFieldContext,
-        MutabilityMustBeContext, MutabilityMustBeWhat, WhatIsNotAProductType,
-        WhichProductTypeIsNot, effect_arguments_message, format_output_effect_mismatches,
-        impl_effect_restriction_message, overlap_effects_hint,
+        MutabilityMustBeContext, MutabilityMustBeWhat, ORPHAN_RULE_HINT, PRIVATE_IMPL_HINT,
+        WhatIsNotAProductType, WhichProductTypeIsNot, effect_arguments_message,
+        format_output_effect_mismatches, impl_effect_restriction_message, overlap_effects_hint,
     },
     parser::location::SourceTable,
     types::effects::NamedEffectRow,
@@ -777,8 +777,20 @@ pub(super) fn compilation_error_to_data(
             vec![error_data_from_location(
                 impl_span,
                 format!(
-                    "Implementation of foreign trait `{trait_ref}` over types `{}` violates the orphan rule",
+                    "Implementation of foreign trait `{trait_ref}` over types `{}` violates the orphan rule: {ORPHAN_RULE_HINT}",
                     input_tys.join(", ")
+                ),
+            )]
+        }
+        PublicTraitImplMentionsPrivateType {
+            trait_ref,
+            private_ty,
+            impl_span,
+        } => {
+            vec![error_data_from_location(
+                impl_span,
+                format!(
+                    "Public implementation of trait `{trait_ref}` mentions private type `{private_ty}`: {PRIVATE_IMPL_HINT}"
                 ),
             )]
         }

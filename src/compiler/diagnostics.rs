@@ -347,6 +347,10 @@ pub(crate) fn diagnostics_from_error(
             impl_span: instantiation_span,
             ..
         }
+        | PublicTraitImplMentionsPrivateType {
+            impl_span: instantiation_span,
+            ..
+        }
         | TraitImplNativeOnly {
             impl_span: instantiation_span,
             ..

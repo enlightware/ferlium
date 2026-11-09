@@ -293,7 +293,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_native_concrete_impl(
         cast_trait_id,
-        [hash_type(), int_type()],
+        [int_type(), hash_type()],
         [],
         [b(NativeFallibleOutFnR::from_rust_infallible(hash_to_int)) as Function],
     );

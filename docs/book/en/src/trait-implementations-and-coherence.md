@@ -124,7 +124,7 @@ impl<T> Cast for <From = T, To = Wrapper<T>> {
 }
 ```
 
-Ferlium also accepts positional input bindings such as `impl<T> Cast for <T, Wrapper<T>> { ... }`.
+Ferlium also accepts positional input bindings such as `impl<T> Cast for <Wrapper<T>, T> { ... }`.
 Named bindings are usually easier to read, and they line up naturally with traits that also have output slots.
 
 ### Traits with output types and effects
@@ -250,13 +250,19 @@ impl<T> Describe for Wrapper<T> where T: Large {}
 ## The orphan rule
 
 Ferlium does not let an arbitrary module implement an existing foreign trait for arbitrary foreign input types.
-In practice, when you implement an existing trait, at least one input type in the impl must be a local named type that belongs to your module.
+When you implement a trait of another module, the impl needs a local named type among its inputs, with no bare type parameter before it, in the order the trait declares its inputs.
+That first local input owns the impl.
 
 This restriction is called the orphan rule.
 More generally:
 
 - a local trait may be implemented freely
-- a foreign trait requires at least one local named input type in the impl
+- a foreign trait requires a local named input type, with no bare type parameter before it
+
+For traits with several inputs, the order matters.
+`Cast` declares the target type first, so a module can convert anything into its own types, as in `impl<T> Cast for <To = Wrapper<T>, From = T>`.
+Converting its own type into anything, `impl<T> Cast for <To = T, From = Wrapper<T>>`, is rejected, because another module could own the same conversion through its own target type.
+To accept any input, wrap it in a local type.
 
 This is allowed, because `Counter` is local to the current module:
 
@@ -280,8 +286,7 @@ impl SizedSeq for int {
 }
 ```
 
-The orphan rule prevents unrelated modules from attaching competing impls to the same foreign types.
-Combined with coherence, it keeps trait resolution predictable across module boundaries, which is important for separate compilation.
+The orphan rule gives each trait application a single module that may implement it, so modules that do not know each other never provide competing impls.
 
 ## Effects do not choose an implementation
 

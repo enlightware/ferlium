@@ -1060,7 +1060,7 @@ fn emit_module_contents(
                 method_ids.push(output.add_function_anonymous(module_fn));
             }
             // Build the trait impl and fill it with placeholders.
-            let public = output.is_trait_impl_exportable(trait_id, &input_tys, &output_tys, others);
+            let public = output.is_trait_impl_exportable(trait_id, &input_tys, others);
             let associated_const_values = {
                 let solver = trait_solver_from_module!(output, others);
                 associated_const_values_for_source_impl(
@@ -1427,12 +1427,7 @@ impl ModuleEmission<'_> {
                 },
                 &trait_solver_from_module!(output, others),
             )?;
-            let public = output.is_trait_impl_exportable(
-                trait_id,
-                &emit_output.input_tys,
-                &emit_output.output_tys,
-                others,
-            );
+            let public = output.is_trait_impl_exportable(trait_id, &emit_output.input_tys, others);
             let associated_const_tys = trait_def_for_consts
                 .instantiate_associated_const_tys_for_tys(
                     &emit_output.input_tys,

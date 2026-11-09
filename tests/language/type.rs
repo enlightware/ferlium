@@ -642,7 +642,7 @@ fn trait_impl_for_specified() {
                     cmp(len(self.0), len(other.0))
                 }
             }
-            impl Cast for <int, S> {
+            impl Cast for <S, int> {
                 fn cast(self) -> S {
                     S(f"hello {self}")
                 }

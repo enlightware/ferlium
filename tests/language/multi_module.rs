@@ -5,7 +5,7 @@ use test_log::test;
 
 use ferlium::{
     CompilerSession, DiagnosticSeverity, ExecutionTarget, Path,
-    compiler::error::CompilationErrorImpl,
+    compiler::error::{CompilationErrorImpl, External},
     compiler::test_support::{
         module_compilation_revision, module_diagnostics_len, module_entry_exists,
         module_has_compiled_version, module_has_mir_artifacts, module_is_stale, module_latest_deps,
@@ -19,7 +19,7 @@ use ferlium::{
 use indoc::indoc;
 use ustr::ustr;
 
-use crate::harness::{TestSession, int};
+use crate::harness::{TestSession, int, string};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -2027,4 +2027,164 @@ fn value_to_string_renders_int_correctly() {
         .unwrap();
 
     assert_eq!(rendered, "42");
+}
+
+const CONV_MODULE: &str = "pub trait Conv<A, B> { fn conv(a: A, b: B) -> int; }\npub trait Use<Self> { fn use_(x: Self) -> int; }";
+
+/// Whether compiling `name` with `code` fails with an error that `matches` accepts.
+fn module_fails_with(
+    session: &mut TestSession,
+    name: &str,
+    code: &str,
+    matches: impl FnOnce(&CompilationErrorImpl<External>) -> bool,
+) -> bool {
+    let error = session
+        .try_compile_module(name, code)
+        .err()
+        .unwrap_or_else(|| panic!("compiling {name:?} should fail"));
+    matches(&error.into_inner())
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_impl_of_a_foreign_trait_is_owned_by_its_first_local_input() {
+    let a = "use c::Conv;\npub struct X;\nimpl<T> Conv for <A = X, B = T> { fn conv(a, b) { 1 } }";
+    let crossing =
+        "use c::Conv;\npub struct Y;\nimpl<T> Conv for <A = T, B = Y> { fn conv(a, b) { 2 } }";
+    // A bare type parameter before the local type could cross another module's impl, as `a`'s,
+    // whatever the order of compilation.
+    for with_a_first in [true, false] {
+        let mut session = TestSession::new();
+        compile_module(&mut session, "c", CONV_MODULE);
+        if with_a_first {
+            compile_module(&mut session, "a", a);
+        }
+        assert!(module_fails_with(
+            &mut session,
+            "b",
+            crossing,
+            |e| matches!(e, CompilationErrorImpl::TraitImplOrphanRuleViolation { .. })
+        ));
+    }
+    // Wrapping the generic input in a local type, or covering it, makes the impl own its
+    // applications.
+    let mut session = TestSession::new();
+    compile_module(&mut session, "c", CONV_MODULE);
+    compile_module(&mut session, "a", a);
+    compile_module(
+        &mut session,
+        "b",
+        "use c::Conv;\npub struct Y;\npub struct Src<T>(T)\nimpl<T> Conv for <A = Src<T>, B = Y> { fn conv(a, b) { 2 } }\nimpl<T> Conv for <A = [T], B = Y> { fn conv(a, b) { 3 } }",
+    );
+    assert_val_eq!(
+        session.run("c::Conv::conv(a::X, 0) * 100 + c::Conv::conv(b::Src(0), b::Y) * 10 + c::Conv::conv([0], b::Y)"),
+        int(123)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_impl_is_private_only_through_its_owning_input() {
+    // Private: owned by a private type, or of a private trait.
+    let mut session = TestSession::new();
+    compile_module(&mut session, "c", CONV_MODULE);
+    compile_module(
+        &mut session,
+        "a",
+        "use c::Conv;\nstruct X;\nstruct H;\npub struct W<T>(T)\ntrait Local<Self> { fn local(x: Self) -> int; }\nimpl<T> Conv for <A = X, B = T> { fn conv(a, b) { 1 } }\nimpl<T> Local for W<T> { fn local(x) { 2 } }\nimpl Local for H { fn local(x) { 3 } }",
+    );
+    // Public, as owned by a public constructor, but mentioning a private type.
+    for code in [
+        "use c::Conv;\nstruct Hidden;\npub struct W<T>(T)\nimpl<T> Conv for <A = W<Hidden>, B = T> { fn conv(a, b) { 1 } }",
+        "pub trait Get<Self |-> Out> { fn get(x: Self) -> Out; }\nstruct Hidden;\nimpl<T> Get for <Self = T |-> Out = Hidden> { fn get(x: T) -> Hidden { Hidden } }",
+        "pub trait Pair<A, B> { fn pair(a: A, b: B) -> int; }\nstruct Hidden;\nimpl<T> Pair for <A = T, B = Hidden> { fn pair(a, b) { 1 } }",
+    ] {
+        let mut session = TestSession::new();
+        compile_module(&mut session, "c", CONV_MODULE);
+        assert!(
+            module_fails_with(&mut session, "a", code, |e| matches!(
+                e,
+                CompilationErrorImpl::PublicTraitImplMentionsPrivateType { .. }
+            )),
+            "{code}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_private_impl_conflicting_with_a_dependency_is_rejected_in_its_module() {
+    let mut session = TestSession::new();
+    compile_module(
+        &mut session,
+        "c",
+        "pub trait Get<Self> { fn get(x: Self) -> int; }\nimpl<T> Get for T { fn get(x) { 1 } }",
+    );
+    assert!(module_fails_with(
+        &mut session,
+        "a",
+        "use c::Get;\nstruct X;\nimpl Get for X { fn get(x) { 2 } }",
+        |e| matches!(e, CompilationErrorImpl::OverlappingTraitImpls { .. })
+    ));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn evidence_built_in_a_private_scope_is_not_reused_outside() {
+    // `a`'s `Use` impl solves `Conv<X, T>` in `a`'s private scope; outside, `a`'s private impl
+    // is invisible, whether the private scope solved that application before or not.
+    let a = "use c::{Conv, Use};\nstruct X;\npub struct P<T>(T)\npub fn make_x() { X }\nimpl<T> Conv for <A = X, B = T> { fn conv(a, b) { 1 } }\nimpl<T> Use for P<T> where Conv<X, T> { fn use_(x) { conv(X, x.0) } }";
+    for program in [
+        "c::Conv::conv(a::make_x(), 0)",
+        "let i = c::Use::use_(a::P(0));\nlet o = c::Conv::conv(a::make_x(), 0);\no * 10 + i",
+    ] {
+        let mut session = TestSession::new();
+        compile_module(&mut session, "c", CONV_MODULE);
+        compile_module(&mut session, "a", a);
+        assert!(session.try_compile(program).is_err(), "{program}");
+    }
+    let mut session = TestSession::new();
+    compile_module(&mut session, "c", CONV_MODULE);
+    compile_module(&mut session, "a", a);
+    assert_val_eq!(session.run("c::Use::use_(a::P(0))"), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_consumer_requirement_does_not_inherit_a_providers_private_scope() {
+    // `a`'s public `Use` impl needs `a`'s private `Conv` impl, solved in `a`'s scope; the
+    // consumer's own request for the same application is solved in the consumer's scope, where
+    // that impl is invisible, whatever the order of the calls.
+    let c = "pub trait Conv<A, B |-> Out> { fn conv(a: A, b: B) -> Out; }\npub trait Use<Self |-> Out> { fn use_(x: Self) -> Out; }";
+    let a = "use c::{Conv, Use};\nstruct X;\npub struct P<T>(T)\npub fn make_x() { X }\nimpl<T> Conv for <A = X, B = T |-> Out = int> { fn conv(a: X, b: T) -> int { 1 } }\nimpl<T, O> Use for <Self = P<T> |-> Out = O> where Conv<A = X, B = T |-> Out = O> { fn use_(x: P<T>) -> O { conv(X, x.0) } }";
+    let session = || {
+        let mut session = TestSession::new();
+        compile_module(&mut session, "c", c);
+        compile_module(&mut session, "a", a);
+        session
+    };
+    assert_val_eq!(session().run("c::Use::use_(a::P(0))"), int(1));
+    for program in [
+        "c::Conv::conv(a::make_x(), 0)",
+        "let i = c::Use::use_(a::P(0));\nlet o = c::Conv::conv(a::make_x(), 0);\ni * 10 + o",
+        "let o = c::Conv::conv(a::make_x(), 0);\nlet i = c::Use::use_(a::P(0));\ni * 10 + o",
+        "fn f() -> int { let i = c::Use::use_(a::P(0)); let o = c::Conv::conv(a::make_x(), 0); i * 10 + o }\nf()",
+    ] {
+        assert!(session().try_compile(program).is_err(), "{program}");
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_derivation_made_elsewhere_does_not_override_a_private_impl_in_its_scope() {
+    // Outside `a`, `X<int>` is inspected by derivation; in `a`'s scope, by `a`'s private impl.
+    let a = "struct X<T>(T)\npub struct P<T>(T)\npub fn make_x() { X(0) }\nimpl<T> Inspect for X<T> { fn inspect(x: X<T>) -> string { \"custom\" } }\npub trait Use<Self> { fn use_(x: Self) -> string ! fallible; }\nimpl<T> Use for P<T> where X<T>: Inspect { fn use_(x: P<T>) -> string { inspect(X(x.0)) } }";
+    for program in [
+        "let o = inspect(a::make_x());\nlet i = a::Use::use_(a::P(0));\nf\"{o}/{i}\"",
+        "let i = a::Use::use_(a::P(0));\nlet o = inspect(a::make_x());\nf\"{o}/{i}\"",
+    ] {
+        let mut session = TestSession::new();
+        compile_module(&mut session, "a", a);
+        assert_val_eq!(session.run(program), string("X (0)/custom"), "{program}");
+    }
 }

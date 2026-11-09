@@ -35,8 +35,8 @@ impl Deriver for SelfCastDeriver {
         solver: &mut TraitSolver,
     ) -> Result<Option<TraitImplId>, InternalCompilationError> {
         use hir::hir_syn::*;
-        let from_ty = input_types[0];
-        let to_ty = input_types[1];
+        let to_ty = input_types[0];
+        let from_ty = input_types[1];
         if from_ty != to_ty {
             return Ok(None);
         }
@@ -82,17 +82,19 @@ impl Deriver for SelfCastDeriver {
 }
 
 pub fn cast_trait() -> Trait {
-    let var0_ty = Type::variable_id(0);
-    let var1_ty = Type::variable_id(1);
+    // The target comes first: implementations of `Cast` from other modules are owned by their
+    // first input defined there, so a module can convert anything into its own types.
+    let to_ty = Type::variable_id(0);
+    let from_ty = Type::variable_id(1);
     let unary_fn_ty = FnType::new_by_val(
-        [var0_ty],
-        var1_ty,
+        [from_ty],
+        to_ty,
         EffType::single_primitive(PrimitiveEffect::Fallible),
     );
     Trait::new(
         "Cast",
         "Conversion of a value from one type to another.",
-        ["From", "To"],
+        ["To", "From"],
         [],
         [(
             "cast",

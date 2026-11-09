@@ -609,6 +609,16 @@ pub(crate) enum DisplayFilter {
 // hash order would depend on the numbering of the types in their keys, making the cost of a
 // search and the first error it reports change with unrelated code.
 pub(crate) type ConcreteImpls = IndexMap<ConcreteTraitImplKey, LocalImplId, FxBuildHasher>;
+
+/// Where a generated dictionary comes from, which decides where it may serve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GeneratedImplSource {
+    /// Materialized from an impl of another module, `private` or not.
+    Impl { module: ModuleId, private: bool },
+    /// Derived as no impl applied, while the private impls of its trait of `scope`, another
+    /// module, were visible, if any: elsewhere, more or fewer impls may apply.
+    Derived { scope: Option<ModuleId> },
+}
 pub(crate) type BlanketTraitImpls = IndexMap<BlanketTraitImplSubKey, LocalImplId, FxBuildHasher>;
 pub(crate) type BlanketImpls = IndexMap<TraitId, BlanketTraitImpls, FxBuildHasher>;
 
@@ -633,6 +643,13 @@ pub struct TraitImpls {
     /// application it denotes.
     #[new(default)]
     pub(crate) application_key_to_id: Rc<ConcreteImpls>,
+    /// Where dictionaries generated from an impl of another module, or derived, come from: their
+    /// prerequisites are solved in the private scope they were made for, a dictionary from a
+    /// private impl serves only where that impl is visible, and a derived one only in the scope
+    /// it was derived in. Only meaningful while this module is compiled, so not part of its
+    /// snapshot.
+    #[new(default)]
+    pub(crate) generated_sources: Rc<FxHashMap<LocalImplId, GeneratedImplSource>>,
     #[new(default)]
     pub(crate) data: Rc<Vec<TraitImpl>>,
     /// Same-module impls not emitted yet, empty once the module is complete.

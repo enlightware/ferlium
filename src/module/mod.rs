@@ -2194,7 +2194,7 @@ impl Module {
         })
     }
 
-    fn is_type_public(&self, ty: Type, others: &Modules) -> bool {
+    pub(crate) fn is_type_public(&self, ty: Type, others: &Modules) -> bool {
         self.is_type_visible_by(ty, others, Module::is_type_def_public)
     }
 
@@ -2226,19 +2226,39 @@ impl Module {
             })
     }
 
-    /// Return whether a trait implementation can be exported outside this module.
+    /// The owning input of an implementation in this module: its first input whose outermost
+    /// type is defined in this module, with no bare type parameter among the inputs before it.
+    /// It owns every application the implementation matches.
+    pub(crate) fn owning_input(&self, input_tys: &[Type]) -> Option<Type> {
+        for &ty in input_tys {
+            let data = ty.data();
+            if data
+                .as_named()
+                .is_some_and(|named| self.owns_type_def(named.def))
+            {
+                return Some(ty);
+            }
+            if data.as_variable().is_some() {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// Return whether a trait implementation can be exported outside this module: unless its
+    /// trait is private, it is private exactly when its owning input is a private type, so that
+    /// no other module can implement or reach the applications it matches.
     pub(crate) fn is_trait_impl_exportable(
         &self,
         trait_id: TraitId,
         input_tys: &[Type],
-        output_tys: &[Type],
         others: &Modules,
     ) -> bool {
         self.is_trait_public(trait_id, others)
-            && input_tys
-                .iter()
-                .chain(output_tys)
-                .all(|ty| self.is_type_public(*ty, others))
+            && self.owning_input(input_tys).is_none_or(|ty| {
+                let def = ty.data().as_named().expect("an owning input is named").def;
+                self.is_type_def_public(def)
+            })
     }
 
     /// Return all own definitions in this module.

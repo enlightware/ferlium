@@ -24,12 +24,12 @@ use crate::{
     module::{
         self, BlanketImpls, BlanketTraitImplSubKey, BlanketTraitImpls, CandidateSearch,
         ConcreteImpls, ConcreteTraitImplKey, CurrentTypeItems, DefTable,
-        DictionaryEntryRequirements, FunctionId, LocalDecl, LocalDeclId, LocalFunctionId,
-        LocalImplId, LocalTraitId, Module, ModuleEnv, ModuleId, PendingFunctionBody,
-        PendingFunctionCollector, PendingModuleFunction, ProjectionKey, QualifiedNameEnv,
-        ResolvedValueLayout, TraitDictionary, TraitId, TraitImpl, TraitImplId, TraitImpls,
-        TypeDefId, Visibility, build_capturing_dictionary_value, build_dictionary_value,
-        dictionary_capture_plan, id::Id,
+        DictionaryEntryRequirements, FunctionId, GeneratedImplSource, LocalDecl, LocalDeclId,
+        LocalFunctionId, LocalImplId, LocalTraitId, Module, ModuleEnv, ModuleId,
+        PendingFunctionBody, PendingFunctionCollector, PendingModuleFunction, ProjectionKey,
+        QualifiedNameEnv, ResolvedValueLayout, TraitDictionary, TraitId, TraitImpl, TraitImplId,
+        TraitImpls, TypeDefId, Visibility, build_capturing_dictionary_value,
+        build_dictionary_value, dictionary_capture_plan, id::Id,
     },
     std::{
         STD_MODULE_ID,
@@ -123,6 +123,9 @@ pub struct TraitSolver<'a> {
     private_impl_scope: Vec<ModuleId>,
     /// Additional module whose private impls are visible to a privileged scratch expression.
     privileged_impl_module: Option<ModuleId>,
+    /// For each other module looked at, the traits it has private impls of, which a derivation
+    /// made in its private scope depends on.
+    private_impl_traits: FxHashMap<ModuleId, Rc<FxHashSet<TraitId>>>,
     /// Successful fully-concrete, unconstrained output probes made during inference or defaulting.
     ///
     /// This is deliberately per-solver. A [`TraitSolverProbe`] can hide private implementations
@@ -170,8 +173,118 @@ impl<'a> TraitSolver<'a> {
             private_impl_scope: Vec::new(),
             selecting_by_structure: false,
             privileged_impl_module: None,
+            private_impl_traits: FxHashMap::default(),
             unmaterialized_output_cache: FxHashMap::default(),
             quantified_request_effect_vars: FxHashSet::default(),
+        }
+    }
+
+    /// The private impl scope in which the prerequisites of `impl_id` are solved: that of the
+    /// module of the impl it comes from, if it is not the current one.
+    pub(crate) fn prerequisite_scope(&self, impl_id: TraitImplId) -> Option<ModuleId> {
+        if impl_id.module != self.current_type_items.module.id {
+            return Some(impl_id.module);
+        }
+        match self.impls.generated_sources.get(&impl_id.impl_id)? {
+            GeneratedImplSource::Impl { module, .. } => Some(*module),
+            GeneratedImplSource::Derived { scope } => *scope,
+        }
+    }
+
+    /// Record that the generated dictionary `local_impl_id` comes from `impl_id` of `module`, if
+    /// that is another module.
+    fn record_generated_source(
+        &mut self,
+        local_impl_id: LocalImplId,
+        module: Option<ModuleId>,
+        impl_id: LocalImplId,
+    ) {
+        let Some(module) = module else {
+            return;
+        };
+        let private = !self
+            .others
+            .get(module)
+            .and_then(|entry| entry.module())
+            .is_some_and(|imp_module| imp_module.impls.data[impl_id.as_index()].public);
+        Rc::make_mut(&mut self.impls.generated_sources)
+            .insert(local_impl_id, GeneratedImplSource::Impl { module, private });
+    }
+
+    /// The other module whose private impls are visible besides the current module's, if any:
+    /// while solving an impl's prerequisites in its module's private scope, or in a privileged
+    /// scratch scope.
+    fn foreign_private_scope(&self) -> Option<ModuleId> {
+        let current = self.current_type_items.module.id;
+        self.private_impl_scope
+            .last()
+            .copied()
+            .or(self.privileged_impl_module)
+            .filter(|&module| module != current)
+    }
+
+    /// The other module whose private impls of `trait_id` are visible besides the current
+    /// module's, if any: a derivation of `trait_id` depends on these, and only on these.
+    fn derivation_scope(&mut self, trait_id: TraitId) -> Option<ModuleId> {
+        let module_id = self.foreign_private_scope()?;
+        let others = self.others;
+        let traits = self
+            .private_impl_traits
+            .entry(module_id)
+            .or_insert_with(|| {
+                let impls = &others
+                    .get(module_id)
+                    .and_then(|entry| entry.module())
+                    .expect("a private impl scope is a compiled module")
+                    .impls;
+                let private = |id: &LocalImplId| !impls.data[id.as_index()].public;
+                let concrete = impls
+                    .concrete_key_to_id
+                    .iter()
+                    .filter(|(_, id)| private(id))
+                    .map(|(key, _)| key.trait_id);
+                let blanket = impls
+                    .blanket_key_to_id
+                    .iter()
+                    .filter(|(_, blanket_impls)| blanket_impls.values().any(private))
+                    .map(|(trait_id, _)| *trait_id);
+                Rc::new(concrete.chain(blanket).collect())
+            });
+        traits.contains(&trait_id).then_some(module_id)
+    }
+
+    /// Whether the generated dictionary `local_impl_id` may serve here: one materialized from a
+    /// private impl of another module serves only where that module's private impls are visible,
+    /// and a derived one only where the same impls of its trait are visible as when it was
+    /// derived, as there a visible impl takes precedence over the derivation.
+    fn generated_impl_is_visible(&mut self, local_impl_id: LocalImplId) -> bool {
+        match self.impls.generated_sources.get(&local_impl_id).copied() {
+            None => true,
+            Some(GeneratedImplSource::Impl { module, private }) => {
+                !private
+                    || self.private_impl_scope.last() == Some(&module)
+                    || self.privileged_impl_module == Some(module)
+            }
+            Some(GeneratedImplSource::Derived { scope }) => {
+                let trait_id = self.impls.data[local_impl_id.as_index()].trait_id;
+                self.derivation_scope(trait_id) == scope
+            }
+        }
+    }
+
+    /// Make the private impls of `module`, if any, visible until the matching pop; for callers
+    /// reaching the solver through a context.
+    pub(crate) fn push_private_impl_scope(&mut self, module: Option<ModuleId>) {
+        if let Some(module) = module {
+            self.private_impl_scope.push(module);
+        }
+    }
+
+    /// Undo `push_private_impl_scope(module)`.
+    pub(crate) fn pop_private_impl_scope(&mut self, module: Option<ModuleId>) {
+        if let Some(module) = module {
+            let popped = self.private_impl_scope.pop();
+            debug_assert_eq!(popped, Some(module));
         }
     }
 
@@ -1079,6 +1192,7 @@ pub(crate) struct DerivedImplSnapshot {
     blanket_key_to_id: Rc<BlanketImpls>,
     generated_value_key_to_id: Rc<FxHashMap<Vec<Type>, LocalImplId>>,
     application_key_to_id: Rc<ConcreteImpls>,
+    generated_sources: Rc<FxHashMap<LocalImplId, GeneratedImplSource>>,
     impl_data_len: usize,
     new_function_len: usize,
 }
@@ -2870,6 +2984,7 @@ impl<'a> TraitSolver<'a> {
             blanket_key_to_id: self.impls.blanket_key_to_id.clone(),
             generated_value_key_to_id: self.impls.generated_value_key_to_id.clone(),
             application_key_to_id: self.impls.application_key_to_id.clone(),
+            generated_sources: self.impls.generated_sources.clone(),
             impl_data_len: self.impls.data.len(),
             new_function_len: self.fn_collector.new_elements.len(),
         }
@@ -2880,6 +2995,7 @@ impl<'a> TraitSolver<'a> {
         self.impls.blanket_key_to_id = snapshot.blanket_key_to_id;
         self.impls.generated_value_key_to_id = snapshot.generated_value_key_to_id;
         self.impls.application_key_to_id = snapshot.application_key_to_id;
+        self.impls.generated_sources = snapshot.generated_sources;
         if self.impls.data.len() != snapshot.impl_data_len {
             Rc::make_mut(&mut self.impls.data).truncate(snapshot.impl_data_len);
         }
@@ -3307,8 +3423,10 @@ impl<'a> TraitSolver<'a> {
     /// Only public implementations from other modules are considered.
     /// If found in other modules, the value dependencies are updated.
     pub fn get_concrete_impl(&mut self, key: &ConcreteTraitImplKey) -> Option<TraitImplId> {
-        if let Some(id) = self.impls.concrete_key_to_id.get(key) {
-            return Some(TraitImplId::new(self.current_type_items.module.id, *id));
+        if let Some(&id) = self.impls.concrete_key_to_id.get(key)
+            && self.generated_impl_is_visible(id)
+        {
+            return Some(TraitImplId::new(self.current_type_items.module.id, id));
         }
         let found = self.others.enumerates().find_map(|(module_id, entry, _)| {
             entry.module().and_then(|module| {
@@ -3845,6 +3963,7 @@ impl<'a> TraitSolver<'a> {
                 .application_key_to_id
                 .get(&canonical_key)
                 .copied()
+                && self.generated_impl_is_visible(local_impl_id)
             {
                 return Ok(TraitImplId::new(
                     self.current_type_items.module.id,
@@ -4051,6 +4170,11 @@ impl<'a> TraitSolver<'a> {
         };
         for derive in derivers {
             if let Some(impl_id) = derive.derive_impl(trait_id, input_tys, fn_span, arena, self)? {
+                if impl_id.module == self.current_type_items.module.id {
+                    let scope = self.derivation_scope(trait_id);
+                    Rc::make_mut(&mut self.impls.generated_sources)
+                        .insert(impl_id.impl_id, GeneratedImplSource::Derived { scope });
+                }
                 return Ok(impl_id);
             } else {
                 log::trace!(
@@ -4658,6 +4782,7 @@ impl<'a> TraitSolver<'a> {
             );
             let resulting_key =
                 application_key(trait_id, input_tys, Some(&output_tys), Some(&output_effs));
+            self.record_generated_source(local_impl_id, imp_module_id, impl_id);
             for key in [requested_key, resulting_key] {
                 Rc::make_mut(&mut self.impls.application_key_to_id).insert(key, local_impl_id);
             }
@@ -4703,6 +4828,7 @@ impl<'a> TraitSolver<'a> {
             &output_effs,
             associated_const_values,
         );
+        self.record_generated_source(local_impl_id, imp_module_id, impl_id);
 
         // Now that recursive self-references can resolve to the reserved impl,
         // materialize the deferred constraint dictionaries.

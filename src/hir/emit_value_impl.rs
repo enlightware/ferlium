@@ -371,7 +371,7 @@ pub(super) fn emit_auto_value_impls(
                 .map(|index| EffType::single_variable(EffectVar::new(index as u32)))
                 .collect::<Vec<_>>(),
         );
-        let public = output.is_trait_impl_exportable(value_trait_id, &[input_ty], &[], others);
+        let public = output.is_trait_impl_exportable(value_trait_id, &[input_ty], others);
         let mut constraints = {
             let env = ModuleEnv::new(output, others);
             auto_value_constraints(type_def, input_ty, &env)

@@ -48,7 +48,9 @@ pub trait HasArea<Self> {
 ```
 
 The `pub` modifier can be used on functions, type aliases, structs, enums, and traits.
-Trait implementations do not have their own visibility modifier: an implementation is available across modules only when the trait and the types involved are themselves visible.
+Trait implementations do not have their own visibility modifier.
+An implementation of a public trait is public, unless its owning input, its first input defined in its module, is a private type: then only that module can use it.
+A public implementation cannot mention private types in its inputs or outputs.
 
 Private definitions are still visible inside their own module.
 This also applies when the host evaluates an expression in the context of an existing module.
