@@ -363,8 +363,15 @@ whereClause {
 }
 
 whereConstraint {
-    headedTraitConstraint
+    Path '<' whereConstraintArgs '>' (':' Path associatedTypeBindings?)?
     | constraintSubject ':' Path associatedTypeBindings?
+}
+
+// A trait head (`Combine<A, B>`) and a type application with its trait (`Odd<T>: Value`) start
+// alike, so they share their arguments and differ only after the `>`.
+whereConstraintArgs {
+    typeArgContent constraintOutputSection?
+    | namedConstraintInputList constraintOutputSection?
 }
 
 headedTraitConstraint {
