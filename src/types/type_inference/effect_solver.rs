@@ -426,7 +426,7 @@ impl EffectSolver {
         match (eff1.to_single_variable(), eff2.to_single_variable()) {
             (None, None) => Ok(eff1.union(eff2)),
             (var1, _) => {
-                self.unify_same_effect(eff1.clone(), span, eff2.clone(), span)?;
+                self.unify_same_effect(eff1, span, eff2, span)?;
                 Ok(if var1.is_some() && eff2.to_single_variable().is_none() {
                     eff2.clone()
                 } else {
@@ -506,16 +506,16 @@ impl EffectSolver {
     /// inclusions.
     pub(crate) fn unify_same_effect(
         &mut self,
-        current: EffType,
+        current: &EffType,
         current_span: Location,
-        target: EffType,
+        target: &EffType,
         target_span: Location,
     ) -> Result<(), InternalCompilationError> {
-        self.ensure_effect_vars(&current);
-        self.ensure_effect_vars(&target);
+        self.ensure_effect_vars(current);
+        self.ensure_effect_vars(target);
         log::trace!("effect equality: {current} = {target}");
-        let current_row = self.resolve(&current);
-        let target_row = self.resolve(&target);
+        let current_row = self.resolve(current);
+        let target_row = self.resolve(target);
         let (current_atoms, current_vars) = self.split_atoms(&current_row);
         let (target_atoms, target_vars) = self.split_atoms(&target_row);
         match (current_vars.as_slice(), target_vars.as_slice()) {
@@ -536,20 +536,8 @@ impl EffectSolver {
             }
             _ => {}
         }
-        self.add_effect_inclusion(
-            current.clone(),
-            current_span,
-            target.clone(),
-            target_span,
-            EffectConstraintOrigin::Inference,
-        )?;
-        self.add_effect_inclusion(
-            target,
-            target_span,
-            current,
-            current_span,
-            EffectConstraintOrigin::Inference,
-        )
+        self.add_effect_dep(current, current_span, target, target_span)?;
+        self.add_effect_dep(target, target_span, current, current_span)
     }
 
     pub(crate) fn add_effect_dep(
@@ -1133,7 +1121,7 @@ impl EffectSolver {
         if a_class.alias.is_some() || b_class.alias.is_some() {
             let a_row = EffType::single_variable(a_root);
             let b_row = EffType::single_variable(b_root);
-            return self.unify_same_effect(a_row, span, b_row, span);
+            return self.unify_same_effect(&a_row, span, &b_row, span);
         }
         if a_class.rigid || b_class.rigid {
             // A rigid variable is an atom: the other one must be exactly that atom.
@@ -1562,9 +1550,9 @@ mod tests {
             );
             solver
                 .unify_same_effect(
-                    EffType::single_variable(fresh),
+                    &EffType::single_variable(fresh),
                     span,
-                    EffType::empty(),
+                    &EffType::empty(),
                     span,
                 )
                 .unwrap();
@@ -1581,7 +1569,7 @@ mod tests {
 
         solver.add_effect_dep(&source, span, &target, span).unwrap();
         solver
-            .unify_same_effect(source.clone(), span, target, span)
+            .unify_same_effect(&source, span, &target, span)
             .unwrap();
         solver
             .add_effect_dep(&source, span, &EffType::empty(), span)
@@ -1603,7 +1591,7 @@ mod tests {
             let b = solver.fresh_var_ty();
             let equality = |solver: &mut EffectSolver| {
                 solver
-                    .unify_same_effect(read().union(&a), span, read().union(&b), span)
+                    .unify_same_effect(&read().union(&a), span, &read().union(&b), span)
                     .unwrap();
             };
             if equality_first {
@@ -1653,7 +1641,7 @@ mod tests {
             .add_effect_dep(&source, span, &EffType::empty(), span)
             .unwrap();
         solver
-            .unify_same_effect(source, span, fallible(), span)
+            .unify_same_effect(&source, span, &fallible(), span)
             .unwrap_err();
     }
 
@@ -1668,13 +1656,13 @@ mod tests {
             .add_effect_dep(&source, span, &dependency, span)
             .unwrap();
         solver
-            .unify_same_effect(dependency, span, EffType::empty(), span)
+            .unify_same_effect(&dependency, span, &EffType::empty(), span)
             .unwrap();
         solver
             .add_effect_dep(&source, span, &EffType::empty(), span)
             .unwrap();
         solver
-            .unify_same_effect(source, span, fallible(), span)
+            .unify_same_effect(&source, span, &fallible(), span)
             .unwrap_err();
     }
 
@@ -1710,7 +1698,7 @@ mod tests {
                 .unwrap();
         }
         solver
-            .unify_same_effect(EffType::single_variable(alias), span, fallible(), span)
+            .unify_same_effect(&EffType::single_variable(alias), span, &fallible(), span)
             .unwrap();
 
         solver.expand_pending_dependencies().unwrap_err();
@@ -1829,17 +1817,17 @@ mod tests {
 
         solver
             .unify_same_effect(
-                EffType::multiple_variable(&[left, right]),
+                &EffType::multiple_variable(&[left, right]),
                 span,
-                output.clone(),
+                &output,
                 span,
             )
             .unwrap();
         solver
-            .unify_same_effect(EffType::single_variable(left), span, read(), span)
+            .unify_same_effect(&EffType::single_variable(left), span, &read(), span)
             .unwrap();
         solver
-            .unify_same_effect(EffType::single_variable(right), span, write(), span)
+            .unify_same_effect(&EffType::single_variable(right), span, &write(), span)
             .unwrap();
         solver.finalize().unwrap();
 
@@ -1859,17 +1847,17 @@ mod tests {
 
         solver
             .unify_same_effect(
-                EffType::multiple_variable(&[left_a, left_b]),
+                &EffType::multiple_variable(&[left_a, left_b]),
                 span,
-                EffType::multiple_variable(&[right_a, right_b]),
+                &EffType::multiple_variable(&[right_a, right_b]),
                 span,
             )
             .unwrap();
         solver
-            .unify_same_effect(EffType::single_variable(right_a), span, read(), span)
+            .unify_same_effect(&EffType::single_variable(right_a), span, &read(), span)
             .unwrap();
         solver
-            .unify_same_effect(EffType::single_variable(right_b), span, write(), span)
+            .unify_same_effect(&EffType::single_variable(right_b), span, &write(), span)
             .unwrap();
         solver.finalize().unwrap();
 
@@ -1912,7 +1900,7 @@ mod tests {
             let mut constraints: Vec<Constraint<'_>> = vec![
                 Box::new(|solver| {
                     solver
-                        .unify_same_effect(fallible().union(&var), span, fallible(), span)
+                        .unify_same_effect(&fallible().union(&var), span, &fallible(), span)
                         .unwrap()
                 }),
                 Box::new(|solver| {

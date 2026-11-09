@@ -519,9 +519,9 @@ impl UnifiedTypeInference {
                     expected,
                     expected_span,
                 } => unified_ty_inf.unify_same_effect(
-                    current,
+                    &current,
                     current_span,
-                    expected,
+                    &expected,
                     expected_span,
                 )?,
             }
@@ -950,7 +950,12 @@ impl UnifiedTypeInference {
                     }
                 }
                 if sub_or_same == SameType {
-                    self.unify_same_effect(cur.effects, current_span, exp.effects, expected_span)?;
+                    self.unify_same_effect(
+                        &cur.effects,
+                        current_span,
+                        &exp.effects,
+                        expected_span,
+                    )?;
                 } else {
                     // Covariant effects.
                     self.add_effect_dep(&cur.effects, current_span, &exp.effects, expected_span)?;
@@ -1077,7 +1082,7 @@ impl UnifiedTypeInference {
                     "A Named type must have the same number of effect arguments for all its instances"
                 );
                 for (cur_eff, exp_eff) in cur.effect_params.into_iter().zip(exp.effect_params) {
-                    self.unify_same_effect(cur_eff, current_span, exp_eff, expected_span)?;
+                    self.unify_same_effect(&cur_eff, current_span, &exp_eff, expected_span)?;
                 }
                 Ok(())
             }
@@ -1348,7 +1353,7 @@ impl UnifiedTypeInference {
                     output_effs.iter().zip(given_effects).zip(&mut bounds)
                 {
                     if expected.has_variables() {
-                        self.unify_same_effect(actual.clone(), span, expected, span)?;
+                        self.unify_same_effect(actual, span, &expected, span)?;
                     } else {
                         bounds.push((expected, span));
                     }
@@ -1381,7 +1386,7 @@ impl UnifiedTypeInference {
                         continue;
                     }
                 }
-                self.unify_same_effect(actual.clone(), span, bound, span)?;
+                self.unify_same_effect(actual, span, &bound, span)?;
             }
             return Ok(GivenMatch::Resolved);
         }
@@ -1906,7 +1911,7 @@ impl UnifiedTypeInference {
                         if !effect.has_variables() {
                             outputs.bounds[index].push((effect, site));
                         } else if let Some((learned, learned_site)) = &outputs.learned[index] {
-                            self.unify_same_effect(effect, site, learned.clone(), *learned_site)?;
+                            self.unify_same_effect(&effect, site, learned, *learned_site)?;
                         } else {
                             outputs.learned[index] = Some((effect, site));
                         }
@@ -1931,7 +1936,7 @@ impl UnifiedTypeInference {
                     continue;
                 };
                 if let Some((learned, learned_site)) = learned {
-                    self.unify_same_effect(learned, learned_site, bound.0, bound.1)?;
+                    self.unify_same_effect(&learned, learned_site, &bound.0, bound.1)?;
                 }
             }
         }
@@ -1955,7 +1960,7 @@ impl UnifiedTypeInference {
                 EffectPolarity::Positive => combined.difference(&combined.difference(bound)),
                 EffectPolarity::Negative => combined.union(bound),
                 EffectPolarity::Invariant => {
-                    self.unify_same_effect(bound.clone(), *site, first.clone(), *first_site)?;
+                    self.unify_same_effect(bound, *site, first, *first_site)?;
                     combined
                 }
             };
@@ -2038,9 +2043,9 @@ impl UnifiedTypeInference {
             return Ok(());
         };
         self.unify_same_effect(
-            existing.effects.clone(),
+            &existing.effects,
             existing_span,
-            incoming.effects.clone(),
+            &incoming.effects,
             incoming_span,
         )
     }
@@ -2621,7 +2626,7 @@ impl UnifiedTypeInference {
                 EffectPolarity::Positive => self.add_effect_dep(exp_eff, span, cur_eff, span)?,
                 EffectPolarity::Negative => self.add_effect_dep(cur_eff, span, exp_eff, span)?,
                 EffectPolarity::Invariant => {
-                    self.unify_same_effect(cur_eff.clone(), span, exp_eff.clone(), span)?
+                    self.unify_same_effect(cur_eff, span, exp_eff, span)?
                 }
             }
         }
@@ -2631,9 +2636,9 @@ impl UnifiedTypeInference {
     /// Make current and target the same effect type.
     pub fn unify_same_effect(
         &mut self,
-        current: EffType,
+        current: &EffType,
         current_span: Location,
-        target: EffType,
+        target: &EffType,
         target_span: Location,
     ) -> Result<(), InternalCompilationError> {
         self.effects
@@ -2666,12 +2671,7 @@ impl UnifiedTypeInference {
             return Ok(());
         };
         if sub_or_same == SubOrSameType::SameType {
-            self.unify_same_effect(
-                current.effects.clone(),
-                current_span,
-                target.effects.clone(),
-                target_span,
-            )
+            self.unify_same_effect(&current.effects, current_span, &target.effects, target_span)
         } else {
             self.add_effect_dep(&current.effects, current_span, &target.effects, target_span)
         }

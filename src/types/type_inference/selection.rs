@@ -1089,9 +1089,9 @@ mod tests {
         inference.rollback_to(snapshot);
         inference
             .unify_same_effect(
-                effect,
+                &effect,
                 span,
-                EffType::single_primitive(PrimitiveEffect::Write),
+                &EffType::single_primitive(PrimitiveEffect::Write),
                 span,
             )
             .unwrap();

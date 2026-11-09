@@ -604,7 +604,7 @@ mod tests {
 
         let before_effect = inference.constraints_normalized_at;
         inference
-            .unify_same_effect(effect, span, EffType::empty(), span)
+            .unify_same_effect(&effect, span, &EffType::empty(), span)
             .unwrap();
         inference.normalize_remaining_constraints();
         assert_ne!(inference.constraints_normalized_at, before_effect);
@@ -647,9 +647,9 @@ mod tests {
 
         unified
             .unify_same_effect(
-                EffType::single_variable(var),
+                &EffType::single_variable(var),
                 span,
-                recursive_effect.clone(),
+                &recursive_effect,
                 span,
             )
             .unwrap();
@@ -672,18 +672,18 @@ mod tests {
 
         unified
             .unify_same_effect(
-                EffType::single_variable(first),
+                &EffType::single_variable(first),
                 span,
-                EffType::single_primitive(PrimitiveEffect::Read)
+                &EffType::single_primitive(PrimitiveEffect::Read)
                     .union(&EffType::single_variable(second)),
                 span,
             )
             .unwrap();
         unified
             .unify_same_effect(
-                EffType::single_variable(second),
+                &EffType::single_variable(second),
                 span,
-                EffType::single_variable(first),
+                &EffType::single_variable(first),
                 span,
             )
             .unwrap();

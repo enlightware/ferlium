@@ -1768,7 +1768,7 @@ impl<'a> TraitSolver<'a> {
                 ty_inf.add_effect_dep(requested_eff, fn_span, impl_eff, fn_span)
             }
             EffectPolarity::Invariant => {
-                ty_inf.unify_same_effect(impl_eff.clone(), fn_span, requested_eff.clone(), fn_span)
+                ty_inf.unify_same_effect(impl_eff, fn_span, requested_eff, fn_span)
             }
         }
     }
