@@ -1354,9 +1354,14 @@ pub(crate) fn type_at<P: HirPhase>(
     arena[node_id].type_at(arena, pos)
 }
 
-pub(crate) fn all_unbound_ty_vars(arena: &NodeArena, node_id: NodeId) -> UnboundTyVars {
+/// The type variables of the node types of `bodies`, with where they appear.
+pub(crate) fn all_unbound_ty_vars<'a>(
+    bodies: impl IntoIterator<Item = (&'a NodeArena, NodeId)>,
+) -> UnboundTyVars {
     let mut unbound = IndexMap::new();
-    unbound_ty_vars(arena, node_id, &mut unbound, &[]);
+    for (arena, node_id) in bodies {
+        unbound_ty_vars(arena, node_id, &mut unbound, &[]);
+    }
     unbound
 }
 

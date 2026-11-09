@@ -78,7 +78,10 @@ use crate::{
     std::{
         STD_MODULE_ID,
         core_traits_names::VALUE_TRAIT_NAME,
-        value::{is_compiler_provided_value_trait_application, is_value_trait},
+        value::{
+            generated_value_evidence_types, is_compiler_provided_value_trait_application,
+            is_value_trait,
+        },
     },
     types::{
         coherence::{check_module_coherence, check_trait_impl},
@@ -1480,6 +1483,43 @@ pub(super) type PubTypeConstraintPtr = *const PubTypeConstraint;
 
 pub(super) fn constraint_ptr(c: &PubTypeConstraint) -> PubTypeConstraintPtr {
     c as *const PubTypeConstraint
+}
+
+/// Default to `never` the type variables of `bodies` that nothing determines, such as the type of
+/// the parameter of a closure that is never called. The `protected` variables are those of the
+/// inference unit's signatures.
+pub(super) fn default_unconstrained_types_to_never<'a>(
+    ty_inf: &mut UnifiedTypeInference,
+    bodies: impl IntoIterator<Item = (&'a hir::NodeArena, hir::NodeId)>,
+    protected: impl IntoIterator<Item = TypeVar>,
+    module_env: ModuleEnv<'_>,
+) -> Result<(), InternalCompilationError> {
+    ty_inf.default_unconstrained_to_never(
+        hir::all_unbound_ty_vars(bodies)
+            .into_iter()
+            .map(|(var, ctxs)| (var, ctxs.first().1)),
+        protected,
+        |constraint| dependent_ty_vars(constraint, module_env),
+    )
+}
+
+/// The type variables that `constraint` depends on. A `Value` dictionary that the compiler derives
+/// depends only on the external evidence it is built from: a function type's on none.
+fn dependent_ty_vars(constraint: &PubTypeConstraint, module_env: ModuleEnv<'_>) -> Vec<TypeVar> {
+    if let PubTypeConstraint::HaveTrait {
+        trait_id,
+        input_tys,
+        output_tys,
+        ..
+    } = constraint
+        && let [input_ty] = input_tys.as_slice()
+        && output_tys.is_empty()
+        && is_value_trait(*trait_id, module_env.trait_def(*trait_id))
+        && let Some(evidence) = generated_value_evidence_types(*input_ty, &module_env)
+    {
+        return evidence.iter().flat_map(|ty| ty.inner_ty_vars()).collect();
+    }
+    constraint.inner_ty_vars()
 }
 
 pub(super) fn is_compiler_provided_value_constraint(

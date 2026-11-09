@@ -116,8 +116,12 @@ This is structural identity, not an analysis equating all uninhabited types.
 
 For an unresolved inference variable `a`, `Never <: a` imposes no restriction; another branch
 can determine its type. Conversely, `a <: Never` and equality with `Never` bind `a` to `Never`.
-Defaulting unconstrained diverging returns and unused variant payloads remains a separate step
-with its own eligibility checks. Bottom is neither an inference wildcard nor a universal default.
+Defaulting to `Never` happens in separate steps with their own eligibility checks: unconstrained
+diverging returns, unused variant payloads, and finally type variables of a body or its closures
+that no signature reaches and no obligation depends on, such as the parameter of a closure never
+called. A `Value` obligation depends on a variable only through the evidence its dictionary needs,
+so the element type of an empty array stays undetermined. Bottom is neither an inference wildcard
+nor a universal default.
 In particular, selection does not resolve incompatible upper bounds, such as `a <: int` and
 `a <: [b]` from `a[a]`, to their meet `Never` or to a type containing it: that is a type error.
 

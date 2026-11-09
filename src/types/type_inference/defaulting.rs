@@ -1004,6 +1004,52 @@ impl UnifiedTypeInference {
         }
     }
 
+    /// Default to `never` the type variables in `candidates` that nothing determines, after every
+    /// other defaulting. Such a variable is internal to the inference unit: it is not connected
+    /// through remaining constraints to the `protected` variables of the unit's signatures, no
+    /// remaining bound mentions it, and no remaining constraint depends on it, as told by
+    /// `dependent_ty_vars`. The default is unified, so every obligation mentioning the variable is
+    /// then solved with `never`.
+    pub(crate) fn default_unconstrained_to_never(
+        &mut self,
+        candidates: impl IntoIterator<Item = (TypeVar, Location)>,
+        protected: impl IntoIterator<Item = TypeVar>,
+        dependent_ty_vars: impl Fn(&PubTypeConstraint) -> Vec<TypeVar>,
+    ) -> Result<(), InternalCompilationError> {
+        self.normalize_remaining_constraints();
+        let protected = protected
+            .into_iter()
+            .flat_map(|var| self.substitute_in_type(Type::variable(var)).inner_ty_vars())
+            .collect::<Vec<_>>();
+        let mut blocked: FxHashSet<TypeVar> = protected.iter().copied().collect();
+        let constraints = self.remaining_constraints();
+        for constraint in
+            ConstraintBoundary::from_seed_ty_vars(protected).accessible_constraints(constraints)
+        {
+            blocked.extend(constraint.inner_ty_vars());
+        }
+        for constraint in constraints {
+            blocked.extend(dependent_ty_vars(constraint));
+        }
+        let bound_tys = self
+            .bounds
+            .relations()
+            .flat_map(|bound| [bound.lower, bound.upper])
+            .collect::<Vec<_>>();
+        for ty in bound_tys {
+            blocked.extend(self.substitute_in_type(ty).inner_ty_vars());
+        }
+        let mut defaulted = FxHashSet::default();
+        for (var, span) in candidates {
+            for var in self.substitute_in_type(Type::variable(var)).inner_ty_vars() {
+                if !blocked.contains(&var) && defaulted.insert(var) {
+                    self.unify_same_type(Type::variable(var), span, Type::never(), span)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Publication can make deferred public obligations concrete. Resolve and
     /// revalidate those consequences before exposing a scheme.
     pub(crate) fn finalize_type_bounds(

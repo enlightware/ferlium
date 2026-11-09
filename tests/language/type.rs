@@ -1284,3 +1284,112 @@ fn never_is_reserved() {
     assert_val_eq!(session.run("let never = 1; never"), int(1));
     assert_val_eq!(session.run("#[inline(never)] fn f() { 2 } f()"), int(2));
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_unconstrained_type_defaults_to_never_wherever_it_appears() {
+    // The type of `z` is determined by nothing, inside or outside a function or a closure.
+    let r = "fn r(f1, n: int) -> int { 0 }\n";
+    let r_written = "fn r<A>(f1: (A) -> int, n: int) -> int { 0 }\n";
+    let recursive = "fn r(f0, f1, n: int) -> int { if n > 0 { r(f0, |z| 0, n - 1) } else { 0 } }\n";
+    let method = "trait T<Self> { fn m(x: Self) -> int; }\n";
+    for (src, expected) in [
+        (format!("{r}r(|z| 2, 0)"), 0),
+        (format!("{r}fn h() -> int {{ r(|z| 2, 0) }}\nh()"), 0),
+        (format!("{r_written}r(|z| 2, 0)"), 0),
+        (format!("{r_written}{{ let k = || r(|z| 2, 0); k() }}"), 0),
+        (format!("{recursive}r(|z| z + 2, |z| 2, 2)"), 0),
+        (
+            format!("{recursive}{{ let k = || r(|z| z + 2, |z| 2, 2); k() }}"),
+            0,
+        ),
+        ("fn h() -> int { let g = |z| 0; 0 }\nh()".to_string(), 0),
+        (
+            "fn h() -> int { let k = || { let g = |z| 0; 0 }; k() }\nh()".to_string(),
+            0,
+        ),
+        (
+            format!("{method}impl T for int {{ fn m(x) {{ let g = |z| 0; x }} }}\nm(3)"),
+            3,
+        ),
+        // Cloned and dropped through the tuple's `Value`, which does not depend on `z`.
+        (
+            "fn h() -> int { let t = (|z| 0, 1); let u = t; let v = t; v.1 + u.1 }\nh()"
+                .to_string(),
+            2,
+        ),
+        ("fn r(x) -> int { 0 }\nr(None)".to_string(), 0),
+    ] {
+        assert_val_eq!(TestSession::new().run(&src), int(expected), "{src}");
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_type_that_an_obligation_depends_on_stays_ambiguous() {
+    // `Value` of an array, or a trait, depends on the element type, which nothing determines.
+    for src in [
+        "let a = []; len(a)",
+        "{ let k = || { let a = []; len(a) }; k() }",
+        "let f = || []; let a = f(); ()",
+        "let a = [|z| 0]; len(a)",
+        "[] == []",
+        "fn h() -> int { let v = if true { 1 } else { [] }; 0 }\nh()",
+    ] {
+        TestSession::new()
+            .fail_compilation(src)
+            .expect_unbound_ty_var();
+    }
+    // A later use determines the element type first.
+    assert_val_eq!(
+        TestSession::new().run("let mut a = []; array_append(a, 1); a[0]"),
+        int(1)
+    );
+    // A custom `Value` impl reached through a derived tuple depends on its member's type.
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    session
+        .fail_compilation(
+            "struct Wrap<T>(T)
+impl<T> Value for Wrap<T> where T: Value {
+    fn eq(x: Wrap<T>, y: Wrap<T>) -> bool { true }
+    fn to_string(x: Wrap<T>) -> string { \"Wrap\" }
+    fn hash(x: Wrap<T>, state: &mut hasher) {}
+    fn clone(x: Wrap<T>) -> Wrap<T> { Wrap(x.0) }
+    fn drop(x: &mut Wrap<T>) {}
+}
+fn r(x, n: int) -> int { 0 }
+r((Wrap(|z| 0),), 0)",
+        )
+        .expect_unbound_ty_var();
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn types_of_signatures_are_not_defaulted() {
+    // A written generic captured by a closure stays generic.
+    assert_val_eq!(
+        TestSession::new().run(
+            "fn f<T>(x: T) -> int { let k = || { let a: [T] = []; len(a) }; k() }\nf(1) + f(\"a\")"
+        ),
+        int(0)
+    );
+    // Signatures of a recursive group stay generic, whatever the order of declaration.
+    let f = "fn f(x, n: int) -> int { if n > 0 { g(x, n - 1) } else { 0 } }\n";
+    let g = "fn g(y, n: int) -> int { if n > 0 { f(y, n - 1) } else { 0 } }\n";
+    for group in [format!("{f}{g}"), format!("{g}{f}")] {
+        assert_val_eq!(
+            TestSession::new().run(&format!("{group}f(1, 2) + g(\"a\", 2)")),
+            int(0),
+            "{group}"
+        );
+    }
+    // A variable of a sibling's signature is not defaulted in a body that uses it.
+    let f = "fn f(n: int) -> int { if n > 0 { g(|z| 0, n - 1) } else { 0 } }\n";
+    let g = "fn g(h, n: int) -> int { if n > 0 { f(n - 1) } else { 0 } }\n";
+    for group in [format!("{f}{g}"), format!("{g}{f}")] {
+        TestSession::new()
+            .fail_compilation(&format!("{group}f(2)"))
+            .expect_unbound_ty_var();
+    }
+}

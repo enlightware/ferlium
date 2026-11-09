@@ -1,7 +1,7 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-use std::iter::once;
+use std::{iter::once, slice};
 
 use indexmap::IndexMap;
 use itertools::Itertools;
@@ -31,10 +31,10 @@ use crate::{
             ImplStubData, PendingModuleFunctions, PubTypeConstraintPtr,
             add_pending_function_anonymous, borrow_check_and_elaborate_dict, constraint_ptr,
             default_body_only_effects_in_function_descr, default_output_effects_in_functions,
-            first_unbound_type_in_constraints, function_and_associated_lambdas,
-            insert_inst_data_for_function_and_lambdas, instantiate_function_descr_in_place,
-            is_compiler_provided_value_constraint, log_dropped_constraints_module,
-            refresh_debug_info_for_functions, set_pending_function,
+            default_unconstrained_types_to_never, first_unbound_type_in_constraints,
+            function_and_associated_lambdas, insert_inst_data_for_function_and_lambdas,
+            instantiate_function_descr_in_place, is_compiler_provided_value_constraint,
+            log_dropped_constraints_module, refresh_debug_info_for_functions, set_pending_function,
             substitute_and_canonicalize_functions,
         },
         function::{CallableDefinition, arg_conventions_for_args},
@@ -2343,6 +2343,27 @@ where
             );
             elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
 
+            // A type variable of the methods that nothing determines defaults to `never`; the head
+            // and the method types are protected.
+            let mut protected = Vec::new();
+            for ty in trait_output
+                .input_tys
+                .iter()
+                .chain(&trait_output.output_tys)
+            {
+                protected.extend(ty_inf.substitute_in_type(*ty).inner_ty_vars());
+            }
+            for id in &local_fns {
+                let fn_ty = &output.functions[id.as_index()].definition.ty_scheme.ty;
+                protected.extend(ty_inf.substitute_in_fn_type(fn_ty).inner_ty_vars());
+            }
+            default_unconstrained_types_to_never(
+                &mut ty_inf,
+                function_bodies(&local_fns, &associated_lambdas, &pending_functions),
+                protected,
+                ModuleEnv::new(output, others),
+            )?;
+
             let mut head_effect_vars = trait_output
                 .input_tys
                 .iter()
@@ -2519,10 +2540,11 @@ where
         // Detect unbound type variables in the code and return error if not in unused variants only.
         let mut unbound_subst = FxHashMap::default();
         for id in local_fns.iter() {
-            let pending = pending_functions
-                .get(id)
-                .expect("expected pending function body");
-            let unbound = hir::all_unbound_ty_vars(&pending.code.arena, pending.code.entry_node_id);
+            let unbound = hir::all_unbound_ty_vars(function_bodies(
+                slice::from_ref(id),
+                &associated_lambdas,
+                &pending_functions,
+            ));
             let env = ModuleEnv::new(output, others);
             let uninstantiated_unbound = check_unbounds(unbound, &quantifiers, &env)?;
             unbound_subst.extend(
@@ -2864,6 +2886,23 @@ where
             return Ok(None);
         }
 
+        // A type variable of the bodies that nothing determines defaults to `never`; the
+        // signatures of all functions of the group are protected.
+        let mut protected = Vec::new();
+        for (id, explicit_root_tys) in local_fns.iter().zip(&function_explicit_root_tys) {
+            let fn_ty = &output.functions[id.as_index()].definition.ty_scheme.ty;
+            protected.extend(ty_inf.substitute_in_fn_type(fn_ty).inner_ty_vars());
+            for ty in explicit_root_tys {
+                protected.extend(ty_inf.substitute_in_type(*ty).inner_ty_vars());
+            }
+        }
+        default_unconstrained_types_to_never(
+            &mut ty_inf,
+            function_bodies(&local_fns, &associated_lambdas, &pending_functions),
+            protected,
+            ModuleEnv::new(output, others),
+        )?;
+
         minimize_body_effects(output, &local_fns, FxHashSet::default(), &mut ty_inf)?;
         ty_inf.finalize_effects()?;
 
@@ -2919,10 +2958,6 @@ where
                     },
                 )?;
             }
-            let pending = pending_functions
-                .get(id)
-                .expect("expected pending function body");
-
             // Find constraints related to this function's signature.
             let mut sig_ty_vars = descr.definition.ty_scheme.ty.inner_ty_vars();
             let explicit_ty_vars = explicit_root_tys
@@ -2949,8 +2984,12 @@ where
             quantifiers.extend(explicit_ty_vars.iter().copied());
             quantifiers = quantifiers.into_iter().unique().collect();
 
-            // Check for unbound type variables.
-            let unbound = hir::all_unbound_ty_vars(&pending.code.arena, pending.code.entry_node_id);
+            // Check for unbound type variables, including in the function's lambdas.
+            let unbound = hir::all_unbound_ty_vars(function_bodies(
+                slice::from_ref(id),
+                &associated_lambdas,
+                &pending_functions,
+            ));
             let env = ModuleEnv::new(output, others);
             let uninstantiated_unbound = check_unbounds(unbound, &quantifiers, &env)?;
 
@@ -3260,6 +3299,21 @@ where
         refresh_debug_info_for_functions(output, &associated_lambdas, &local_fns);
         Ok(None)
     }
+}
+
+/// The bodies of `functions` and of their lambdas.
+fn function_bodies<'a>(
+    functions: &'a [LocalFunctionId],
+    associated_lambdas: &'a FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
+    pending_functions: &'a PendingModuleFunctions,
+) -> impl Iterator<Item = (&'a NodeArena, hir::NodeId)> + 'a {
+    functions
+        .iter()
+        .flat_map(|id| function_and_associated_lambdas(id, associated_lambdas))
+        .map(|id| {
+            let pending = &pending_functions[&id];
+            (&pending.code.arena, pending.code.entry_node_id)
+        })
 }
 
 /// Check all unbound variables from unbound that are not in bounds,

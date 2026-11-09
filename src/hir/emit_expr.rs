@@ -1,7 +1,7 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-use std::mem;
+use std::{iter::once, mem};
 
 use log::log_enabled;
 use ustr::ustr;
@@ -23,7 +23,8 @@ use crate::{
         emit_functions::check_unbounds,
         emit_hir::{
             PendingModuleFunctions, PubTypeConstraintPtr, add_pending_function_anonymous,
-            borrow_check_and_elaborate_pending_function, constraint_ptr, fill_node_effect_vars,
+            borrow_check_and_elaborate_pending_function, constraint_ptr,
+            default_unconstrained_types_to_never, fill_node_effect_vars,
             first_unbound_type_in_constraints, log_dropped_constraints_expr,
         },
     },
@@ -321,6 +322,22 @@ fn emit_expr_unsafe_inner(
         )?;
     }
 
+    // A type variable of the body or its lambdas that nothing determines defaults to `never`; the
+    // expression's own type stays checked, as it is the result.
+    {
+        let node_ty = ty_inf.substitute_in_type(expr_arena[node_id].ty);
+        let bodies = once((&*expr_arena, node_id)).chain(lambda_functions.iter().map(|id| {
+            let pending = &pending_functions[id];
+            (&pending.code.arena, pending.code.entry_node_id)
+        }));
+        default_unconstrained_types_to_never(
+            &mut ty_inf,
+            bodies,
+            node_ty.inner_ty_vars(),
+            ModuleEnv::new(module, others),
+        )?;
+    }
+
     // An expression is not generalized over effects it only performs: they and the effects of
     // its body take their least solution.
     let node_ty = ty_inf.substitute_in_type(expr_arena[node_id].ty);
@@ -353,8 +370,13 @@ fn emit_expr_unsafe_inner(
     let node_ty = expr_arena[node_id].ty;
     let mut quantifiers = TypeScheme::list_ty_vars(&node_ty, all_constraints.iter());
 
-    // Check for unbound type variables.
-    let unbound = hir::all_unbound_ty_vars(expr_arena, node_id);
+    // Check for unbound type variables, including in the lambdas.
+    let unbound = hir::all_unbound_ty_vars(once((&*expr_arena, node_id)).chain(
+        lambda_functions.iter().map(|id| {
+            let pending = &pending_functions[id];
+            (&pending.code.arena, pending.code.entry_node_id)
+        }),
+    ));
     let uninstantiated_unbound = check_unbounds(unbound, &quantifiers, &module_env)?;
 
     // Apply unbound→Never fixup if needed.
