@@ -1383,7 +1383,7 @@ pub enum CompilationErrorImpl<S: Scope> {
         var_span: Location,
         string_span: Location,
     },
-    InvalidEffectDependency {
+    InvalidEffectInclusion {
         source: EffType,
         source_span: Location,
         target: EffType,
@@ -2460,7 +2460,7 @@ impl FormatWith<SourceTable> for CompilationError {
                     fmt_span(string_span),
                 )
             }
-            InvalidEffectDependency {
+            InvalidEffectInclusion {
                 source,
                 source_span,
                 target,
@@ -2469,7 +2469,7 @@ impl FormatWith<SourceTable> for CompilationError {
             } => {
                 write!(
                     f,
-                    "Invalid effect dependency: `{}` due to {} is incompatible with `{}` due to {}",
+                    "Invalid effect inclusion: `{}` due to {} is incompatible with `{}` due to {}",
                     NamedEffectRow(source, names),
                     fmt_span(source_span),
                     NamedEffectRow(target, names),
@@ -3255,13 +3255,13 @@ impl CompilationError {
                 var_span,
                 string_span,
             }),
-            InvalidEffectDependency {
+            InvalidEffectInclusion {
                 source,
                 source_span,
                 target,
                 target_span,
                 names,
-            } => compilation_error!(InvalidEffectDependency {
+            } => compilation_error!(InvalidEffectInclusion {
                 source,
                 source_span,
                 target,

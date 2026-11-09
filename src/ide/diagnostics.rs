@@ -1035,7 +1035,7 @@ pub(super) fn compilation_error_to_data(
                 ),
             )]
         }
-        InvalidEffectDependency {
+        InvalidEffectInclusion {
             source,
             source_span,
             target,
@@ -1045,7 +1045,7 @@ pub(super) fn compilation_error_to_data(
             vec![error_data_from_location(
                 source_span,
                 format!(
-                    "Effect `{}` cannot depend on `{}`",
+                    "Effect `{}` is not included in `{}`",
                     NamedEffectRow(source, names),
                     NamedEffectRow(target, names)
                 ),

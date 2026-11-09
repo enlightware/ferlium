@@ -6524,7 +6524,7 @@ impl TypeInference {
             .add_same_constraint(current, current_span, expected, expected_span);
     }
 
-    pub(crate) fn add_effect_dep_constraint_with_origin(
+    pub(crate) fn add_effect_inclusion_constraint_with_origin(
         &mut self,
         current: &EffType,
         current_span: Location,
@@ -6532,8 +6532,13 @@ impl TypeInference {
         target_span: Location,
         origin: EffectConstraintOrigin,
     ) -> Result<(), InternalCompilationError> {
-        self.effects
-            .add_effect_dep_with_origin(current, current_span, target, target_span, origin)
+        self.effects.add_effect_inclusion_with_origin(
+            current,
+            current_span,
+            target,
+            target_span,
+            origin,
+        )
     }
 
     /// Add a constraint that the function type `current` is a subtype of `expected`, except for

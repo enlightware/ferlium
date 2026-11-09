@@ -557,7 +557,7 @@ impl UnifiedTypeInference {
         // remaining_constraints = unified_ty_inf.simplify_variant_constraints(remaining_constraints);
 
         // Flatten inverted effect constraints into normal constraints
-        unified_ty_inf.effects.expand_pending_dependencies()?;
+        unified_ty_inf.effects.expand_deferred_inclusions()?;
 
         // FIXME: think whether we should have an intermediate struct without the remaining_constraints in it.
         *unified_ty_inf.remaining_ty_constraints = remaining_constraints;
@@ -958,7 +958,12 @@ impl UnifiedTypeInference {
                     )?;
                 } else {
                     // Covariant effects.
-                    self.add_effect_dep(&cur.effects, current_span, &exp.effects, expected_span)?;
+                    self.add_effect_inclusion(
+                        &cur.effects,
+                        current_span,
+                        &exp.effects,
+                        expected_span,
+                    )?;
                 }
                 // Covariance of return type.
                 self.unify_sub_or_same_type(
@@ -2623,8 +2628,12 @@ impl UnifiedTypeInference {
             .zip(polarities)
         {
             match polarity {
-                EffectPolarity::Positive => self.add_effect_dep(exp_eff, span, cur_eff, span)?,
-                EffectPolarity::Negative => self.add_effect_dep(cur_eff, span, exp_eff, span)?,
+                EffectPolarity::Positive => {
+                    self.add_effect_inclusion(exp_eff, span, cur_eff, span)?
+                }
+                EffectPolarity::Negative => {
+                    self.add_effect_inclusion(cur_eff, span, exp_eff, span)?
+                }
                 EffectPolarity::Invariant => {
                     self.unify_same_effect(cur_eff, span, exp_eff, span)?
                 }
@@ -2645,7 +2654,7 @@ impl UnifiedTypeInference {
             .unify_same_effect(current, current_span, target, target_span)
     }
 
-    pub fn add_effect_dep(
+    pub fn add_effect_inclusion(
         &mut self,
         current: &EffType,
         current_span: Location,
@@ -2653,7 +2662,7 @@ impl UnifiedTypeInference {
         target_span: Location,
     ) -> Result<(), InternalCompilationError> {
         self.effects
-            .add_effect_dep(current, current_span, target, target_span)
+            .add_effect_inclusion(current, current_span, target, target_span)
     }
 
     fn unify_subscript_member_effects(
@@ -2673,11 +2682,11 @@ impl UnifiedTypeInference {
         if sub_or_same == SubOrSameType::SameType {
             self.unify_same_effect(&current.effects, current_span, &target.effects, target_span)
         } else {
-            self.add_effect_dep(&current.effects, current_span, &target.effects, target_span)
+            self.add_effect_inclusion(&current.effects, current_span, &target.effects, target_span)
         }
     }
 
-    pub fn finalize_effect_dependencies(&mut self) -> Result<(), InternalCompilationError> {
+    pub fn finalize_effects(&mut self) -> Result<(), InternalCompilationError> {
         self.effects.finalize()
     }
 
@@ -2739,12 +2748,12 @@ impl UnifiedTypeInference {
     }
 
     /// Whether effects are read through their publication view, see
-    /// [`Self::finalize_effect_dependencies`].
+    /// [`Self::finalize_effects`].
     pub(crate) fn effects_finalized(&self) -> bool {
         self.effects.is_finalized()
     }
 
-    /// Return to reading effects as before [`Self::finalize_effect_dependencies`], for a
+    /// Return to reading effects as before [`Self::finalize_effects`], for a
     /// solver whose inference goes on after a query read its published effects.
     pub(crate) fn restore_effects_finalized(&mut self, finalized: bool) {
         self.effects.set_finalized(finalized);

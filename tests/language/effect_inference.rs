@@ -568,7 +568,7 @@ fn named_type_parameters_preserve_callback_effect_requirements() {
         }
     "# })
         .expect_err("a consumer of pure callbacks cannot accept fallible callbacks");
-    error.expect_invalid_effect_dependency(effect(PrimitiveEffect::Fallible), no_effects());
+    error.expect_invalid_effect_inclusion(effect(PrimitiveEffect::Fallible), no_effects());
 }
 
 #[test]
@@ -583,7 +583,7 @@ fn named_type_parameters_preserve_nested_callback_effect_requirements() {
         fn coerce(c: Consumer<(Fallible) -> int>) -> Consumer<(Pure) -> int> { c }
     "# })
         .expect_err("nested callback effects must remain invariant in named types");
-    error.expect_invalid_effect_dependency(effect(PrimitiveEffect::Fallible), no_effects());
+    error.expect_invalid_effect_inclusion(effect(PrimitiveEffect::Fallible), no_effects());
 }
 
 #[test]
@@ -2813,7 +2813,7 @@ fn an_effect_requirement_of_a_selected_impl_is_reported_where_it_is_applied() {
         fn f<! E>(g: () -> int ! E) -> DataValue {{ serialize((Wrap(Cb(g)),)) }}"
     );
     let error = TestSession::new().fail_compilation(&source);
-    let CompilationErrorImpl::InvalidEffectDependency { source_span, .. } = &*error else {
+    let CompilationErrorImpl::InvalidEffectInclusion { source_span, .. } = &*error else {
         panic!("unexpected diagnostic: {error:?}")
     };
     let call = source.rfind("serialize(").expect("the program has a call");

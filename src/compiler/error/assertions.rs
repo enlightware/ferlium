@@ -246,20 +246,20 @@ impl CompilationError {
         }
     }
 
-    pub fn expect_invalid_effect_dependency(&self, cur_eff: EffType, target_eff: EffType) {
+    pub fn expect_invalid_effect_inclusion(&self, cur_eff: EffType, target_eff: EffType) {
         use CompilationErrorImpl::*;
         match self.deref() {
-            InvalidEffectDependency { source, target, .. } => {
+            InvalidEffectInclusion { source, target, .. } => {
                 if source == &cur_eff && target == &target_eff {
                     return;
                 }
                 panic!(
-                    "expect_invalid_effect_dependency failed: expected {} ≰ {}, got {} ≰ {}",
+                    "expect_invalid_effect_inclusion failed: expected {} ≰ {}, got {} ≰ {}",
                     cur_eff, target_eff, source, target
                 );
             }
             _ => panic!(
-                "expect_invalid_effect_dependency called on non-InvalidEffectDependency error {self:?}"
+                "expect_invalid_effect_inclusion called on non-InvalidEffectInclusion error {self:?}"
             ),
         }
     }

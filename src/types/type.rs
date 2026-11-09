@@ -3803,7 +3803,7 @@ mod tests {
             inference
                 .unify_sub_type(actual, span, expected, span)
                 .unwrap();
-            inference.finalize_effect_dependencies().unwrap();
+            inference.finalize_effects().unwrap();
             assert_eq!(inference.substitute_in_type(expected), actual);
         }
     }

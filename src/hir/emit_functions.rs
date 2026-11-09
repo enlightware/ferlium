@@ -1237,7 +1237,7 @@ fn explain_conflict_with_inferred_signature(
     };
     match (error.into_inner(), helper) {
         (
-            CompilationErrorImpl::InvalidEffectDependency {
+            CompilationErrorImpl::InvalidEffectInclusion {
                 source,
                 source_span,
                 target,
@@ -2146,7 +2146,7 @@ where
         let mut body_descr = body_descr;
         if let Some(body_descr) = &body_descr {
             // A contract's effects are fixed: the body must fit them.
-            ty_inf.add_effect_dep_constraint_with_origin(
+            ty_inf.add_effect_inclusion_constraint_with_origin(
                 &fn_arena[fn_node_id].effects,
                 function.span,
                 &body_descr.definition.ty_scheme.ty.effects,
@@ -2211,7 +2211,7 @@ where
                 .spans
                 .as_ref()
                 .map_or(trait_ctx.span, |spans| spans.span);
-            ty_inf.add_effect_dep_constraint_with_origin(
+            ty_inf.add_effect_inclusion_constraint_with_origin(
                 impl_effects,
                 span,
                 &trait_effects,
@@ -2227,7 +2227,7 @@ where
 
     for ((input, id), declared) in ast_functions().zip(&local_fns).zip(&declared_signatures) {
         if let (Some(declared), Some((trait_id, index))) = (declared, input.trait_default) {
-            ty_inf.add_effect_dep_constraint_with_origin(
+            ty_inf.add_effect_inclusion_constraint_with_origin(
                 &output.functions[id.as_index()]
                     .definition
                     .ty_scheme
@@ -2357,7 +2357,7 @@ where
             // Implementation methods are quantified over the head only, so their own effect
             // variables, such as that of a callback parameter written without effects, are fixed.
             minimize_body_effects(output, &[], head_effect_vars, &mut ty_inf)?;
-            ty_inf.finalize_effect_dependencies()?;
+            ty_inf.finalize_effects()?;
 
             // Check for remaining orphans.
             ty_inf.normalize_remaining_constraints();
@@ -2865,7 +2865,7 @@ where
         }
 
         minimize_body_effects(output, &local_fns, FxHashSet::default(), &mut ty_inf)?;
-        ty_inf.finalize_effect_dependencies()?;
+        ty_inf.finalize_effects()?;
 
         // Substitute everything using ty_inf (single pass, includes all defaults).
         substitute_and_canonicalize_functions(

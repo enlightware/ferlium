@@ -330,7 +330,7 @@ fn emit_expr_unsafe_inner(
     let mut observable_effect_vars = node_ty.inner_effect_vars();
     observable_effect_vars.retain(|var| !positive_only_effect_vars.contains(var));
     ty_inf.minimize_unobservable_effects(observable_effect_vars)?;
-    ty_inf.finalize_effect_dependencies()?;
+    ty_inf.finalize_effects()?;
 
     // Substitute everything using ty_inf (single pass, includes all defaults).
     ty_inf.substitute_in_node(expr_arena, node_id);

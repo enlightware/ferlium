@@ -56,7 +56,7 @@ fn recursive_comparison_checks_effects_after_cycle() {
             fn bad(xs: List<Fallible>) -> List<Pure> { xs }
         "# })
         .expect_err("closing the recursive edge must not hide callback effects")
-        .expect_invalid_effect_dependency(effect(PrimitiveEffect::Fallible), no_effects());
+        .expect_invalid_effect_inclusion(effect(PrimitiveEffect::Fallible), no_effects());
 }
 
 #[test]
@@ -71,7 +71,7 @@ fn recursive_comparison_preserves_direction() {
             fn bad(x: Recursive<Pure>) -> Recursive<Fallible> { x }
         "# })
         .expect_err("a contravariant recursive edge must check the reverse relation")
-        .expect_invalid_effect_dependency(effect(PrimitiveEffect::Fallible), no_effects());
+        .expect_invalid_effect_inclusion(effect(PrimitiveEffect::Fallible), no_effects());
 }
 
 #[test]
@@ -87,7 +87,7 @@ fn recursive_comparison_preserves_named_invariance() {
             fn bad(x: Box<Recursive<Pure>>) -> Box<Recursive<Fallible>> { x }
         "# })
         .expect_err("recursive comparisons inside named arguments must preserve exact effects")
-        .expect_invalid_effect_dependency(effect(PrimitiveEffect::Fallible), no_effects());
+        .expect_invalid_effect_inclusion(effect(PrimitiveEffect::Fallible), no_effects());
 }
 
 #[test]
@@ -103,7 +103,7 @@ fn recursive_alias_preserves_named_argument_invariance() {
             fn bad(x: Recursive<Pure>) -> Recursive<Fallible> { x }
         "# })
         .expect_err("the Box argument must retain the recursive variant and its callback effects")
-        .expect_invalid_effect_dependency(effect(PrimitiveEffect::Fallible), no_effects());
+        .expect_invalid_effect_inclusion(effect(PrimitiveEffect::Fallible), no_effects());
 }
 
 #[test]

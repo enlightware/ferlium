@@ -103,20 +103,20 @@ fn fn_variance() {
     // passing write to read, should fail
     session
         .fail_compilation("fn f() { effects::take_read(effects::write) }")
-        .expect_invalid_effect_dependency(effect(Write), effect(Read));
+        .expect_invalid_effect_inclusion(effect(Write), effect(Read));
     session
         .fail_compilation("fn w() { effects::write() } fn f() { effects::take_read(w) }")
-        .expect_invalid_effect_dependency(effect(Write), effect(Read));
+        .expect_invalid_effect_inclusion(effect(Write), effect(Read));
 
     // passing read, write to read, should fail
     session
         .fail_compilation("fn f() { effects::take_read(effects::read_write) }")
-        .expect_invalid_effect_dependency(effects(&[Read, Write]), effect(Read));
+        .expect_invalid_effect_inclusion(effects(&[Read, Write]), effect(Read));
     session
         .fail_compilation(
             "fn rw() { effects::read(); effects::write() } fn f() { effects::take_read(rw) }",
         )
-        .expect_invalid_effect_dependency(effects(&[Read, Write]), effect(Read));
+        .expect_invalid_effect_inclusion(effects(&[Read, Write]), effect(Read));
 }
 
 #[test]
@@ -305,7 +305,7 @@ fn writing_callable_coercions_preserve_argument_invariance() {
                   invoke(replace, callback)";
     TestSession::new()
         .fail_compilation(source)
-        .expect_invalid_effect_dependency(effect(PrimitiveEffect::Fallible), no_effects());
+        .expect_invalid_effect_inclusion(effect(PrimitiveEffect::Fallible), no_effects());
 }
 
 #[test]
@@ -556,7 +556,7 @@ fn trait_output_effects_are_rejected_in_restricted_contexts() {
         .fail_compilation(
             r#"fn f() { effects::take_read(|| { testing::TestEff::eff_project("s"); () }) }"#,
         )
-        .expect_invalid_effect_dependency(effect(Write), effect(Read));
+        .expect_invalid_effect_inclusion(effect(Write), effect(Read));
 }
 
 #[test]
@@ -618,7 +618,7 @@ fn trait_output_effects_multiple_slots_resolve_independently() {
         .fail_compilation(
             r#"fn bad() { effects::take_read(|| { testing::TestEffPair::eff_pair_second(true); () }) }"#,
         )
-        .expect_invalid_effect_dependency(effect(Write), effect(Read));
+        .expect_invalid_effect_inclusion(effect(Write), effect(Read));
 }
 
 #[test]

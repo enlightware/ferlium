@@ -1762,10 +1762,10 @@ impl<'a> TraitSolver<'a> {
     ) -> Result<(), InternalCompilationError> {
         match polarity {
             EffectPolarity::Positive => {
-                ty_inf.add_effect_dep(impl_eff, fn_span, requested_eff, fn_span)
+                ty_inf.add_effect_inclusion(impl_eff, fn_span, requested_eff, fn_span)
             }
             EffectPolarity::Negative => {
-                ty_inf.add_effect_dep(requested_eff, fn_span, impl_eff, fn_span)
+                ty_inf.add_effect_inclusion(requested_eff, fn_span, impl_eff, fn_span)
             }
             EffectPolarity::Invariant => {
                 ty_inf.unify_same_effect(impl_eff, fn_span, requested_eff, fn_span)
@@ -2771,7 +2771,7 @@ impl<'a> TraitSolver<'a> {
         // The match reads its results through the published effects, but `ty_inf` may be the
         // caller's own inference, which goes on afterwards.
         let effects_finalized = ty_inf.effects_finalized();
-        if ty_inf.finalize_effect_dependencies().is_err() {
+        if ty_inf.finalize_effects().is_err() {
             return Ok(BlanketImplMatch::No);
         }
         for requirement in &mut runtime_requirements {

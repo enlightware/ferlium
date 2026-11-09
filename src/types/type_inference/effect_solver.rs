@@ -19,7 +19,7 @@ use crate::{
     },
 };
 
-/// Diagnostic origin for internal effect dependency constraints.
+/// Diagnostic origin for internal effect inclusion constraints.
 #[derive(Debug, Clone)]
 pub(crate) enum EffectConstraintOrigin {
     Inference,
@@ -161,14 +161,14 @@ pub(crate) struct EffectSolverSnapshot {
 /// inclusions over atoms (primitive effects and rigid variables), all kept exactly, so the least
 /// solution and its checks do not depend on the order in which constraints arrive. Inclusions
 /// into rows with several solvable variables are disjunctions: they are deferred, and
-/// materialized conservatively when dependencies are expanded. Equalities unify rows.
+/// materialized conservatively when deferred inclusions are expanded. Equalities unify rows.
 ///
-/// Readers see the solution through substitution. While constraints are added, a variable maps
-/// to its least atoms and itself, or to its row once its bounds determine it. Once effect
-/// dependencies are finalized, a variable bounded by a ceiling maps to the largest row its
-/// ceilings allow, and the other variables are merged along their inclusions, each mapping to
-/// its least atoms and its group's representative: the group's rigid variable if its least
-/// solution holds exactly one, otherwise its smallest variable.
+/// Readers see the solution through substitution. While constraints are added, a variable maps to
+/// its least atoms and itself, or to its row once its bounds determine it. Once effects are
+/// finalized, a variable bounded by a ceiling maps to the largest row its ceilings allow, and the
+/// other variables are merged along their inclusions, each mapping to its least atoms and its
+/// group's representative: the group's rigid variable if its least solution holds exactly one,
+/// otherwise its smallest variable.
 #[derive(Default, Debug)]
 pub(crate) struct EffectSolver {
     table: InPlaceUnificationTable<EffectVarKey>,
@@ -185,7 +185,7 @@ pub(crate) struct EffectSolver {
     markers_row: EffType,
 }
 
-/// The substitution of class roots once effect dependencies are finalized.
+/// The substitution of class roots once effects are finalized.
 #[derive(Debug)]
 struct PublicationView {
     roots: FxHashMap<EffectVar, EffType>,
@@ -285,7 +285,7 @@ impl EffectSolver {
         EffectNames(names)
     }
 
-    fn invalid_effect_dependency(
+    fn invalid_effect_inclusion(
         &self,
         source: EffType,
         source_span: Location,
@@ -296,7 +296,7 @@ impl EffectSolver {
         let names = self.effect_names(&[&source, &target]);
         match origin {
             EffectConstraintOrigin::Inference => {
-                internal_compilation_error!(InvalidEffectDependency {
+                internal_compilation_error!(InvalidEffectInclusion {
                     source,
                     source_span,
                     target,
@@ -405,7 +405,7 @@ impl EffectSolver {
 
         let effect_var = self.fresh_var_ty();
         let span = Location::new_synthesized();
-        self.add_effect_inclusion(
+        self.add_inclusion(
             effects,
             span,
             effect_var.clone(),
@@ -493,7 +493,7 @@ impl EffectSolver {
         } else {
             (fresh.clone(), effects.clone())
         };
-        self.add_effect_inclusion(lower, span, upper, span, EffectConstraintOrigin::Inference)
+        self.add_inclusion(lower, span, upper, span, EffectConstraintOrigin::Inference)
             .expect("a fresh variable accepts any bound");
         fresh
     }
@@ -536,18 +536,18 @@ impl EffectSolver {
             }
             _ => {}
         }
-        self.add_effect_dep(current, current_span, target, target_span)?;
-        self.add_effect_dep(target, target_span, current, current_span)
+        self.add_effect_inclusion(current, current_span, target, target_span)?;
+        self.add_effect_inclusion(target, target_span, current, current_span)
     }
 
-    pub(crate) fn add_effect_dep(
+    pub(crate) fn add_effect_inclusion(
         &mut self,
         current: &EffType,
         current_span: Location,
         target: &EffType,
         target_span: Location,
     ) -> Result<(), InternalCompilationError> {
-        self.add_effect_dep_with_origin(
+        self.add_effect_inclusion_with_origin(
             current,
             current_span,
             target,
@@ -556,7 +556,7 @@ impl EffectSolver {
         )
     }
 
-    pub(crate) fn add_effect_dep_with_origin(
+    pub(crate) fn add_effect_inclusion_with_origin(
         &mut self,
         current: &EffType,
         current_span: Location,
@@ -564,7 +564,7 @@ impl EffectSolver {
         target_span: Location,
         origin: EffectConstraintOrigin,
     ) -> Result<(), InternalCompilationError> {
-        self.add_effect_inclusion(
+        self.add_inclusion(
             current.clone(),
             current_span,
             target.clone(),
@@ -574,7 +574,7 @@ impl EffectSolver {
     }
 
     /// Materialize the deferred inclusions that do not hold yet.
-    pub(super) fn expand_pending_dependencies(&mut self) -> Result<(), InternalCompilationError> {
+    pub(super) fn expand_deferred_inclusions(&mut self) -> Result<(), InternalCompilationError> {
         for inclusion in mem::take(&mut self.deferred_inclusions) {
             self.materialize_inclusion(inclusion)?;
         }
@@ -583,7 +583,7 @@ impl EffectSolver {
 
     /// Materialize the deferred inclusions and switch readers to the publication view.
     pub(super) fn finalize(&mut self) -> Result<(), InternalCompilationError> {
-        self.expand_pending_dependencies()?;
+        self.expand_deferred_inclusions()?;
         self.publishing = true;
         self.invalidate_publication();
         self.validate_publication()
@@ -610,7 +610,7 @@ impl EffectSolver {
                 .map_or_else(Location::new_synthesized, |(_, source)| source.span);
             let missing = class.lower.difference(&row);
             if !missing.is_empty() {
-                return Err(self.invalid_effect_dependency(
+                return Err(self.invalid_effect_inclusion(
                     missing,
                     lower_span,
                     row,
@@ -621,7 +621,7 @@ impl EffectSolver {
             if let Some(ceiling) = &class.ceiling {
                 let excess = row.difference(&ceiling.row);
                 if !excess.is_empty() {
-                    return Err(self.invalid_effect_dependency(
+                    return Err(self.invalid_effect_inclusion(
                         excess,
                         lower_span,
                         ceiling.row.clone(),
@@ -634,7 +634,7 @@ impl EffectSolver {
                 let upper = mask.union(&self.substitute_var(target));
                 let excess = row.difference(&upper);
                 if !excess.is_empty() {
-                    return Err(self.invalid_effect_dependency(
+                    return Err(self.invalid_effect_inclusion(
                         excess,
                         lower_span,
                         upper,
@@ -658,7 +658,7 @@ impl EffectSolver {
         &mut self,
         observable: &FxHashSet<EffectVar>,
     ) -> Result<(), InternalCompilationError> {
-        self.expand_pending_dependencies()?;
+        self.expand_deferred_inclusions()?;
         let observable_roots = observable
             .iter()
             .map(|var| {
@@ -804,7 +804,7 @@ impl EffectSolver {
         resolved
     }
 
-    fn add_effect_inclusion(
+    fn add_inclusion(
         &mut self,
         lower: EffType,
         lower_span: Location,
@@ -848,7 +848,7 @@ impl EffectSolver {
         match upper_vars.as_slice() {
             [] => {
                 if !extra.is_empty() {
-                    return Err(self.invalid_effect_dependency(
+                    return Err(self.invalid_effect_inclusion(
                         lower_atoms,
                         inclusion.lower_span,
                         upper,
@@ -1093,7 +1093,7 @@ impl EffectSolver {
             .find(|origin| origin.is_trait_method_impl())
             .unwrap_or(origin)
             .clone();
-        Err(self.invalid_effect_dependency(
+        Err(self.invalid_effect_inclusion(
             excess,
             source.span,
             ceiling.row.clone(),
@@ -1128,8 +1128,8 @@ impl EffectSolver {
             let a_row = EffType::single_variable(a_root);
             let b_row = EffType::single_variable(b_root);
             let origin = EffectConstraintOrigin::Inference;
-            self.add_effect_inclusion(a_row.clone(), span, b_row.clone(), span, origin.clone())?;
-            return self.add_effect_inclusion(b_row, span, a_row, span, origin);
+            self.add_inclusion(a_row.clone(), span, b_row.clone(), span, origin.clone())?;
+            return self.add_inclusion(b_row, span, a_row, span, origin);
         }
         self.invalidate_publication();
         self.table.union(a_root, b_root);
@@ -1158,8 +1158,8 @@ impl EffectSolver {
         }
         if self.class(root).rigid {
             let origin = EffectConstraintOrigin::Inference;
-            self.add_effect_inclusion(var_row.clone(), span, row.clone(), span, origin.clone())?;
-            return self.add_effect_inclusion(row, span, var_row, span, origin);
+            self.add_inclusion(var_row.clone(), span, row.clone(), span, origin.clone())?;
+            return self.add_inclusion(row, span, var_row, span, origin);
         }
         if row.contains(Effect::Variable(root)) {
             // `var = (rest, var)` only bounds `var` below.
@@ -1169,7 +1169,7 @@ impl EffectSolver {
                     rest.insert(Effect::Variable(other));
                 }
             }
-            return self.add_effect_inclusion(
+            return self.add_inclusion(
                 rest,
                 span,
                 var_row,
@@ -1188,7 +1188,7 @@ impl EffectSolver {
         );
         for effect in class.lower.iter() {
             let source = class.lower_source(effect);
-            self.add_effect_inclusion(
+            self.add_inclusion(
                 EffType::single(effect),
                 source.span,
                 row.clone(),
@@ -1197,7 +1197,7 @@ impl EffectSolver {
             )?;
         }
         if let Some(ceiling) = class.ceiling {
-            self.add_effect_inclusion(
+            self.add_inclusion(
                 row.clone(),
                 span,
                 ceiling.row,
@@ -1208,7 +1208,7 @@ impl EffectSolver {
         for (target, mask) in class.successors {
             let mut upper = mask;
             upper.insert(Effect::Variable(target));
-            self.add_effect_inclusion(
+            self.add_inclusion(
                 row.clone(),
                 span,
                 upper,
@@ -1218,7 +1218,7 @@ impl EffectSolver {
         }
         for (source, mask) in class.predecessors {
             let upper = mask.union(&row);
-            self.add_effect_inclusion(
+            self.add_inclusion(
                 EffType::single_variable(source),
                 span,
                 upper,
@@ -1527,7 +1527,7 @@ mod tests {
             let mut solver = EffectSolver::default();
             let existing = solver.fresh_var();
             solver
-                .add_effect_dep(&EffType::single_variable(existing), span, &read(), span)
+                .add_effect_inclusion(&EffType::single_variable(existing), span, &read(), span)
                 .unwrap();
             if finalized {
                 solver.finalize().unwrap();
@@ -1561,23 +1561,25 @@ mod tests {
     }
 
     #[test]
-    fn pure_effect_bound_survives_a_dependency_unified_with_its_target() {
+    fn pure_effect_bound_survives_an_inclusion_unified_with_its_target() {
         let mut solver = EffectSolver::default();
         let source = solver.fresh_var_ty();
         let target = solver.fresh_var_ty();
         let span = Location::new_synthesized();
 
-        solver.add_effect_dep(&source, span, &target, span).unwrap();
+        solver
+            .add_effect_inclusion(&source, span, &target, span)
+            .unwrap();
         solver
             .unify_same_effect(&source, span, &target, span)
             .unwrap();
         solver
-            .add_effect_dep(&source, span, &EffType::empty(), span)
+            .add_effect_inclusion(&source, span, &EffType::empty(), span)
             .unwrap();
 
         let result = solver
-            .add_effect_dep(&fallible(), span, &source, span)
-            .and_then(|()| solver.expand_pending_dependencies());
+            .add_effect_inclusion(&fallible(), span, &source, span)
+            .and_then(|()| solver.expand_deferred_inclusions());
         result.expect_err("a variable bounded by the pure row must reject fallible effects");
     }
 
@@ -1598,9 +1600,11 @@ mod tests {
                 equality(&mut solver);
             }
             solver
-                .add_effect_dep(&a, span, &EffType::empty(), span)
+                .add_effect_inclusion(&a, span, &EffType::empty(), span)
                 .unwrap();
-            solver.add_effect_dep(&read(), span, &b, span).unwrap();
+            solver
+                .add_effect_inclusion(&read(), span, &b, span)
+                .unwrap();
             if !equality_first {
                 equality(&mut solver);
             }
@@ -1616,13 +1620,17 @@ mod tests {
         let right = solver.fresh_var_ty();
         let span = Location::new_synthesized();
 
-        solver.add_effect_dep(&source, span, &left, span).unwrap();
-        solver.add_effect_dep(&source, span, &right, span).unwrap();
         solver
-            .add_effect_dep(&right, span, &EffType::empty(), span)
+            .add_effect_inclusion(&source, span, &left, span)
             .unwrap();
         solver
-            .add_effect_dep(&fallible(), span, &source, span)
+            .add_effect_inclusion(&source, span, &right, span)
+            .unwrap();
+        solver
+            .add_effect_inclusion(&right, span, &EffType::empty(), span)
+            .unwrap();
+        solver
+            .add_effect_inclusion(&fallible(), span, &source, span)
             .unwrap_err();
     }
 
@@ -1635,10 +1643,10 @@ mod tests {
 
         // `source` stands for `dependency` when bounded, then gains an effect of its own.
         solver
-            .add_effect_dep(&source, span, &dependency, span)
+            .add_effect_inclusion(&source, span, &dependency, span)
             .unwrap();
         solver
-            .add_effect_dep(&source, span, &EffType::empty(), span)
+            .add_effect_inclusion(&source, span, &EffType::empty(), span)
             .unwrap();
         solver
             .unify_same_effect(&source, span, &fallible(), span)
@@ -1653,13 +1661,13 @@ mod tests {
         let span = Location::new_synthesized();
 
         solver
-            .add_effect_dep(&source, span, &dependency, span)
+            .add_effect_inclusion(&source, span, &dependency, span)
             .unwrap();
         solver
             .unify_same_effect(&dependency, span, &EffType::empty(), span)
             .unwrap();
         solver
-            .add_effect_dep(&source, span, &EffType::empty(), span)
+            .add_effect_inclusion(&source, span, &EffType::empty(), span)
             .unwrap();
         solver
             .unify_same_effect(&source, span, &fallible(), span)
@@ -1677,10 +1685,10 @@ mod tests {
         let span = Location::new_synthesized();
 
         solver
-            .add_effect_dep(&EffType::single_variable(alias), span, &target, span)
+            .add_effect_inclusion(&EffType::single_variable(alias), span, &target, span)
             .unwrap();
         solver
-            .add_effect_dep(
+            .add_effect_inclusion(
                 &EffType::multiple_variable(&[alias, other]),
                 span,
                 &EffType::multiple_variable(&[left, right]),
@@ -1689,7 +1697,7 @@ mod tests {
             .unwrap();
         for var in [left, right] {
             solver
-                .add_effect_dep(
+                .add_effect_inclusion(
                     &EffType::single_variable(var),
                     span,
                     &EffType::empty(),
@@ -1701,19 +1709,25 @@ mod tests {
             .unify_same_effect(&EffType::single_variable(alias), span, &fallible(), span)
             .unwrap();
 
-        solver.expand_pending_dependencies().unwrap_err();
+        solver.expand_deferred_inclusions().unwrap_err();
     }
 
     #[test]
-    fn effect_dependency_cycles_propagate() {
+    fn effect_inclusion_cycles_propagate() {
         let mut solver = EffectSolver::default();
         let first = solver.fresh_var_ty();
         let second = solver.fresh_var_ty();
         let span = Location::new_synthesized();
 
-        solver.add_effect_dep(&first, span, &second, span).unwrap();
-        solver.add_effect_dep(&second, span, &first, span).unwrap();
-        solver.add_effect_dep(&write(), span, &first, span).unwrap();
+        solver
+            .add_effect_inclusion(&first, span, &second, span)
+            .unwrap();
+        solver
+            .add_effect_inclusion(&second, span, &first, span)
+            .unwrap();
+        solver
+            .add_effect_inclusion(&write(), span, &first, span)
+            .unwrap();
 
         assert!(
             solver
@@ -1723,7 +1737,7 @@ mod tests {
     }
 
     #[test]
-    fn effect_dependency_preserves_trait_method_origin() {
+    fn effect_inclusion_preserves_trait_method_origin() {
         let mut solver = EffectSolver::default();
         let target = solver.fresh_var_ty();
         let span = Location::new_synthesized();
@@ -1731,7 +1745,7 @@ mod tests {
         let method_name = ustr("pure");
 
         solver
-            .add_effect_dep_with_origin(
+            .add_effect_inclusion_with_origin(
                 &read(),
                 span,
                 &target,
@@ -1744,7 +1758,7 @@ mod tests {
             )
             .unwrap();
         let error = solver
-            .add_effect_dep(&target, span, &EffType::empty(), span)
+            .add_effect_inclusion(&target, span, &EffType::empty(), span)
             .unwrap_err();
         match &*error {
             CompilationErrorImpl::TraitMethodEffectMismatch {
@@ -1772,10 +1786,10 @@ mod tests {
         let span = Location::new_synthesized();
 
         solver
-            .add_effect_dep(&var, span, &EffType::empty(), span)
+            .add_effect_inclusion(&var, span, &EffType::empty(), span)
             .unwrap();
         solver
-            .add_effect_dep(&fallible(), span, &var, span)
+            .add_effect_inclusion(&fallible(), span, &var, span)
             .unwrap_err();
     }
 
@@ -1788,7 +1802,7 @@ mod tests {
         let span = Location::new_synthesized();
 
         solver
-            .add_effect_dep(&union, span, &EffType::empty(), span)
+            .add_effect_inclusion(&union, span, &EffType::empty(), span)
             .unwrap();
         solver.finalize().unwrap();
         assert_eq!(solver.substitute(&left), EffType::empty());
@@ -1803,7 +1817,7 @@ mod tests {
         let lower = fallible().union(&var);
 
         solver
-            .add_effect_dep(&lower, span, &EffType::empty(), span)
+            .add_effect_inclusion(&lower, span, &EffType::empty(), span)
             .unwrap_err();
     }
 
@@ -1874,7 +1888,7 @@ mod tests {
         let span = Location::new_synthesized();
 
         solver
-            .add_effect_dep(&read(), span, &left.union(&right), span)
+            .add_effect_inclusion(&read(), span, &left.union(&right), span)
             .unwrap();
         solver.finalize().unwrap();
 
@@ -1905,7 +1919,7 @@ mod tests {
                 }),
                 Box::new(|solver| {
                     solver
-                        .add_effect_dep(&fallible(), span, &var, span)
+                        .add_effect_inclusion(&fallible(), span, &var, span)
                         .unwrap()
                 }),
             ];
@@ -1926,16 +1940,16 @@ mod tests {
         let span = Location::new_synthesized();
 
         solver
-            .add_effect_dep(&var, span, &fallible().union(&write()), span)
+            .add_effect_inclusion(&var, span, &fallible().union(&write()), span)
             .unwrap();
         solver
-            .add_effect_dep(&var, span, &fallible().union(&read()), span)
+            .add_effect_inclusion(&var, span, &fallible().union(&read()), span)
             .unwrap();
         solver
-            .add_effect_dep(&fallible(), span, &var, span)
+            .add_effect_inclusion(&fallible(), span, &var, span)
             .unwrap();
         solver
-            .add_effect_dep(&read(), span, &var, span)
+            .add_effect_inclusion(&read(), span, &var, span)
             .unwrap_err();
     }
 
@@ -1949,11 +1963,13 @@ mod tests {
         let span = Location::new_synthesized();
 
         solver
-            .add_effect_dep(&declared, span, &read().union(&write()).union(&var), span)
+            .add_effect_inclusion(&declared, span, &read().union(&write()).union(&var), span)
             .unwrap();
-        solver.add_effect_dep(&var, span, &declared, span).unwrap();
         solver
-            .add_effect_dep(&var, span, &fallible(), span)
+            .add_effect_inclusion(&var, span, &declared, span)
+            .unwrap();
+        solver
+            .add_effect_inclusion(&var, span, &fallible(), span)
             .unwrap_err();
     }
 
@@ -1965,7 +1981,7 @@ mod tests {
         let span = Location::new_synthesized();
 
         solver
-            .add_effect_dep(&lower, span, &read().union(&upper), span)
+            .add_effect_inclusion(&lower, span, &read().union(&upper), span)
             .unwrap();
         solver.finalize().unwrap();
 
@@ -1983,9 +1999,11 @@ mod tests {
         let span = Location::new_synthesized();
 
         solver
-            .add_effect_dep(&EffType::single_variable(declared), span, &body, span)
+            .add_effect_inclusion(&EffType::single_variable(declared), span, &body, span)
             .unwrap();
-        solver.add_effect_dep(&callback, span, &body, span).unwrap();
+        solver
+            .add_effect_inclusion(&callback, span, &body, span)
+            .unwrap();
         solver.finalize().unwrap();
 
         assert_eq!(solver.substitute(&body), EffType::single_variable(declared));
@@ -2003,10 +2021,10 @@ mod tests {
         let span = Location::new_synthesized();
 
         solver
-            .add_effect_dep(&parameter, span, &result, span)
+            .add_effect_inclusion(&parameter, span, &result, span)
             .unwrap();
         solver
-            .add_effect_dep(&fallible(), span, &result, span)
+            .add_effect_inclusion(&fallible(), span, &result, span)
             .unwrap();
         solver.finalize().unwrap();
 

@@ -1601,7 +1601,7 @@ fn generic_projection_write_uses_mut_member_effects_from_evidence() {
                 ()
             })
         "# })
-        .expect_invalid_effect_dependency(
+        .expect_invalid_effect_inclusion(
             effect(PrimitiveEffect::Write),
             effect(PrimitiveEffect::Read),
         );
@@ -1665,7 +1665,7 @@ fn blanket_impl_of_pure_method_rejects_fallible_projection_evidence() {
                 before_read,
                 "idiv(1, self.divisor)",
             ))
-            .expect_invalid_effect_dependency(effect(PrimitiveEffect::Fallible), no_effects());
+            .expect_invalid_effect_inclusion(effect(PrimitiveEffect::Fallible), no_effects());
     }
 }
 
@@ -4670,7 +4670,7 @@ fn mutable_subscript_result_preserves_callback_effects() {
     experimental_session()
         .try_compile(source)
         .expect_err("a mutable result cannot widen stored callback effects")
-        .expect_invalid_effect_dependency(effect(PrimitiveEffect::Fallible), no_effects());
+        .expect_invalid_effect_inclusion(effect(PrimitiveEffect::Fallible), no_effects());
 }
 
 #[test]

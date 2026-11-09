@@ -524,7 +524,7 @@ mod tests {
         let effect = EffType::single_variable(inference.fresh_effect_var());
         let ceiling = EffType::single_primitive(PrimitiveEffect::Read);
         inference
-            .add_effect_dep(&effect, span, &ceiling, span)
+            .add_effect_inclusion(&effect, span, &ceiling, span)
             .unwrap();
         let constraint = |output| {
             PubTypeConstraint::new_have_trait(

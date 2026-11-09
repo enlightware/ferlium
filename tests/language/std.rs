@@ -2314,7 +2314,7 @@ fn sort() {
         .fail_compilation(
             "fn f() { let mut values = [1, 2]; sort_by(values, |left, right| { effects::read(); cmp(left, right) }) }",
         )
-        .expect_invalid_effect_dependency(effect(Read), effect(Fallible));
+        .expect_invalid_effect_inclusion(effect(Read), effect(Fallible));
 }
 
 #[test]

@@ -578,9 +578,9 @@ impl UnifiedTypeInference {
                 let mut effect_meet = |left: &EffType, right: &EffType| {
                     let result = EffType::single_variable(self.fresh_effect_var());
                     let span = Location::new_synthesized();
-                    self.add_effect_dep(&result, span, left, span)
+                    self.add_effect_inclusion(&result, span, left, span)
                         .expect("fresh effect lower bound");
-                    self.add_effect_dep(&result, span, right, span)
+                    self.add_effect_inclusion(&result, span, right, span)
                         .expect("fresh effect lower bound");
                     result
                 };
@@ -1156,7 +1156,7 @@ mod tests {
                     inference
                         .minimize_unobservable_effects(FxHashSet::default())
                         .unwrap();
-                    inference.finalize_effect_dependencies().unwrap();
+                    inference.finalize_effects().unwrap();
                     for x in 0..domain.len() {
                         for y in 0..domain.len() {
                             let assignment = [x, y];
