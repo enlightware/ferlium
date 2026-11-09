@@ -15,6 +15,9 @@
 //! - generic callers reaching the methods directly, through declared signatures, method
 //!   references, eager and lazy std adaptors, joins of callables, closures built in loops, and
 //!   other callers;
+//! - declared callers fixing the trait's effect by one or two `where` bounds on the same
+//!   application, which combine by polarity, possibly calling another such caller whose bounds
+//!   their own must fit;
 //! - an entry expression summing calls on concrete values, with callbacks that are pure, fail,
 //!   read or write.
 //!
@@ -154,6 +157,59 @@ pub enum Flavor {
     LoopClosure,
     /// Calls an earlier caller on `W(s)`.
     Delegate(usize),
+    /// A declared signature fixing `E` by one or two bounds on the same application,
+    /// `fn g<T>(s: T, x: int, f: (int) -> int ! R) -> int where T: Tr<! E = B0>, T: Tr<! E = B1>`,
+    /// each row being `()` or `(fallible)`.
+    Bounded(Bounds),
+}
+
+/// The written rows of a bounded caller, each `fallible` when true, else `()`.
+#[derive(Clone, Copy, Debug)]
+pub struct Bounds {
+    pub first: bool,
+    pub second: Option<bool>,
+    /// The row of the callback parameter, for traits taking a callback.
+    pub callback: bool,
+    /// An earlier bounded caller of the same trait to call instead of the method.
+    pub via: Option<usize>,
+}
+
+fn fixed_row(is_fallible: bool) -> &'static str {
+    if is_fallible { "(fallible)" } else { "()" }
+}
+
+fn fixed_eff(is_fallible: bool) -> EffType {
+    if is_fallible {
+        fallible()
+    } else {
+        no_effects()
+    }
+}
+
+impl Bounds {
+    /// Whether the evidence the bounds combine into is `fallible`: performed bounds intersect,
+    /// received ones unite, invariant ones must be equal (`None` if they differ).
+    fn combined(&self, kind: TraitKind) -> Option<bool> {
+        let second = self.second.unwrap_or(self.first);
+        match kind {
+            _ if kind.positive() => Some(self.first && second),
+            TraitKind::Callback => Some(self.first || second),
+            _ => (self.first == second).then_some(self.first),
+        }
+    }
+
+    /// Whether an impl with effect `eff` fits the bounds; only used to steer generation.
+    fn fit(&self, kind: TraitKind, eff: &EffType) -> bool {
+        let Some(combined) = self.combined(kind) else {
+            return false;
+        };
+        let bound = fixed_eff(combined);
+        match kind {
+            _ if kind.positive() => eff.is_subset_of(&bound),
+            TraitKind::Callback => bound.is_subset_of(eff),
+            _ => *eff == bound,
+        }
+    }
 }
 
 /// A generic caller `g<i>`.
@@ -237,7 +293,8 @@ pub struct Cycle {
 pub struct Variant {
     /// Effect variables named `Q` instead of `E`.
     pub rename: bool,
-    /// Impls, and the compilation of entry terms, in reverse order.
+    /// Impls, the bounds of bounded callers, and the compilation of entry terms, in reverse
+    /// order.
     pub reverse: bool,
 }
 
@@ -406,7 +463,7 @@ impl EffectProgram {
 
         let caller_count = u.int_in_range(0..=4)?;
         for _ in 0..caller_count {
-            let flavor = match u.int_in_range(0..=9)? {
+            let flavor = match u.int_in_range(0..=11)? {
                 0 => Flavor::Direct,
                 1 => Flavor::Declared,
                 2 => Flavor::Reference,
@@ -416,6 +473,16 @@ impl EffectProgram {
                 6 => Flavor::LazyFold,
                 7 => Flavor::Join,
                 8 => Flavor::LoopClosure,
+                9 | 10 => Flavor::Bounded(Bounds {
+                    first: u.arbitrary()?,
+                    second: if u.arbitrary()? {
+                        Some(u.arbitrary()?)
+                    } else {
+                        None
+                    },
+                    callback: u.arbitrary()?,
+                    via: None,
+                }),
                 _ if !program.callers.is_empty() => {
                     Flavor::Delegate(u.int_in_range(0..=program.callers.len() - 1)?)
                 }
@@ -432,11 +499,54 @@ impl EffectProgram {
                     }
                 }
                 _ => {
-                    let kind = u.choose(&program.traits)?.kind;
+                    let mut kind = u.choose(&program.traits)?.kind;
+                    // A bounded caller mostly calls an earlier one of the same trait.
+                    let bounded_kinds: Vec<_> = program
+                        .callers
+                        .iter()
+                        .filter(|callee| matches!(callee.flavor, Flavor::Bounded(_)))
+                        .map(|callee| callee.kind)
+                        .collect();
+                    if matches!(flavor, Flavor::Bounded(_))
+                        && !bounded_kinds.is_empty()
+                        && u.ratio(3, 4)?
+                    {
+                        kind = *u.choose(&bounded_kinds)?;
+                    }
                     // A declared signature names the trait's effect in a callback-free form only.
                     let flavor = match flavor {
                         Flavor::Declared if !matches!(kind, TraitKind::Own | TraitKind::Both) => {
                             Flavor::Direct
+                        }
+                        Flavor::Bounded(mut bounds) => {
+                            let callees: Vec<_> = (0..program.callers.len())
+                                .filter(|index| {
+                                    let callee = &program.callers[*index];
+                                    callee.kind == kind
+                                        && matches!(callee.flavor, Flavor::Bounded(_))
+                                })
+                                .collect();
+                            if !callees.is_empty() && u.ratio(3, 4)? {
+                                let callee = *u.choose(&callees)?;
+                                bounds.via = Some(callee);
+                                // Equal bounds always fit the callee's; others may not.
+                                if u.arbitrary()?
+                                    && let Flavor::Bounded(callee_bounds) =
+                                        program.callers[callee].flavor
+                                {
+                                    bounds.first = callee_bounds.first;
+                                    bounds.second = callee_bounds.second;
+                                    bounds.callback = callee_bounds.callback;
+                                }
+                            }
+                            // Mostly, the callback row fits the evidence the bounds combine into.
+                            if kind.takes_callback()
+                                && u.ratio(3, 4)?
+                                && let Some(combined) = bounds.combined(kind)
+                            {
+                                bounds.callback = combined;
+                            }
+                            Flavor::Bounded(bounds)
                         }
                         flavor => flavor,
                     };
@@ -481,6 +591,11 @@ impl EffectProgram {
             Some(index) => (self.callers[index].kind, self.callers[index].depth),
             None => (u.choose(&self.traits)?.kind, 0),
         };
+        // Mostly, a bounded caller gets values and callbacks that fit its bounds.
+        let bounds = match caller.map(|index| self.callers[index].flavor) {
+            Some(Flavor::Bounded(bounds)) if u.ratio(3, 4)? => Some(bounds),
+            _ => None,
+        };
         // Try a few values; give up on this term if none implements the trait.
         for _ in 0..4 {
             let value = self.self_value(u, 3)?;
@@ -491,10 +606,17 @@ impl EffectProgram {
             let Some(eff) = self.eff(kind, &reached) else {
                 continue;
             };
+            if bounds.is_some_and(|bounds| !bounds.fit(kind, &eff)) {
+                continue;
+            }
             let callback = if kind.takes_callback() {
                 let callback = arbitrary_callback(u)?;
                 // A callback must perform no more than the `E` of the impl it reaches.
-                if !callback.eff().is_subset_of(&eff) {
+                if !callback.eff().is_subset_of(&eff)
+                    || bounds.is_some_and(|bounds| {
+                        !callback.eff().is_subset_of(&fixed_eff(bounds.callback))
+                    })
+                {
                     continue;
                 }
                 Some(callback)
@@ -592,7 +714,7 @@ impl EffectProgram {
         }
 
         for (index, caller) in self.callers.iter().enumerate() {
-            out.push_str(&self.render_caller(index, caller, e));
+            out.push_str(&self.render_caller(index, caller, e, variant.reverse));
         }
 
         let mut cycle_functions = Vec::new();
@@ -639,7 +761,7 @@ impl EffectProgram {
         out
     }
 
-    fn render_caller(&self, index: usize, caller: &Caller, e: &str) -> String {
+    fn render_caller(&self, index: usize, caller: &Caller, e: &str, reverse: bool) -> String {
         let kind = caller.kind;
         let i = kind.index();
         let f_param = if kind.takes_callback() { ", f" } else { "" };
@@ -700,6 +822,32 @@ impl EffectProgram {
                 "fn g{index}(s, x{f_param}{a_param}) {{\n\tlet mut t = x;\n\tfor y in a {{\n\t\tlet h = |z| {};\n\t\tt = t + h(y)\n\t}};\n\tt\n}}\n",
                 call("s", "z")
             ),
+            Flavor::Bounded(bounds) => {
+                let f_param = if kind.takes_callback() {
+                    format!(", f: (int) -> int ! {}", fixed_row(bounds.callback))
+                } else {
+                    String::new()
+                };
+                let mut clauses = vec![format!("\tT: Tr{i}<! {e} = {}>", fixed_row(bounds.first))];
+                if let Some(second) = bounds.second {
+                    clauses.push(format!("\tT: Tr{i}<! {e} = {}>", fixed_row(second)));
+                }
+                // Bounds combine whatever their order.
+                if reverse {
+                    clauses.reverse();
+                }
+                let body = match bounds.via {
+                    Some(callee) => {
+                        let f_arg = if kind.takes_callback() { ", f" } else { "" };
+                        format!("g{callee}(s, x{f_arg})")
+                    }
+                    None => call("s", "x"),
+                };
+                format!(
+                    "fn g{index}<T>(s: T, x: int{f_param}) -> int\nwhere\n{}\n{{\n\t{body}\n}}\n",
+                    clauses.join(",\n")
+                )
+            }
             Flavor::Delegate(callee) => {
                 let f_arg = if kind.takes_callback() { ", f" } else { "" };
                 let (a_param, a_arg) = if caller.takes_array {
