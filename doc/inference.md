@@ -181,7 +181,7 @@ needs no runtime adapter (see [abi.md](abi.md)).
   contributor's row is included in. This widening does not descend into named type arguments:
   joining already-typed `Box<Pure>` and `Box<Fallible>` requires equal callback effects and is
   rejected when those effects differ (see [Design choices](#design-choices)).
-- **Invariant positions** (type and effect arguments of named types, the outputs of duplicate
+- **Invariant positions** (type and effect arguments of named types, the outputs of equal
   trait applications in one scope, the types behind `&mut` parameters, which are also written
   back): equality. Where it is exact, it unifies the two rows so that equal types stay
   syntactically equal: two lone variables merge, and a lone variable becomes the other row. Other
