@@ -2902,3 +2902,369 @@ fn drop(x: &mut Wrap<T>) {}
         ));
     }
 }
+
+/// A callback wrapped for [`Run`], whose effect is the callback's.
+const RUN_PRELUDE: &str = indoc! { r#"
+struct Cb<T>(T)
+trait Run<Self |-> ! E> { fn run(x: Self) -> int ! E; }
+impl<! E> Run for <Self = Cb<(() -> int ! E)> |-> ! E = E> {
+ fn run(x: Cb<(() -> int ! E)>) -> int { x.0() }
+}
+"# };
+
+/// A custom `Value` impl for `name<T>` with `prerequisites` besides `T: Value`, whose
+/// `to_string` returns `name` without running anything.
+fn named_value_impl(name: &str, prerequisites: &str) -> String {
+    format!(
+        "struct {name}<T>(T)
+impl<T> Value for {name}<T> where T: Value, {prerequisites} {{
+ fn eq(x: {name}<T>, y: {name}<T>) -> bool {{ true }}
+ fn to_string(x: {name}<T>) -> string {{ \"{name}\" }}
+ fn hash(x: {name}<T>, state: &mut hasher) {{}}
+ fn clone(x: {name}<T>) -> {name}<T> {{ {name}(x.0) }}
+ fn drop(x: &mut {name}<T>) {{}}
+}}
+"
+    )
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_custom_value_impl_restricts_an_inferred_callback_effect() {
+    let prelude = format!(
+        "{RUN_PRELUDE}{}",
+        named_value_impl("Wrap", "T: Run<! E = ()>")
+    );
+    // Directly, and through compiler-provided containers.
+    for term in [
+        "Wrap(Cb(g))",
+        "(Wrap(Cb(g)), 1)",
+        "{ a: Wrap(Cb(g)) }",
+        "Some(Wrap(Cb(g)))",
+        "[Wrap(Cb(g))]",
+        "({ a: (Wrap(Cb(g)),) },)",
+    ] {
+        let src = format!("{prelude}fn f(g: () -> int) -> string {{ to_string({term}) }}\n");
+        let mut session = TestSession::new();
+        session.allow_unsafe();
+        assert_eq!(
+            signature(&mut session, &src, "f"),
+            "fn f(g: () -> int) -> string",
+            "{term}"
+        );
+        let mut session = TestSession::new();
+        session.allow_unsafe();
+        session.fail_compilation(&format!("{src}f(|| idiv(1, 0))"));
+    }
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    assert_val_eq!(
+        session.run(&format!(
+            "{prelude}fn f(g: () -> int) -> string {{ to_string(Wrap(Cb(g))) }}\nf(|| 5)"
+        )),
+        string("Wrap")
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_inapplicable_custom_value_impl_does_not_restrict_effects() {
+    // `Missing` has no impl, so the custom impl does not apply and `Value` is derived.
+    let src = format!(
+        "{RUN_PRELUDE}trait Missing<Self> {{ fn missing(x: Self) -> int; }}\n{}\
+         fn h(g: () -> int) -> string {{ to_string(Wrap(Cb(g))) }}\n",
+        named_value_impl("Wrap", "T: Missing, T: Run<! E = ()>")
+    );
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    assert_eq!(
+        signature(&mut session, &src, "h"),
+        "fn h<! e₀>(g: () -> int ! e₀) -> string"
+    );
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    assert_val_eq!(
+        session.run(&format!("{src}let a = [1];\nh(|| a[0])")),
+        string("Wrap (Cb (<function>))")
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_custom_value_impls_restrict_effects_across_the_cycle() {
+    // The restriction is on the far side of the cycle from the call.
+    let left = named_value_impl("Left", "Right<T>: Value");
+    let right = named_value_impl("Right", "T: Run<! E = ()>, Left<T>: Value");
+    let f = "fn f(g: () -> int) -> string { to_string(Left(Cb(g))) }\n";
+    for [first, second] in [[&left, &right], [&right, &left]] {
+        let src = format!("{RUN_PRELUDE}{first}{second}{f}");
+        let mut session = TestSession::new();
+        session.allow_unsafe();
+        assert_eq!(
+            signature(&mut session, &src, "f"),
+            "fn f(g: () -> int) -> string"
+        );
+        let mut session = TestSession::new();
+        session.allow_unsafe();
+        assert_val_eq!(session.run(&format!("{src}f(|| 5)")), string("Left"));
+        let mut session = TestSession::new();
+        session.allow_unsafe();
+        session.fail_compilation(&format!("{src}f(|| idiv(1, 0))"));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn fixed_output_effects_of_prerequisites_are_upper_bounds() {
+    // A pure callback fits a bound allowing failure.
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    assert_val_eq!(
+        session.run(&format!(
+            "{RUN_PRELUDE}{}to_string(Wrap(Cb(|| 5)))",
+            named_value_impl("Wrap", "T: Run<! E = (fallible)>")
+        )),
+        string("Wrap")
+    );
+    // Two bounds on one application need not be equal, whether they meet in one function or
+    // around a cycle of impls: a pure callback fits both.
+    for (impls, term, expected) in [
+        (
+            format!(
+                "{}{}",
+                named_value_impl("A", "T: Run<! E = (fallible)>"),
+                named_value_impl("B", "T: Run<! E = ()>")
+            ),
+            "let a = to_string(A(Cb(g)));\n let b = to_string(B(Cb(g)));\n f\"{a}{b}\"",
+            "AB",
+        ),
+        (
+            format!(
+                "{}{}",
+                named_value_impl("Left", "T: Run<! E = (fallible)>, Right<T>: Value"),
+                named_value_impl("Right", "T: Run<! E = ()>, Left<T>: Value")
+            ),
+            "to_string(Left(Cb(g)))",
+            "Left",
+        ),
+    ] {
+        let src = format!("{RUN_PRELUDE}{impls}fn f(g: () -> int) -> string {{ {term} }}\n");
+        let mut session = TestSession::new();
+        session.allow_unsafe();
+        assert_eq!(
+            signature(&mut session, &src, "f"),
+            "fn f(g: () -> int) -> string",
+            "{term}"
+        );
+        let mut session = TestSession::new();
+        session.allow_unsafe();
+        assert_val_eq!(session.run(&format!("{src}f(|| 5)")), string(expected));
+    }
+    // The same holds for other traits.
+    assert_val_eq!(
+        TestSession::new().run(&format!(
+            "{RUN_PRELUDE}struct Wrap<T>(T)
+trait Show<Self> {{ fn show(x: Self) -> string; }}
+impl<T> Show for Wrap<T> where T: Run<! E = (fallible)> {{ fn show(x: Wrap<T>) -> string {{ \"a\" }} }}
+trait Tell<Self> {{ fn tell(x: Self) -> string; }}
+impl<T> Tell for Wrap<T> where T: Run<! E = ()> {{ fn tell(x: Wrap<T>) -> string {{ \"b\" }} }}
+let w = Wrap(Cb(|| 5));
+let a = show(w);
+let b = tell(w);
+f\"{{a}}{{b}}\""
+        )),
+        string("ab")
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_imported_custom_value_impl_restricts_an_inferred_callback_effect() {
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    let lib = RUN_PRELUDE
+        .replace("struct Cb", "pub struct Cb")
+        .replace("trait Run", "pub trait Run")
+        + &named_value_impl("Wrap", "T: Run<! E = ()>").replace("struct Wrap", "pub struct Wrap");
+    session
+        .try_compile_module("lib", &lib)
+        .unwrap_or_else(|error| panic!("{error:?}"));
+    let src = "fn f(g: () -> int) -> string { to_string(lib::Wrap(lib::Cb(g))) }\n";
+    assert_eq!(
+        signature(&mut session, src, "f"),
+        "fn f(g: () -> int) -> string"
+    );
+    assert_val_eq!(session.run(&format!("{src}f(|| 5)")), string("Wrap"));
+    session.fail_compilation(&format!("{src}f(|| idiv(1, 0))"));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn fixed_output_effect_bounds_combine_whatever_their_order() {
+    // Performed effects fit every bound, so the bounds intersect: here `run` is pure.
+    let run = |impl_effect: &str, bounds: [&str; 2]| {
+        format!(
+            "trait Run<Self |-> ! E> {{ fn run(x: Self) -> int ! E; }}
+impl Run for <Self = int |-> ! E = {impl_effect}> {{ fn run(x: int) -> int {{ idiv(10, x) }} }}
+fn f<T>(x: T) -> int where T: Run<! E = {}>, T: Run<! E = {}> {{ run(x) }}
+fn pure(g: () -> int ! ()) -> int {{ g() }}
+pure(|| f(5))",
+            bounds[0], bounds[1]
+        )
+    };
+    for bounds in [["(fallible)", "()"], ["()", "(fallible)"]] {
+        assert_val_eq!(
+            TestSession::new().run(&run("()", bounds).replace("idiv(10, x)", "x")),
+            int(5),
+            "{bounds:?}"
+        );
+        // An implementation that fails does not fit the pure bound.
+        TestSession::new().fail_compilation(&run("(fallible)", bounds));
+    }
+    // Received effects include every bound, so the bounds unite: a failing callback is accepted.
+    for bounds in [["(fallible)", "()"], ["()", "(fallible)"]] {
+        assert_val_eq!(
+            TestSession::new().run(&format!(
+                "trait Apply<Self |-> ! E> {{ fn apply(x: Self, g: () -> int ! E) -> int; }}
+impl<! E> Apply for <Self = int |-> ! E = E> {{ fn apply(x: int, g: () -> int ! E) -> int {{ x }} }}
+fn f<T>(x: T) -> int where T: Apply<! E = {}>, T: Apply<! E = {}> {{
+    let a = [1];
+    apply(x, || a[0])
+}}
+let n: int = 5;
+f(n)",
+                bounds[0], bounds[1]
+            )),
+            int(5),
+            "{bounds:?}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn fixed_output_effect_bounds_of_a_trait_combine_in_its_default_methods() {
+    // The bounds are the default method's givens: `run` is pure, the callback may fail.
+    let program = |impl_effect: &str, run_body: &str, bounds: [&str; 2]| {
+        format!(
+            "trait Run<Self |-> ! E> {{ fn run(x: Self) -> int ! E; }}
+impl Run for <Self = int |-> ! E = {impl_effect}> {{ fn run(x: int) -> int {{ {run_body} }} }}
+trait Apply<Self |-> ! E> {{ fn apply(x: Self, g: () -> int ! E) -> int; }}
+impl<! E> Apply for <Self = int |-> ! E = E> {{ fn apply(x: int, g: () -> int ! E) -> int {{ x }} }}
+trait Tr<Self>
+where Self: Run<! E = {0}>, Self: Run<! E = {1}>, Self: Apply<! E = {0}>, Self: Apply<! E = {1}> {{
+    fn go(x: Self) -> int {{
+        let a = [1];
+        run(x) + apply(x, || a[0])
+    }}
+}}
+impl Tr for int {{}}
+go(5)",
+            bounds[0], bounds[1]
+        )
+    };
+    for bounds in [["(fallible)", "()"], ["()", "(fallible)"]] {
+        assert_val_eq!(
+            TestSession::new().run(&program("()", "x", bounds)),
+            int(10),
+            "{bounds:?}"
+        );
+        // An implementation that fails does not fit the pure bound.
+        TestSession::new().fail_compilation(&program("(fallible)", "idiv(10, x)", bounds));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_given_bound_fits_a_callees_fixed_bound_by_polarity() {
+    // A default method's given is evidence; a helper's `where` clause is a bound it must fit.
+    let program = |method: &str, given: &str, helper: &str| {
+        format!(
+            "trait Run<Self |-> ! E> {{ fn run(x: Self) -> int ! E; }}
+impl Run for <Self = int |-> ! E = ()> {{ fn run(x: int) -> int {{ x }} }}
+trait Apply<Self |-> ! E> {{ fn apply(x: Self, g: () -> int ! E) -> int; }}
+impl<! E> Apply for <Self = int |-> ! E = E> {{ fn apply(x: int, g: () -> int ! E) -> int {{ x }} }}
+trait Both<Self |-> ! E> {{ fn both(x: Self, g: () -> int ! E) -> int ! E; }}
+impl<! E> Both for <Self = int |-> ! E = E> {{ fn both(x: int, g: () -> int ! E) -> int {{ x }} }}
+fn helper_run<T>(x: T) -> int where T: Run<! E = {helper}> {{ run(x) }}
+fn helper_apply<T>(x: T) -> int where T: Apply<! E = {helper}> {{ apply(x, || 1) }}
+fn helper_both<T>(x: T) -> int where T: Both<! E = {helper}> {{ both(x, || 1) }}
+trait Tr<Self> where Self: {method}<! E = {given}> {{
+    fn go(x: Self) -> int ! fallible {{ helper_{}(x) }}
+}}
+impl Tr for int {{}}
+go(5)",
+            method.to_lowercase()
+        )
+    };
+    let (pure, fallible) = ("()", "(fallible)");
+    for (method, given, helper, accepted) in [
+        // Performed: evidence that does not fail fits a bound permitting failure, not conversely.
+        ("Run", pure, fallible, true),
+        ("Run", fallible, pure, false),
+        // Received: evidence accepting failing callbacks fits a bound on pure ones, not conversely.
+        ("Apply", fallible, pure, true),
+        ("Apply", pure, fallible, false),
+        // Invariant: the bounds must be equal.
+        ("Both", fallible, fallible, true),
+        ("Both", pure, fallible, false),
+    ] {
+        let src = program(method, given, helper);
+        if accepted {
+            assert_val_eq!(
+                TestSession::new().run(&src),
+                int(5),
+                "{method} {given} {helper}"
+            );
+        } else {
+            TestSession::new().fail_compilation(&src);
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_literal_defaults_through_an_impl_with_effect_parameters() {
+    // An impl with an effect parameter is a blanket impl; it still lets `5` default to `int`.
+    for call in ["apply(5, || 1)", "f(5)"] {
+        assert_val_eq!(
+            TestSession::new().run(&format!(
+                "trait Apply<Self |-> ! E> {{ fn apply(x: Self, g: () -> int ! E) -> int; }}
+impl<! E> Apply for <Self = int |-> ! E = E> {{ fn apply(x: int, g: () -> int ! E) -> int {{ x }} }}
+fn f<T>(x: T) -> int where T: Apply<! E = (fallible)> {{ apply(x, || 1) }}
+{call}"
+            )),
+            int(5),
+            "{call}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_imported_impl_meets_its_prerequisites_with_its_private_impls() {
+    // `Run` and its impl are private to `lib`, which needs them for its public impls.
+    let lib = RUN_PRELUDE.replace("struct Cb", "pub struct Cb")
+        + &named_value_impl("Wrap", "T: Run<! E = ()>").replace("struct Wrap", "pub struct Wrap")
+        + "pub trait Show<Self> { fn show(x: Self) -> string; }
+impl<T> Show for Wrap<T> where T: Run<! E = ()> { fn show(x: Wrap<T>) -> string { \"shown\" } }
+";
+    for (call, expected) in [
+        ("to_string(lib::Wrap(lib::Cb(g)))", "Wrap"),
+        ("lib::Show::show(lib::Wrap(lib::Cb(g)))", "shown"),
+    ] {
+        let mut session = TestSession::new();
+        session.allow_unsafe();
+        session
+            .try_compile_module("lib", &lib)
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        let src = format!("fn f(g: () -> int) -> string {{ {call} }}\n");
+        assert_eq!(
+            signature(&mut session, &src, "f"),
+            "fn f(g: () -> int) -> string",
+            "{call}"
+        );
+        assert_val_eq!(session.run(&format!("{src}f(|| 5)")), string(expected));
+        session.fail_compilation(&format!("{src}f(|| idiv(1, 0))"));
+    }
+}

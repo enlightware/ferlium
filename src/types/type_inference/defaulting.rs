@@ -498,7 +498,9 @@ impl UnifiedTypeInference {
             let old_remaining_constraints = constraints.iter().collect::<FxHashSet<_>>();
             // Defaulting reuses the main constraint aggregation path so late
             // projection and ADT constraints are canonicalized consistently.
-            let aggregation = self.aggregate_constraints_for_pass(constraints.iter())?;
+            let aggregation = self.aggregate_constraints_for_pass(constraints.iter(), &|id| {
+                trait_solver.output_effect_polarities(id)
+            })?;
             let constraint_refs = aggregation
                 .constraints
                 .iter()
@@ -706,9 +708,17 @@ impl UnifiedTypeInference {
                     }
                     let mut default_index = defaulted_ty_vars.get(&ty_var).copied().unwrap_or(0);
                     while default_index < default_tys.len() {
-                        let key =
-                            ConcreteTraitImplKey::new(*trait_id, vec![default_tys[default_index]]);
-                        if trait_solver.has_concrete_impl(&key) {
+                        let default_ty = default_tys[default_index];
+                        let key = ConcreteTraitImplKey::new(*trait_id, vec![default_ty]);
+                        // An impl with effect parameters, such as `impl<! E> Run for int`, is a
+                        // blanket one: it applies by structure.
+                        if trait_solver.has_concrete_impl(&key)
+                            || trait_solver.has_impl_by_structure(
+                                *trait_id,
+                                &[default_ty],
+                                constraint.use_site(),
+                            )
+                        {
                             break;
                         }
                         default_index += 1;

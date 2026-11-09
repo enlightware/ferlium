@@ -175,6 +175,18 @@ impl<'a> TraitSolver<'a> {
         }
     }
 
+    /// Run `f` with the private impls of `module` visible, as when solving inside that module.
+    pub(crate) fn in_private_impl_scope<R>(
+        &mut self,
+        module: ModuleId,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.private_impl_scope.push(module);
+        let result = f(self);
+        self.private_impl_scope.pop();
+        result
+    }
+
     /// Allow this solver to use private trait implementations from `module_id`.
     ///
     /// This is used by the private scratch-expression machinery when dispatching on a value whose
@@ -223,6 +235,23 @@ fn materialized_associated_const_values(
         ),
         span,
     }))
+}
+
+/// Whether an implementation's output effect fits the one a requirement names, by polarity:
+/// a performed effect may be smaller, a received one larger. Rows are compared effect by effect,
+/// which holds whatever their variables stand for.
+pub(crate) fn output_effect_fits(
+    solved: &EffType,
+    required: &EffType,
+    polarity: EffectPolarity,
+) -> bool {
+    let included =
+        |smaller: &EffType, larger: &EffType| smaller.iter().all(|eff| larger.contains(eff));
+    match polarity {
+        EffectPolarity::Positive => included(solved, required),
+        EffectPolarity::Negative => included(required, solved),
+        EffectPolarity::Invariant => solved == required,
+    }
 }
 
 /// Macro to create a trait solver from a module and a program.
@@ -1014,8 +1043,28 @@ pub(crate) struct SymbolicApplication {
     pub(crate) output_tys: Vec<Type>,
     pub(crate) output_effs: Vec<EffType>,
     pub(crate) obligations: Vec<PubTypeConstraint>,
+    /// The module of an implementation from another module, whose private impls its
+    /// obligations may use, as when its dictionary is materialized.
+    pub(crate) private_impl_scope: Option<ModuleId>,
     pub(crate) type_var_base: u32,
     pub(crate) effect_var_base: u32,
+}
+
+/// A blanket implementation whose inputs match an application, before its caller accepts it.
+struct BlanketCandidate<'k> {
+    /// The module of the implementation, `None` for the current one.
+    module: Option<ModuleId>,
+    impl_id: LocalImplId,
+    sub_key: &'k BlanketTraitImplSubKey,
+    /// The implementation's outputs, in its own variables.
+    declared_output_tys: Vec<Type>,
+    declared_output_effs: Vec<EffType>,
+    /// The outputs at this application.
+    output_tys: Vec<Type>,
+    output_effs: Vec<EffType>,
+    runtime_requirements: Vec<ResolvedRuntimeRequirement>,
+    /// The implementation's generic parameters resolved at this application.
+    instantiation: InstSubst,
 }
 
 /// A runtime hidden requirement from a matched blanket impl after substitution.
@@ -1047,6 +1096,7 @@ enum TraitImprovementMatch {
 
 /// Controls how `match_blanket_impl` treats nested trait constraints that are
 /// still not fully resolved after reaching a fixed point.
+#[derive(Clone, Copy)]
 enum BlanketConstraintMode {
     /// Matching is only considered successful if every nested trait constraint
     /// can be resolved immediately.
@@ -3240,6 +3290,18 @@ impl<'a> TraitSolver<'a> {
         found
     }
 
+    /// Whether an implementation applies to these inputs by structure, with effects ignored,
+    /// as selection sees them, without keeping what solving generates.
+    pub(crate) fn has_impl_by_structure(
+        &mut self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        fn_span: Location,
+    ) -> bool {
+        self.solve_outputs_by_structure_query(trait_id, input_tys, fn_span)
+            .is_ok()
+    }
+
     /// Get a concrete trait implementation by its key, without performing any solving.
     /// This searches in current module first, then in other modules.
     /// Only public implementations from other modules are considered.
@@ -3641,13 +3703,17 @@ impl<'a> TraitSolver<'a> {
                 }
                 continue;
             }
+            // Output effects relate by their polarity, as when matching.
             if validate_outputs
                 && (dict_impl_data.output_tys != *output_tys
                     || !dict_impl_data
                         .output_effs
                         .iter()
                         .zip(output_effs.iter())
-                        .all(|(solved_eff, constraint_eff)| solved_eff == constraint_eff))
+                        .zip(self.output_effect_polarities(*trait_id))
+                        .all(|((solved_eff, constraint_eff), polarity)| {
+                            output_effect_fits(solved_eff, constraint_eff, polarity)
+                        }))
             {
                 return Ok(false);
             }
@@ -3906,470 +3972,36 @@ impl<'a> TraitSolver<'a> {
         }
 
         // No concrete implementation found, search for a matching blanket implementation.
-        let output_polarities = self.output_effect_polarities(trait_id);
-        // We first share the local table to avoid borrowing issues: adding a blanket
-        // implementation during the search copies it and leaves this view unchanged.
-        let local_blankets = self.impls.blanket_key_to_id.clone();
-        let blankets = visible_blanket_impls(&local_blankets, self.others, trait_id);
         let mut search = CandidateSearch::new(&self.impls.pending);
-        let fully_determined = input_tys.iter().all(Type::is_constant);
-        // Then we iterate over all blanket implementations, trying to unify their input types
-        for (imp_module_id, blanket_impls) in blankets {
-            'impl_loop: for (sub_key, impl_id) in blanket_impls.iter() {
-                if !input_heads_may_match(&sub_key.input_tys, input_tys) {
-                    continue 'impl_loop;
-                }
-                search.next_candidate();
-                let imp_input_tys = &sub_key.input_tys;
-                let imp_ty_var_count = sub_key.ty_var_count;
-                let imp_eff_var_count = sub_key.eff_var_count;
-                let imp_constraints = &sub_key.constraints;
-                let (imp_public, imp_output_tys, imp_output_effs) =
-                    if let Some(module_id) = imp_module_id {
-                        let imp = &self
-                            .others
-                            .get(module_id)
-                            .unwrap()
-                            .module()
-                            .unwrap()
-                            .impls
-                            .data[impl_id.as_index()];
-                        (
-                            self.can_use_other_impl(module_id, imp),
-                            imp.output_tys.clone(),
-                            imp.output_effs.clone(),
-                        )
-                    } else {
-                        let imp = &self.impls.data[impl_id.as_index()];
-                        (true, imp.output_tys.clone(), imp.output_effs.clone())
-                    };
-                if !imp_public {
-                    continue 'impl_loop;
-                }
-                if let Some(module_id) = imp_module_id {
-                    self.private_impl_scope.push(module_id);
-                }
-                macro_rules! continue_impl_loop {
-                    () => {{
-                        if imp_module_id.is_some() {
-                            self.private_impl_scope.pop();
-                        }
-                        continue 'impl_loop;
-                    }};
-                }
-
-                // Sanity checks
-                #[cfg(debug_assertions)]
-                Self::assert_blanket_impl_is_well_formed(
-                    imp_input_tys,
-                    &imp_output_tys,
-                    &imp_output_effs,
-                    imp_constraints,
-                    imp_ty_var_count,
-                    imp_eff_var_count,
-                    input_tys,
-                );
-
-                // Match the blanket implementation and resolve the blanket constraints to a
-                // fixed point before materializing the concrete implementation.
-                let mut ty_inf =
-                    UnifiedTypeInference::new_with_ty_vars(Self::type_var_capacity_for_types(
-                        input_tys
-                            .iter()
-                            .chain(requested_output_tys.unwrap_or_default()),
-                    ));
-                // Likewise reserve the requested application's effect variables, so that the
-                // impl's fresh effect variables cannot alias them.
-                for _ in 0..Self::effect_var_capacity(
-                    input_tys
-                        .iter()
-                        .chain(requested_output_tys.unwrap_or_default()),
-                    requested_output_effs.unwrap_or_default(),
-                ) {
-                    ty_inf.fresh_effect_var();
-                }
-                let blanket_constraint_mode = if self.selecting_by_structure {
-                    BlanketConstraintMode::Structural
-                } else if trait_id == value_trait_id {
-                    BlanketConstraintMode::DeferConcreteObligations
-                } else {
-                    BlanketConstraintMode::RequireAllResolved
-                };
-                // By structure, the candidate is seen without effects, as the application is.
-                let erased_candidate = self.selecting_by_structure.then(|| {
-                    (
-                        instantiate_types(imp_input_tys, &mut EffectErasingMapper),
-                        instantiate_types(&imp_output_tys, &mut EffectErasingMapper),
-                        instantiate_types(imp_constraints, &mut EffectErasingMapper),
-                        vec![EffType::empty(); imp_output_effs.len()],
-                    )
-                });
-                let (
-                    matched_input_tys,
-                    matched_output_tys,
-                    matched_constraints,
-                    matched_output_effs,
-                ) = match &erased_candidate {
-                    Some((inputs, outputs, constraints, effs)) => {
-                        (&inputs[..], &outputs[..], &constraints[..], &effs[..])
-                    }
-                    None => (
-                        &imp_input_tys[..],
-                        &imp_output_tys[..],
-                        &imp_constraints[..],
-                        &imp_output_effs[..],
-                    ),
-                };
-                let blanket_match = Self::match_blanket_impl(
-                    self,
-                    &mut ty_inf,
-                    matched_input_tys,
-                    matched_output_tys,
-                    matched_output_effs,
-                    &output_polarities,
-                    imp_ty_var_count,
-                    imp_eff_var_count,
-                    matched_constraints,
+        let blanket_constraint_mode = if self.selecting_by_structure {
+            BlanketConstraintMode::Structural
+        } else if trait_id == value_trait_id {
+            BlanketConstraintMode::DeferConcreteObligations
+        } else {
+            BlanketConstraintMode::RequireAllResolved
+        };
+        if let Some(impl_id) = self.select_blanket_candidate(
+            trait_id,
+            input_tys,
+            requested_output_tys,
+            requested_output_effs,
+            blanket_constraint_mode,
+            &mut search,
+            fn_span,
+            arena,
+            |solver, candidate, arena| {
+                solver.materialize_blanket_candidate(
+                    trait_id,
                     input_tys,
                     requested_output_tys,
                     requested_output_effs,
-                    ConstraintAssumptions::all(&[]),
+                    candidate,
                     fn_span,
                     arena,
-                    blanket_constraint_mode,
-                )?;
-                let BlanketImplMatch::Yes {
-                    output_tys,
-                    output_effs,
-                    runtime_requirements: resolved_runtime_requirements,
-                    instantiation: blanket_instantiation,
-                } = blanket_match
-                else {
-                    self.reject_if_applies_by_structure(
-                        (sub_key, &imp_output_tys),
-                        input_tys,
-                        requested_output_tys,
-                        fn_span,
-                    )?;
-                    continue_impl_loop!();
-                };
-                let defaulted_output_effect_vars = FxHashSet::default();
-
-                // Non-Value blanket impls can materialize all constraint dictionaries up front.
-                if trait_id != value_trait_id {
-                    let mut runtime_requirements = self.runtime_requirements_from_resolved(
-                        &resolved_runtime_requirements,
-                        imp_constraints,
-                    );
-                    Self::close_defaulted_requirement_effect_rows(
-                        &mut runtime_requirements,
-                        &defaulted_output_effect_vars,
-                    );
-                    if !self.validate_runtime_requirements(
-                        &resolved_runtime_requirements,
-                        fn_span,
-                        arena,
-                        false,
-                    )? {
-                        let rejected = self.reject_if_requirements_fail_on_effects(
-                            &resolved_runtime_requirements,
-                            input_tys,
-                            fn_span,
-                        );
-                        if rejected.is_err() && imp_module_id.is_some() {
-                            self.private_impl_scope.pop();
-                        }
-                        rejected?;
-                        continue_impl_loop!();
-                    }
-
-                    // Succeeded? First get the blanket implementation data and compute the output types.
-                    let impls = if let Some(module_id) = imp_module_id {
-                        &self.others.get(module_id).unwrap().module().unwrap().impls
-                    } else {
-                        #[allow(clippy::needless_borrow)] // clippy has a bug here as of Rust 1.90
-                        &self.impls
-                    };
-                    let imp = &impls.data[impl_id.as_index()];
-                    // Self evidence belongs to method execution, not to blanket selection.
-                    // The selected dictionary supplies it through the existing entry mapping.
-                    let method_requirements = self.blanket_method_requirements(
-                        &imp.dictionary_value,
-                        imp.methods.len(),
-                        &runtime_requirements,
-                        DictionaryReq::new_trait_impl(
-                            trait_id,
-                            input_tys.to_vec(),
-                            output_tys.clone(),
-                            output_effs.clone(),
-                        ),
-                    );
-
-                    let associated_const_values = {
-                        let trait_def =
-                            trait_def_from_parts(self.current_type_items, self.others, trait_id);
-                        materialized_associated_const_values(
-                            trait_id,
-                            trait_def,
-                            input_tys,
-                            &imp.associated_const_values,
-                            fn_span,
-                            self,
-                        )?
-                    };
-
-                    // Then, for every function in the blanket implementation, if needed create a thunk function
-                    // importing it and closing over the constraint dictionaries.
-                    let trait_def =
-                        trait_def_from_parts(self.current_type_items, self.others, trait_id);
-                    let definitions =
-                        trait_def.instantiate_for_tys(input_tys, &output_tys, &output_effs);
-                    let gen_functions = imp.methods.clone(); // clone to avoid borrowing issues
-                    let mut methods = Vec::with_capacity(gen_functions.len());
-                    let mut tys = Vec::with_capacity(gen_functions.len());
-                    for (method_index, (fn_id, def)) in
-                        gen_functions.iter().zip(definitions).enumerate()
-                    {
-                        let requirements = &method_requirements[method_index];
-                        let method_index = TraitMethodIndex::from_index(method_index);
-                        // Build the concrete function type and hash its signature.
-                        let fn_ty = Type::function_type(def.ty_scheme.ty.clone());
-
-                        // Is the generic function from another module, or do we need to pass constraint dictionaries?
-                        let id = if requirements.callee.is_empty() && imp_module_id.is_none() {
-                            // No, so we can just use the generic function as is.
-                            *fn_id
-                        } else {
-                            let function = self.materialize_blanket_method_thunk(
-                                *fn_id,
-                                imp_module_id,
-                                &def,
-                                imp_ty_var_count,
-                                imp_eff_var_count,
-                                &blanket_instantiation,
-                                requirements,
-                                fn_span,
-                            )?;
-                            let name = Ustr::from(&format!(
-                                "{}-thunk",
-                                self.qualified_name_env().disambiguated_impl_method_name(
-                                    trait_id,
-                                    trait_def,
-                                    method_index,
-                                    input_tys,
-                                    &output_tys,
-                                    &output_effs,
-                                    sub_key.ty_var_count,
-                                    sub_key.eff_var_count,
-                                    &sub_key.constraints,
-                                )
-                            ));
-                            let id = self.fn_collector.next_id();
-                            self.fn_collector.push_with_visibility(
-                                name,
-                                function,
-                                Visibility::Module,
-                            );
-                            id
-                        };
-
-                        methods.push(id);
-                        tys.push(fn_ty);
-                    }
-
-                    // Build and insert the implementation.
-                    let associated_const_tys = trait_def.instantiate_associated_const_tys_for_tys(
-                        input_tys,
-                        &output_tys,
-                        &output_effs,
-                    );
-                    let associated_const_names = self.impl_associated_const_names(
-                        trait_id,
-                        input_tys,
-                        &output_tys,
-                        &output_effs,
-                        sub_key.ty_var_count,
-                        sub_key.eff_var_count,
-                        &sub_key.constraints,
-                    );
-                    let associated_const_getters =
-                        TraitImpls::bundle_pending_trivial_associated_const_getters(
-                            &associated_const_values,
-                            &associated_const_tys,
-                            &mut self.fn_collector,
-                            |index| associated_const_names[index],
-                        );
-                    let dictionary_ty = TraitImpls::dictionary_ty(tys, associated_const_tys);
-                    let dictionary_value = blanket_dictionary(
-                        trait_id,
-                        input_tys,
-                        &methods,
-                        &associated_const_getters,
-                        &method_requirements,
-                    );
-                    let imp = TraitImpl::new(
-                        trait_id,
-                        output_tys.clone(),
-                        output_effs.clone(),
-                        methods,
-                        dictionary_value,
-                        dictionary_ty,
-                        false,
-                        None,
-                    )
-                    .with_associated_const_values(associated_const_values)
-                    .with_associated_const_getters(associated_const_getters);
-                    // A generated dictionary denotes its full application, outputs included: it is
-                    // indexed by its request and by the outputs it has, so that a later request
-                    // naming either finds it, and never serves another application.
-                    let local_impl_id = self.impls.add_anonymous_dictionary_struct(imp);
-                    let requested_key = application_key(
-                        trait_id,
-                        input_tys,
-                        requested_output_tys,
-                        requested_output_effs,
-                    );
-                    let resulting_key =
-                        application_key(trait_id, input_tys, Some(&output_tys), Some(&output_effs));
-                    for key in [requested_key, resulting_key] {
-                        Rc::make_mut(&mut self.impls.application_key_to_id)
-                            .insert(key, local_impl_id);
-                    }
-
-                    if imp_module_id.is_some() {
-                        self.private_impl_scope.pop();
-                    }
-                    if fully_determined {
-                        search.succeed();
-                    }
-                    return Ok(self.impl_id(self.current_type_items.module.id, local_impl_id));
-                }
-
-                // Value blanket impls may be recursive, so reserve the concrete impl before
-                // materializing any deferred constraint dictionaries.
-                let imp = if let Some(module_id) = imp_module_id {
-                    &self
-                        .others
-                        .get(module_id)
-                        .unwrap()
-                        .module()
-                        .unwrap()
-                        .impls
-                        .data[impl_id.as_index()]
-                } else {
-                    &self.impls.data[impl_id.as_index()]
-                };
-                let imp_associated_const_values = imp.associated_const_values.clone();
-                let gen_functions = imp.methods.clone();
-                let source_dictionary = imp.dictionary_value.clone();
-                let associated_const_values = {
-                    let trait_def =
-                        trait_def_from_parts(self.current_type_items, self.others, trait_id);
-                    materialized_associated_const_values(
-                        trait_id,
-                        trait_def,
-                        input_tys,
-                        &imp_associated_const_values,
-                        fn_span,
-                        self,
-                    )?
-                };
-                let materialization_snapshot = self.snapshot_derived_impl_state();
-                let local_impl_id = self.reserve_concrete_impl_from_code_entries(
-                    trait_id,
-                    input_tys,
-                    &output_tys,
-                    &output_effs,
-                    associated_const_values,
-                );
-
-                // Now that recursive self-references can resolve to the reserved impl,
-                // materialize the deferred constraint dictionaries.
-                let mut runtime_requirements = self.runtime_requirements_from_resolved(
-                    &resolved_runtime_requirements,
-                    imp_constraints,
-                );
-                Self::close_defaulted_requirement_effect_rows(
-                    &mut runtime_requirements,
-                    &defaulted_output_effect_vars,
-                );
-                let method_requirements = self.blanket_method_requirements(
-                    &source_dictionary,
-                    gen_functions.len(),
-                    &runtime_requirements,
-                    DictionaryReq::new_trait_impl(
-                        trait_id,
-                        input_tys.to_vec(),
-                        output_tys.clone(),
-                        output_effs.clone(),
-                    ),
-                );
-                if !self.validate_runtime_requirements(
-                    &resolved_runtime_requirements,
-                    fn_span,
-                    arena,
-                    true,
-                )? {
-                    self.rollback_derived_impl_state(materialization_snapshot);
-                    let rejected = self.reject_if_requirements_fail_on_effects(
-                        &resolved_runtime_requirements,
-                        input_tys,
-                        fn_span,
-                    );
-                    if rejected.is_err() && imp_module_id.is_some() {
-                        self.private_impl_scope.pop();
-                    }
-                    rejected?;
-                    continue_impl_loop!();
-                }
-
-                // Then, for every function in the blanket implementation, if needed create a thunk function
-                // importing it and closing over the constraint dictionaries.
-                let definitions =
-                    trait_def_from_parts(self.current_type_items, self.others, trait_id)
-                        .instantiate_for_tys(input_tys, &output_tys, &output_effs);
-                let functions = gen_functions
-                    .iter()
-                    .zip(definitions)
-                    .zip(&method_requirements)
-                    .map(|((fn_id, def), requirements)| {
-                        self.materialize_blanket_method_thunk(
-                            *fn_id,
-                            imp_module_id,
-                            &def,
-                            imp_ty_var_count,
-                            imp_eff_var_count,
-                            &blanket_instantiation,
-                            requirements,
-                            fn_span,
-                        )
-                    })
-                    .collect::<Result<Vec<_>, InternalCompilationError>>()?;
-                let methods = self.impls.data[local_impl_id.as_index()].methods.clone();
-                assert_eq!(methods.len(), functions.len());
-                for (id, function) in methods.iter().copied().zip(functions) {
-                    self.fn_collector.replace(id, function);
-                }
-                let associated_const_getters = self.impls.data[local_impl_id.as_index()]
-                    .associated_const_getters
-                    .clone();
-                Rc::make_mut(&mut self.impls.data)[local_impl_id.as_index()].dictionary_value =
-                    blanket_dictionary(
-                        trait_id,
-                        input_tys,
-                        &methods,
-                        &associated_const_getters,
-                        &method_requirements,
-                    );
-
-                if imp_module_id.is_some() {
-                    self.private_impl_scope.pop();
-                }
-                if fully_determined {
-                    search.succeed();
-                }
-                return Ok(self.impl_id(self.current_type_items.module.id, local_impl_id));
-            }
+                )
+            },
+        )? {
+            return Ok(impl_id);
         }
 
         // A pending impl may still provide this application: neither derive nor conclude that
@@ -4653,6 +4285,503 @@ impl<'a> TraitSolver<'a> {
         Ok(())
     }
 
+    /// Walk the visible blanket implementations in order and hand each one whose inputs match the
+    /// application to `accept`, which validates it and returns its result, or `None` to go on to
+    /// the next candidate. A candidate that does not match but applies by structure is rejected,
+    /// as effects cannot select another implementation. While a candidate from another module is
+    /// matched and accepted, that module is the private impl scope.
+    #[allow(clippy::too_many_arguments)]
+    fn select_blanket_candidate<R>(
+        &mut self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        requested_output_tys: Option<&[Type]>,
+        requested_output_effs: Option<&[EffType]>,
+        mode: BlanketConstraintMode,
+        search: &mut CandidateSearch,
+        fn_span: Location,
+        arena: &mut NodeArena,
+        mut accept: impl FnMut(
+            &mut Self,
+            BlanketCandidate<'_>,
+            &mut NodeArena,
+        ) -> Result<Option<R>, InternalCompilationError>,
+    ) -> Result<Option<R>, InternalCompilationError> {
+        let output_polarities = self.output_effect_polarities(trait_id);
+        // Share the local table to avoid borrowing issues: adding a blanket implementation
+        // during the search copies it and leaves this view unchanged.
+        let local_blankets = self.impls.blanket_key_to_id.clone();
+        let blankets = visible_blanket_impls(&local_blankets, self.others, trait_id);
+        let fully_determined = input_tys.iter().all(Type::is_constant);
+        // By structure, the candidate is seen without effects, as the application is.
+        let by_structure = matches!(mode, BlanketConstraintMode::Structural);
+        for (module, blanket_impls) in blankets {
+            for (sub_key, impl_id) in blanket_impls.iter() {
+                if !input_heads_may_match(&sub_key.input_tys, input_tys) {
+                    continue;
+                }
+                search.next_candidate();
+                let (public, declared_output_tys, declared_output_effs) = match module {
+                    Some(module_id) => {
+                        let imp = &self
+                            .others
+                            .get(module_id)
+                            .unwrap()
+                            .module()
+                            .unwrap()
+                            .impls
+                            .data[impl_id.as_index()];
+                        (
+                            self.can_use_other_impl(module_id, imp),
+                            imp.output_tys.clone(),
+                            imp.output_effs.clone(),
+                        )
+                    }
+                    None => {
+                        let imp = &self.impls.data[impl_id.as_index()];
+                        (true, imp.output_tys.clone(), imp.output_effs.clone())
+                    }
+                };
+                if !public {
+                    continue;
+                }
+
+                #[cfg(debug_assertions)]
+                Self::assert_blanket_impl_is_well_formed(
+                    &sub_key.input_tys,
+                    &declared_output_tys,
+                    &declared_output_effs,
+                    &sub_key.constraints,
+                    sub_key.ty_var_count,
+                    sub_key.eff_var_count,
+                    input_tys,
+                );
+
+                if let Some(module_id) = module {
+                    self.private_impl_scope.push(module_id);
+                }
+                // A closure, so that the scope is restored on every exit, errors included.
+                let accepted = (|| {
+                    // Match the blanket implementation and resolve its constraints to a fixed point.
+                    let mut ty_inf =
+                        UnifiedTypeInference::new_with_ty_vars(Self::type_var_capacity_for_types(
+                            input_tys
+                                .iter()
+                                .chain(requested_output_tys.unwrap_or_default()),
+                        ));
+                    // Reserve the application's effect variables, so that the implementation's
+                    // fresh effect variables cannot alias them.
+                    for _ in 0..Self::effect_var_capacity(
+                        input_tys
+                            .iter()
+                            .chain(requested_output_tys.unwrap_or_default()),
+                        requested_output_effs.unwrap_or_default(),
+                    ) {
+                        ty_inf.fresh_effect_var();
+                    }
+                    let erased = by_structure.then(|| {
+                        (
+                            instantiate_types(&sub_key.input_tys, &mut EffectErasingMapper),
+                            instantiate_types(&declared_output_tys, &mut EffectErasingMapper),
+                            instantiate_types(&sub_key.constraints, &mut EffectErasingMapper),
+                            vec![EffType::empty(); declared_output_effs.len()],
+                        )
+                    });
+                    let (
+                        matched_input_tys,
+                        matched_output_tys,
+                        matched_constraints,
+                        matched_output_effs,
+                    ) = match &erased {
+                        Some((inputs, outputs, constraints, effs)) => {
+                            (&inputs[..], &outputs[..], &constraints[..], &effs[..])
+                        }
+                        None => (
+                            &sub_key.input_tys[..],
+                            &declared_output_tys[..],
+                            &sub_key.constraints[..],
+                            &declared_output_effs[..],
+                        ),
+                    };
+                    let blanket_match = Self::match_blanket_impl(
+                        self,
+                        &mut ty_inf,
+                        matched_input_tys,
+                        matched_output_tys,
+                        matched_output_effs,
+                        &output_polarities,
+                        sub_key.ty_var_count,
+                        sub_key.eff_var_count,
+                        matched_constraints,
+                        input_tys,
+                        requested_output_tys,
+                        requested_output_effs,
+                        ConstraintAssumptions::all(&[]),
+                        fn_span,
+                        arena,
+                        mode,
+                    )?;
+                    let BlanketImplMatch::Yes {
+                        output_tys,
+                        output_effs,
+                        runtime_requirements,
+                        instantiation,
+                    } = blanket_match
+                    else {
+                        self.reject_if_applies_by_structure(
+                            (sub_key, &declared_output_tys),
+                            input_tys,
+                            requested_output_tys,
+                            fn_span,
+                        )?;
+                        return Ok(None);
+                    };
+                    let candidate = BlanketCandidate {
+                        module,
+                        impl_id: *impl_id,
+                        sub_key,
+                        declared_output_tys,
+                        declared_output_effs,
+                        output_tys,
+                        output_effs,
+                        runtime_requirements,
+                        instantiation,
+                    };
+                    accept(self, candidate, arena)
+                })();
+                if module.is_some() {
+                    self.private_impl_scope.pop();
+                }
+                if let Some(result) = accepted? {
+                    if fully_determined {
+                        search.succeed();
+                    }
+                    return Ok(Some(result));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Accept a blanket candidate for `solve_impl_actual` by materializing its dictionary, or
+    /// return `None` when its runtime requirements fail, to go on to the next candidate.
+    #[allow(clippy::too_many_arguments)]
+    fn materialize_blanket_candidate(
+        &mut self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        requested_output_tys: Option<&[Type]>,
+        requested_output_effs: Option<&[EffType]>,
+        candidate: BlanketCandidate<'_>,
+        fn_span: Location,
+        arena: &mut NodeArena,
+    ) -> Result<Option<TraitImplId>, InternalCompilationError> {
+        let value_trait_id = self.std_trait_id(VALUE_TRAIT_NAME);
+        let BlanketCandidate {
+            module: imp_module_id,
+            impl_id,
+            sub_key,
+            output_tys,
+            output_effs,
+            runtime_requirements: resolved_runtime_requirements,
+            instantiation: blanket_instantiation,
+            ..
+        } = candidate;
+        let imp_constraints = &sub_key.constraints;
+        let imp_ty_var_count = sub_key.ty_var_count;
+        let imp_eff_var_count = sub_key.eff_var_count;
+        let defaulted_output_effect_vars = FxHashSet::default();
+
+        // Non-Value blanket impls can materialize all constraint dictionaries up front.
+        if trait_id != value_trait_id {
+            let mut runtime_requirements = self.runtime_requirements_from_resolved(
+                &resolved_runtime_requirements,
+                imp_constraints,
+            );
+            Self::close_defaulted_requirement_effect_rows(
+                &mut runtime_requirements,
+                &defaulted_output_effect_vars,
+            );
+            if !self.validate_runtime_requirements(
+                &resolved_runtime_requirements,
+                fn_span,
+                arena,
+                false,
+            )? {
+                let rejected = self.reject_if_requirements_fail_on_effects(
+                    &resolved_runtime_requirements,
+                    input_tys,
+                    fn_span,
+                );
+                rejected?;
+                return Ok(None);
+            }
+
+            // Succeeded? First get the blanket implementation data and compute the output types.
+            let impls = if let Some(module_id) = imp_module_id {
+                &self.others.get(module_id).unwrap().module().unwrap().impls
+            } else {
+                #[allow(clippy::needless_borrow)] // clippy has a bug here as of Rust 1.90
+                &self.impls
+            };
+            let imp = &impls.data[impl_id.as_index()];
+            // Self evidence belongs to method execution, not to blanket selection.
+            // The selected dictionary supplies it through the existing entry mapping.
+            let method_requirements = self.blanket_method_requirements(
+                &imp.dictionary_value,
+                imp.methods.len(),
+                &runtime_requirements,
+                DictionaryReq::new_trait_impl(
+                    trait_id,
+                    input_tys.to_vec(),
+                    output_tys.clone(),
+                    output_effs.clone(),
+                ),
+            );
+
+            let associated_const_values = {
+                let trait_def =
+                    trait_def_from_parts(self.current_type_items, self.others, trait_id);
+                materialized_associated_const_values(
+                    trait_id,
+                    trait_def,
+                    input_tys,
+                    &imp.associated_const_values,
+                    fn_span,
+                    self,
+                )?
+            };
+
+            // Then, for every function in the blanket implementation, if needed create a thunk function
+            // importing it and closing over the constraint dictionaries.
+            let trait_def = trait_def_from_parts(self.current_type_items, self.others, trait_id);
+            let definitions = trait_def.instantiate_for_tys(input_tys, &output_tys, &output_effs);
+            let gen_functions = imp.methods.clone(); // clone to avoid borrowing issues
+            let mut methods = Vec::with_capacity(gen_functions.len());
+            let mut tys = Vec::with_capacity(gen_functions.len());
+            for (method_index, (fn_id, def)) in gen_functions.iter().zip(definitions).enumerate() {
+                let requirements = &method_requirements[method_index];
+                let method_index = TraitMethodIndex::from_index(method_index);
+                // Build the concrete function type and hash its signature.
+                let fn_ty = Type::function_type(def.ty_scheme.ty.clone());
+
+                // Is the generic function from another module, or do we need to pass constraint dictionaries?
+                let id = if requirements.callee.is_empty() && imp_module_id.is_none() {
+                    // No, so we can just use the generic function as is.
+                    *fn_id
+                } else {
+                    let function = self.materialize_blanket_method_thunk(
+                        *fn_id,
+                        imp_module_id,
+                        &def,
+                        imp_ty_var_count,
+                        imp_eff_var_count,
+                        &blanket_instantiation,
+                        requirements,
+                        fn_span,
+                    )?;
+                    let name = Ustr::from(&format!(
+                        "{}-thunk",
+                        self.qualified_name_env().disambiguated_impl_method_name(
+                            trait_id,
+                            trait_def,
+                            method_index,
+                            input_tys,
+                            &output_tys,
+                            &output_effs,
+                            sub_key.ty_var_count,
+                            sub_key.eff_var_count,
+                            &sub_key.constraints,
+                        )
+                    ));
+                    let id = self.fn_collector.next_id();
+                    self.fn_collector
+                        .push_with_visibility(name, function, Visibility::Module);
+                    id
+                };
+
+                methods.push(id);
+                tys.push(fn_ty);
+            }
+
+            // Build and insert the implementation.
+            let associated_const_tys = trait_def.instantiate_associated_const_tys_for_tys(
+                input_tys,
+                &output_tys,
+                &output_effs,
+            );
+            let associated_const_names = self.impl_associated_const_names(
+                trait_id,
+                input_tys,
+                &output_tys,
+                &output_effs,
+                sub_key.ty_var_count,
+                sub_key.eff_var_count,
+                &sub_key.constraints,
+            );
+            let associated_const_getters =
+                TraitImpls::bundle_pending_trivial_associated_const_getters(
+                    &associated_const_values,
+                    &associated_const_tys,
+                    &mut self.fn_collector,
+                    |index| associated_const_names[index],
+                );
+            let dictionary_ty = TraitImpls::dictionary_ty(tys, associated_const_tys);
+            let dictionary_value = blanket_dictionary(
+                trait_id,
+                input_tys,
+                &methods,
+                &associated_const_getters,
+                &method_requirements,
+            );
+            let imp = TraitImpl::new(
+                trait_id,
+                output_tys.clone(),
+                output_effs.clone(),
+                methods,
+                dictionary_value,
+                dictionary_ty,
+                false,
+                None,
+            )
+            .with_associated_const_values(associated_const_values)
+            .with_associated_const_getters(associated_const_getters);
+            // A generated dictionary denotes its full application, outputs included: it is
+            // indexed by its request and by the outputs it has, so that a later request
+            // naming either finds it, and never serves another application.
+            let local_impl_id = self.impls.add_anonymous_dictionary_struct(imp);
+            let requested_key = application_key(
+                trait_id,
+                input_tys,
+                requested_output_tys,
+                requested_output_effs,
+            );
+            let resulting_key =
+                application_key(trait_id, input_tys, Some(&output_tys), Some(&output_effs));
+            for key in [requested_key, resulting_key] {
+                Rc::make_mut(&mut self.impls.application_key_to_id).insert(key, local_impl_id);
+            }
+
+            return Ok(Some(
+                self.impl_id(self.current_type_items.module.id, local_impl_id),
+            ));
+        }
+
+        // Value blanket impls may be recursive, so reserve the concrete impl before
+        // materializing any deferred constraint dictionaries.
+        let imp = if let Some(module_id) = imp_module_id {
+            &self
+                .others
+                .get(module_id)
+                .unwrap()
+                .module()
+                .unwrap()
+                .impls
+                .data[impl_id.as_index()]
+        } else {
+            &self.impls.data[impl_id.as_index()]
+        };
+        let imp_associated_const_values = imp.associated_const_values.clone();
+        let gen_functions = imp.methods.clone();
+        let source_dictionary = imp.dictionary_value.clone();
+        let associated_const_values = {
+            let trait_def = trait_def_from_parts(self.current_type_items, self.others, trait_id);
+            materialized_associated_const_values(
+                trait_id,
+                trait_def,
+                input_tys,
+                &imp_associated_const_values,
+                fn_span,
+                self,
+            )?
+        };
+        let materialization_snapshot = self.snapshot_derived_impl_state();
+        let local_impl_id = self.reserve_concrete_impl_from_code_entries(
+            trait_id,
+            input_tys,
+            &output_tys,
+            &output_effs,
+            associated_const_values,
+        );
+
+        // Now that recursive self-references can resolve to the reserved impl,
+        // materialize the deferred constraint dictionaries.
+        let mut runtime_requirements = self
+            .runtime_requirements_from_resolved(&resolved_runtime_requirements, imp_constraints);
+        Self::close_defaulted_requirement_effect_rows(
+            &mut runtime_requirements,
+            &defaulted_output_effect_vars,
+        );
+        let method_requirements = self.blanket_method_requirements(
+            &source_dictionary,
+            gen_functions.len(),
+            &runtime_requirements,
+            DictionaryReq::new_trait_impl(
+                trait_id,
+                input_tys.to_vec(),
+                output_tys.clone(),
+                output_effs.clone(),
+            ),
+        );
+        if !self.validate_runtime_requirements(
+            &resolved_runtime_requirements,
+            fn_span,
+            arena,
+            true,
+        )? {
+            self.rollback_derived_impl_state(materialization_snapshot);
+            let rejected = self.reject_if_requirements_fail_on_effects(
+                &resolved_runtime_requirements,
+                input_tys,
+                fn_span,
+            );
+            rejected?;
+            return Ok(None);
+        }
+
+        // Then, for every function in the blanket implementation, if needed create a thunk function
+        // importing it and closing over the constraint dictionaries.
+        let definitions = trait_def_from_parts(self.current_type_items, self.others, trait_id)
+            .instantiate_for_tys(input_tys, &output_tys, &output_effs);
+        let functions = gen_functions
+            .iter()
+            .zip(definitions)
+            .zip(&method_requirements)
+            .map(|((fn_id, def), requirements)| {
+                self.materialize_blanket_method_thunk(
+                    *fn_id,
+                    imp_module_id,
+                    &def,
+                    imp_ty_var_count,
+                    imp_eff_var_count,
+                    &blanket_instantiation,
+                    requirements,
+                    fn_span,
+                )
+            })
+            .collect::<Result<Vec<_>, InternalCompilationError>>()?;
+        let methods = self.impls.data[local_impl_id.as_index()].methods.clone();
+        assert_eq!(methods.len(), functions.len());
+        for (id, function) in methods.iter().copied().zip(functions) {
+            self.fn_collector.replace(id, function);
+        }
+        let associated_const_getters = self.impls.data[local_impl_id.as_index()]
+            .associated_const_getters
+            .clone();
+        Rc::make_mut(&mut self.impls.data)[local_impl_id.as_index()].dictionary_value =
+            blanket_dictionary(
+                trait_id,
+                input_tys,
+                &methods,
+                &associated_const_getters,
+                &method_requirements,
+            );
+
+        Ok(Some(
+            self.impl_id(self.current_type_items.module.id, local_impl_id),
+        ))
+    }
+
     pub(crate) fn resolve_application_symbolically(
         &mut self,
         trait_id: TraitId,
@@ -4661,8 +4790,11 @@ impl<'a> TraitSolver<'a> {
         requested_output_effs: &[EffType],
         fn_span: Location,
     ) -> Result<Option<SymbolicApplication>, InternalCompilationError> {
-        if trait_id == self.std_trait_id(VALUE_TRAIT_NAME)
-            || trait_id == self.std_trait_id(REPR_TRAIT_NAME)
+        // Without effect variables, the prerequisites of a `Value` impl cannot constrain the
+        // caller: dictionary construction checks them exactly.
+        if trait_id == self.std_trait_id(REPR_TRAIT_NAME)
+            || (trait_id == self.std_trait_id(VALUE_TRAIT_NAME)
+                && input_tys.iter().all(|ty| ty.inner_effect_vars().is_empty()))
         {
             return Ok(None);
         }
@@ -4686,173 +4818,132 @@ impl<'a> TraitSolver<'a> {
         requested_output_effs: &[EffType],
         fn_span: Location,
     ) -> Result<Option<SymbolicApplication>, InternalCompilationError> {
-        let output_polarities = self.output_effect_polarities(trait_id);
         let type_var_base =
             Self::type_var_capacity_for_types(input_tys.iter().chain(requested_output_tys));
         let effect_var_base = Self::effect_var_capacity(
             input_tys.iter().chain(requested_output_tys),
             requested_output_effs,
         );
-        let scratch_inference = || {
-            let mut ty_inf = UnifiedTypeInference::new_with_ty_vars(type_var_base);
-            for _ in 0..effect_var_base {
-                ty_inf.fresh_effect_var();
-            }
-            ty_inf
-        };
         let mut arena = NodeArena::default();
-        let local_blankets = self.impls.blanket_key_to_id.clone();
-        let blankets = visible_blanket_impls(&local_blankets, self.others, trait_id);
         let mut search = CandidateSearch::new(&self.impls.pending);
-        let fully_determined = input_tys.iter().all(Type::is_constant);
-        for (imp_module_id, blanket_impls) in blankets {
-            for (sub_key, impl_id) in blanket_impls.iter() {
-                if !input_heads_may_match(&sub_key.input_tys, input_tys) {
-                    continue;
-                }
-                search.next_candidate();
-                let (imp_public, imp_output_tys, imp_output_effs) = match imp_module_id {
-                    Some(module_id) => {
-                        let imp = &self
-                            .others
-                            .get(module_id)
-                            .unwrap()
-                            .module()
-                            .unwrap()
-                            .impls
-                            .data[impl_id.as_index()];
-                        (
-                            self.can_use_other_impl(module_id, imp),
-                            imp.output_tys.clone(),
-                            imp.output_effs.clone(),
-                        )
-                    }
-                    None => {
-                        let imp = &self.impls.data[impl_id.as_index()];
-                        (true, imp.output_tys.clone(), imp.output_effs.clone())
-                    }
-                };
-                if !imp_public {
-                    continue;
-                }
-                if let Some(module_id) = imp_module_id {
-                    self.private_impl_scope.push(module_id);
-                }
-                // Select the implementation as `solve_impl_actual` does...
-                let mut ty_inf = scratch_inference();
-                let selected = Self::match_blanket_impl(
-                    self,
-                    &mut ty_inf,
-                    &sub_key.input_tys,
-                    &imp_output_tys,
-                    &imp_output_effs,
-                    &output_polarities,
-                    sub_key.ty_var_count,
-                    sub_key.eff_var_count,
-                    &sub_key.constraints,
+        // `Value` is selected by structure, as inference does: a nested prerequisite need only
+        // hold by structure, its effects become obligations through the instantiated head. Other
+        // traits are selected as `solve_impl_actual` does.
+        let by_structure = trait_id == self.std_trait_id(VALUE_TRAIT_NAME);
+        let (selection_input_tys, mode) = if by_structure {
+            (
+                instantiate_types(input_tys, &mut EffectErasingMapper),
+                BlanketConstraintMode::Structural,
+            )
+        } else {
+            (
+                input_tys.to_vec(),
+                BlanketConstraintMode::RequireAllResolved,
+            )
+        };
+        let previous = mem::replace(&mut self.selecting_by_structure, by_structure);
+        let selected = self.select_blanket_candidate(
+            trait_id,
+            &selection_input_tys,
+            Some(requested_output_tys),
+            Some(requested_output_effs),
+            mode,
+            &mut search,
+            fn_span,
+            &mut arena,
+            |_, candidate, _| {
+                Ok(Some(Self::instantiate_symbolic_head(
+                    &candidate,
                     input_tys,
-                    Some(requested_output_tys),
-                    Some(requested_output_effs),
-                    ConstraintAssumptions::all(&[]),
-                    fn_span,
-                    &mut arena,
-                    BlanketConstraintMode::RequireAllResolved,
-                );
-                let selected = selected?;
-                let rejected = if matches!(selected, BlanketImplMatch::Yes { .. }) {
-                    Ok(())
-                } else {
-                    self.reject_if_applies_by_structure(
-                        (sub_key, &imp_output_tys),
-                        input_tys,
-                        Some(requested_output_tys),
-                        fn_span,
-                    )
-                };
-                if imp_module_id.is_some() {
-                    self.private_impl_scope.pop();
-                }
-                rejected?;
-                if !matches!(selected, BlanketImplMatch::Yes { .. }) {
-                    continue;
-                }
-                if fully_determined {
-                    search.succeed();
-                }
-                // ...then instantiate its head alone, keeping its constraints as obligations.
-                let mut ty_inf = scratch_inference();
-                let inst_subst = (
-                    ty_inf.fresh_type_var_subst(sub_key.ty_var_count),
-                    ty_inf.fresh_effect_var_subst(sub_key.eff_var_count),
-                );
-                let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
-                let imp_input_tys = instantiate_types(&sub_key.input_tys, &mut mapper);
-                let head_input_tys = imp_input_tys.clone();
-                let output_tys = instantiate_types(&imp_output_tys, &mut mapper);
-                let output_effs = imp_output_effs
-                    .iter()
-                    .map(|eff| mapper.map_effect_type(eff))
-                    .collect::<Vec<_>>();
-                let constraints = sub_key
-                    .constraints
-                    .iter()
-                    // Selection checked the constraints; they matter here only for the outputs
-                    // they determine, which keep the variables of the application.
-                    .filter(|constraint| match constraint {
-                        PubTypeConstraint::HaveTrait {
-                            output_tys,
-                            output_effs,
-                            ..
-                        } => !output_tys.is_empty() || !output_effs.is_empty(),
-                        PubTypeConstraint::VariantPayloadLayout { .. } => false,
-                        _ => true,
-                    })
-                    .map(|constraint| constraint.map(&mut mapper))
-                    .collect::<Vec<_>>();
-                for (imp_input_ty, input_ty) in imp_input_tys.iter().zip(input_tys) {
-                    ty_inf.unify_same_type_with_sub_effects(
-                        *imp_input_ty,
-                        fn_span,
-                        *input_ty,
-                        fn_span,
-                    )?;
-                }
-                // A prerequisite over the application's effects still has to hold for them: the
-                // scratch match above let it choose them.
-                let effect_prerequisites = sub_key
-                    .constraints
-                    .iter()
-                    .filter(|constraint| {
-                        matches!(constraint,
-                            PubTypeConstraint::HaveTrait { output_tys, output_effs, .. }
-                            if output_tys.is_empty() && output_effs.is_empty())
-                    })
-                    .map(|constraint| constraint.map(&mut mapper))
-                    .filter(|constraint| {
-                        !ty_inf
-                            .substitute_in_constraint(constraint)
-                            .inner_effect_vars()
-                            .is_empty()
-                    })
-                    .collect::<Vec<_>>();
-                let constraints = constraints
-                    .into_iter()
-                    .chain(effect_prerequisites)
-                    .collect::<Vec<_>>();
-                return Ok(Some(SymbolicApplication {
-                    input_tys: head_input_tys,
-                    output_tys: ty_inf.substitute_in_types(&output_tys),
-                    output_effs: ty_inf.substitute_in_effect_types(&output_effs),
-                    obligations: constraints
-                        .iter()
-                        .map(|constraint| ty_inf.substitute_in_constraint(constraint))
-                        .collect(),
                     type_var_base,
                     effect_var_base,
-                }));
-            }
+                    fn_span,
+                )))
+            },
+        );
+        self.selecting_by_structure = previous;
+        selected?.transpose()
+    }
+
+    /// Instantiate the head of a selected blanket candidate alone, keeping its constraints as
+    /// obligations in terms of the application's variables.
+    fn instantiate_symbolic_head(
+        candidate: &BlanketCandidate<'_>,
+        input_tys: &[Type],
+        type_var_base: u32,
+        effect_var_base: u32,
+        fn_span: Location,
+    ) -> Result<SymbolicApplication, InternalCompilationError> {
+        let sub_key = candidate.sub_key;
+        let mut ty_inf = UnifiedTypeInference::new_with_ty_vars(type_var_base);
+        for _ in 0..effect_var_base {
+            ty_inf.fresh_effect_var();
         }
-        Ok(None)
+        let inst_subst = (
+            ty_inf.fresh_type_var_subst(sub_key.ty_var_count),
+            ty_inf.fresh_effect_var_subst(sub_key.eff_var_count),
+        );
+        let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
+        let imp_input_tys = instantiate_types(&sub_key.input_tys, &mut mapper);
+        let output_tys = instantiate_types(&candidate.declared_output_tys, &mut mapper);
+        let output_effs = candidate
+            .declared_output_effs
+            .iter()
+            .map(|eff| mapper.map_effect_type(eff))
+            .collect::<Vec<_>>();
+        let constraints = sub_key
+            .constraints
+            .iter()
+            // Selection checked the constraints; they matter here only for the outputs
+            // they determine, which keep the variables of the application.
+            .filter(|constraint| match constraint {
+                PubTypeConstraint::HaveTrait {
+                    output_tys,
+                    output_effs,
+                    ..
+                } => !output_tys.is_empty() || !output_effs.is_empty(),
+                PubTypeConstraint::VariantPayloadLayout { .. } => false,
+                _ => true,
+            })
+            .map(|constraint| constraint.map(&mut mapper))
+            .collect::<Vec<_>>();
+        for (imp_input_ty, input_ty) in imp_input_tys.iter().zip(input_tys) {
+            ty_inf.unify_same_type_with_sub_effects(*imp_input_ty, fn_span, *input_ty, fn_span)?;
+        }
+        // A prerequisite over the application's effects still has to hold for them: the
+        // scratch match above let it choose them.
+        let effect_prerequisites = sub_key
+            .constraints
+            .iter()
+            .filter(|constraint| {
+                matches!(constraint,
+                    PubTypeConstraint::HaveTrait { output_tys, output_effs, .. }
+                    if output_tys.is_empty() && output_effs.is_empty())
+            })
+            .map(|constraint| constraint.map(&mut mapper))
+            .filter(|constraint| {
+                !ty_inf
+                    .substitute_in_constraint(constraint)
+                    .inner_effect_vars()
+                    .is_empty()
+            })
+            .collect::<Vec<_>>();
+        let constraints = constraints
+            .into_iter()
+            .chain(effect_prerequisites)
+            .collect::<Vec<_>>();
+        Ok(SymbolicApplication {
+            input_tys: imp_input_tys,
+            output_tys: ty_inf.substitute_in_types(&output_tys),
+            output_effs: ty_inf.substitute_in_effect_types(&output_effs),
+            obligations: constraints
+                .iter()
+                .map(|constraint| ty_inf.substitute_in_constraint(constraint))
+                .collect(),
+            private_impl_scope: candidate.module,
+            type_var_base,
+            effect_var_base,
+        })
     }
 
     pub fn solve_application_outputs(

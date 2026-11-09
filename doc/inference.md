@@ -181,16 +181,21 @@ needs no runtime adapter (see [abi.md](abi.md)).
   contributor's row is included in. This widening does not descend into named type arguments:
   joining already-typed `Box<Pure>` and `Box<Fallible>` requires equal callback effects and is
   rejected when those effects differ (see [Design choices](#design-choices)).
-- **Invariant positions** (type and effect arguments of named types, duplicate trait applications
-  in one scope, the types behind `&mut` parameters, which are also written back): equality. Where
-  it is exact, it unifies the two rows so that equal types stay syntactically equal: two lone
-  variables merge, and a lone variable becomes the other row. Other equalities, such as
-  `(read, a) = (read, b)`, which does not imply `a = b`, are kept as two inclusions.
+- **Invariant positions** (type and effect arguments of named types, the outputs of duplicate
+  trait applications in one scope, the types behind `&mut` parameters, which are also written
+  back): equality. Where it is exact, it unifies the two rows so that equal types stay
+  syntactically equal: two lone variables merge, and a lone variable becomes the other row. Other
+  equalities, such as `(read, a) = (read, b)`, which does not imply `a = b`, are kept as two
+  inclusions.
 - **Trait outputs**: the implementation's output effect relates to the requested one by the
   polarity of its occurrences in the trait's methods. An effect the methods perform is positive:
   the implementation's row is included in the requested one, so a pure `next` serves where a
   fallible one is allowed. An effect the methods receive through callbacks is negative and
   included the other way. An effect in both positions, or in an invariant one, is equal.
+  Equal applications of a trait in one scope denote one implementation, so they share the output
+  effects still being inferred. Fixed ones, such as those written in `where` clauses, are bounds
+  that this implementation must all fit: performed bounds intersect, received ones unite, and the
+  shared effect takes the result.
 
 Declared effect variables (function, implementation and trait default effect parameters) are rigid
 atoms: the body is checked against them and can neither specialize nor widen them.

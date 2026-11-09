@@ -65,7 +65,8 @@ impl DictionaryReq {
         }
     }
 
-    /// Equality for dictionary-construction schemas, including trait outputs and output effects.
+    /// Equality for dictionary-construction schemas, including trait outputs and output effects
+    /// with variables.
     ///
     /// [`PartialEq`] intentionally ignores those outputs for requirement lookup and must not be
     /// used to verify the ABI of a selected dictionary definition.
@@ -116,10 +117,16 @@ impl DictionaryReq {
                     output_effs: other_output_effs,
                 },
             ) => {
+                // Fixed output effects are bounds the dictionary fits, not part of its identity.
                 trait_id == other_trait_id
                     && input_tys == other_input_tys
                     && output_tys == other_output_tys
-                    && output_effs == other_output_effs
+                    && output_effs
+                        .iter()
+                        .zip(other_output_effs)
+                        .all(|(eff, other)| {
+                            eff == other || (!eff.has_variables() && !other.has_variables())
+                        })
             }
             _ => false,
         }

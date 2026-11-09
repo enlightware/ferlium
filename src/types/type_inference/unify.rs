@@ -3,6 +3,7 @@
 
 use std::{
     borrow::Cow,
+    collections::hash_map::Entry,
     mem,
     ops::{Deref, DerefMut},
 };
@@ -29,7 +30,7 @@ use crate::{
     },
     hir::{NodeArena, value::LiteralValue},
     internal_compilation_error,
-    module::{LocalFunctionId, TraitId},
+    module::{LocalFunctionId, ModuleId, TraitId},
     parser::location::Location,
     std::{
         core_traits_names::{FROM_ITERATOR_TRAIT_NAME, REPR_TRAIT_NAME, VALUE_TRAIT_NAME},
@@ -40,7 +41,7 @@ use crate::{
         effects::{EffType, EffectVar, EffectsInstSubst, no_effects},
         mutability::{MutType, MutVal, MutVar, MutVarKey},
         recursive_equation::{RecursiveEquationError, try_intern_recursive_equation},
-        trait_solver::{ConstraintAssumptions, TraitSolver},
+        trait_solver::{ConstraintAssumptions, TraitSolver, output_effect_fits},
         r#type::{
             FnArgType, FnType, SubscriptMemberType, SubscriptResultConvention, SubscriptType,
             TyVarKey, Type, TypeInstSubst, TypeKind, TypeVar,
@@ -80,6 +81,8 @@ pub(crate) struct UnifiedTypeInferenceSnapshot {
     effects: EffectSolverSnapshot,
     remaining_ty_constraints_len: usize,
     obligations_len: usize,
+    expanded_value_applications_len: usize,
+    obligation_scopes_len: usize,
 }
 
 /// Equality state, retained bounds and public obligations during inference.
@@ -103,6 +106,14 @@ pub struct UnifiedTypeInference {
     pub(super) effects: EffectSolver,
     /// Constraints of the implementations that resolved trait applications, still to solve.
     obligations: Vec<PubTypeConstraint>,
+    /// Inputs of the `Value` applications whose implementation's prerequisites are already among
+    /// the obligations: an equal application reuses that expansion, so that recursive `Value`
+    /// impls expand once. This guards expansion only; it proves nothing.
+    expanded_value_applications: Vec<Vec<Type>>,
+    /// The trait applications required by an implementation from another module, with that
+    /// module: they are solved with its private impls visible, as when its dictionary is
+    /// materialized.
+    obligation_scopes: Vec<(TraitId, Vec<Type>, ModuleId)>,
 }
 
 /// Lexical owner for deferred obligations. Restores the enclosing owner on every
@@ -134,6 +145,16 @@ impl Drop for ConstraintOwnerScope<'_> {
 }
 
 /// Canonical constraints and same-family indexes for one unification pass.
+/// The outputs of the equal trait applications of one constraint pass.
+struct HaveTraitOutputs {
+    types: Vec<Type>,
+    /// Per output effect, the first one still to learn.
+    learned: Vec<Option<(EffType, Location)>>,
+    /// Per output effect, the fixed bounds.
+    bounds: Vec<Vec<(EffType, Location)>>,
+    span: Location,
+}
+
 pub(super) struct ConstraintPassAggregation<'a> {
     pub(super) constraints: Vec<Cow<'a, PubTypeConstraint>>,
     tuples_at_index_is: FxHashMap<Type, FxHashMap<usize, (Type, Location)>>,
@@ -197,10 +218,11 @@ impl UnifiedTypeInference {
     pub(crate) fn coalesce_constraint_outputs(
         &mut self,
         constraints: &mut Vec<PubTypeConstraint>,
+        polarities: &dyn Fn(TraitId) -> Vec<EffectPolarity>,
     ) -> Result<(), InternalCompilationError> {
         loop {
             let before = constraints.clone();
-            self.aggregate_constraints_for_pass(constraints.iter())?;
+            self.aggregate_constraints_for_pass(constraints.iter(), polarities)?;
             self.substitute_in_constraints_in_place(constraints);
             self.deduplicate_constraints_in_place(constraints);
             if *constraints == before {
@@ -212,13 +234,16 @@ impl UnifiedTypeInference {
     /// Reconcile the supplied evidence after signature equalities are known and
     /// before solving body obligations. Preserve every slot for stable GivenIds;
     /// unlike published schemes, this list must not be deduplicated.
-    fn normalize_given_outputs(&mut self) -> Result<(), InternalCompilationError> {
+    fn normalize_given_outputs(
+        &mut self,
+        polarities: &dyn Fn(TraitId) -> Vec<EffectPolarity>,
+    ) -> Result<(), InternalCompilationError> {
         let mut givens = mem::take(&mut self.given_constraints);
         let result = (|| {
             if givens.len() > 1 {
                 loop {
                     let before = givens.clone();
-                    self.aggregate_constraints_for_pass(givens.iter())?;
+                    self.aggregate_constraints_for_pass(givens.iter(), polarities)?;
                     self.substitute_in_constraints_in_place(&mut givens);
                     if givens == before {
                         break;
@@ -347,6 +372,8 @@ impl UnifiedTypeInference {
             effects: self.effects.snapshot(),
             remaining_ty_constraints_len: self.remaining_ty_constraints.len(),
             obligations_len: self.obligations.len(),
+            expanded_value_applications_len: self.expanded_value_applications.len(),
+            obligation_scopes_len: self.obligation_scopes.len(),
         }
     }
 
@@ -362,6 +389,10 @@ impl UnifiedTypeInference {
         self.remaining_ty_constraints
             .truncate(snapshot.remaining_ty_constraints_len);
         self.obligations.truncate(snapshot.obligations_len);
+        self.expanded_value_applications
+            .truncate(snapshot.expanded_value_applications_len);
+        self.obligation_scopes
+            .truncate(snapshot.obligation_scopes_len);
     }
 
     pub fn unify_type_inference(
@@ -398,6 +429,8 @@ impl UnifiedTypeInference {
             mut_unification_table: mut_unification_table.into(),
             effects,
             obligations: vec![],
+            expanded_value_applications: vec![],
+            obligation_scopes: vec![],
         };
         // Keep source/inference order stable. Constraint equality deliberately ignores spans, so
         // iterating a hash set here made the diagnostic span and dictionary order depend on the
@@ -494,7 +527,7 @@ impl UnifiedTypeInference {
             }
         }
 
-        unified_ty_inf.normalize_given_outputs()?;
+        unified_ty_inf.normalize_given_outputs(&|id| trait_solver.output_effect_polarities(id))?;
 
         // Bounds and public constraints share one fixed point. Trait outputs
         // remain blockers until that pass has either resolved or deferred them.
@@ -1273,6 +1306,7 @@ impl UnifiedTypeInference {
         output_effs: &[EffType],
         span: Location,
         origin: ConstraintOrigin,
+        polarities: &dyn Fn(TraitId) -> Vec<EffectPolarity>,
     ) -> Result<GivenMatch, InternalCompilationError> {
         // Equal trait/input applications denote the same evidence. Reconcile every
         // matching given's outputs, rather than letting list order select a contract.
@@ -1303,15 +1337,51 @@ impl UnifiedTypeInference {
             }
         }
         if !matches.is_empty() {
+            // Applications with equal trait and inputs in one scope are equal, except that
+            // their fixed output effects are bounds, combined as by the constraint merge.
+            let mut bounds = vec![Vec::new(); output_effs.len()];
             for (given, given_outputs, given_effects) in matches {
                 for (actual, expected) in output_tys.iter().zip(&given_outputs) {
                     self.unify_same_type_with_sub_effects(*actual, span, *expected, span)?;
                 }
-                // Applications with equal trait and inputs in one scope are equal.
-                for (actual, expected) in output_effs.iter().zip(&given_effects) {
-                    self.unify_same_effect(actual.clone(), span, expected.clone(), span)?;
+                for ((actual, expected), bounds) in
+                    output_effs.iter().zip(given_effects).zip(&mut bounds)
+                {
+                    if expected.has_variables() {
+                        self.unify_same_effect(actual.clone(), span, expected, span)?;
+                    } else {
+                        bounds.push((expected, span));
+                    }
                 }
                 self.evidence_uses.record(origin, given);
+            }
+            // Polarities matter only to combine bounds, or to fit a fixed request to a bound.
+            let mut trait_polarities = None;
+            for (index, (actual, bounds)) in output_effs.iter().zip(&bounds).enumerate() {
+                let mut lookup = || {
+                    trait_polarities
+                        .get_or_insert_with(|| polarities(trait_id))
+                        .get(index)
+                        .copied()
+                        .unwrap_or(EffectPolarity::Invariant)
+                };
+                // A single bound needs no polarity.
+                let combining = if bounds.len() > 1 {
+                    lookup()
+                } else {
+                    EffectPolarity::Invariant
+                };
+                let Some((bound, _)) = self.combine_effect_bounds(bounds, combining)? else {
+                    continue;
+                };
+                // A fixed request, such as a callee's `where` clause, is itself a bound that the
+                // evidence must fit; an effect still being inferred takes the evidence's bound.
+                if !actual.has_variables() && *actual != bound {
+                    if output_effect_fits(&bound, actual, lookup()) {
+                        continue;
+                    }
+                }
+                self.unify_same_effect(actual.clone(), span, bound, span)?;
             }
             return Ok(GivenMatch::Resolved);
         }
@@ -1351,6 +1421,68 @@ impl UnifiedTypeInference {
         trait_solver: &mut TraitSolver<'_>,
         arena: &mut NodeArena,
     ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
+        let Some(module) = self.obligation_scope(trait_id, input_tys) else {
+            return self.unify_have_trait_in_scope(
+                trait_id,
+                input_tys,
+                output_tys,
+                output_effs,
+                span,
+                origin,
+                assumptions,
+                is_ty_adt,
+                trait_solver,
+                arena,
+            );
+        };
+        trait_solver.in_private_impl_scope(module, |trait_solver| {
+            self.unify_have_trait_in_scope(
+                trait_id,
+                input_tys,
+                output_tys,
+                output_effs,
+                span,
+                origin,
+                assumptions,
+                is_ty_adt,
+                trait_solver,
+                arena,
+            )
+        })
+    }
+
+    /// The module whose private impls an application required by its impl may use.
+    fn obligation_scope(&mut self, trait_id: TraitId, input_tys: &[Type]) -> Option<ModuleId> {
+        if self.obligation_scopes.is_empty() {
+            return None;
+        }
+        let input_tys = self.normalize_types(input_tys);
+        // Normalization does not touch the table, so set it aside rather than copy its rows.
+        let scopes = mem::take(&mut self.obligation_scopes);
+        let module = scopes
+            .iter()
+            .find(|(scope_trait, scope_inputs, _)| {
+                *scope_trait == trait_id && self.normalize_types(scope_inputs) == input_tys
+            })
+            .map(|(_, _, module)| *module);
+        self.obligation_scopes = scopes;
+        module
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn unify_have_trait_in_scope(
+        &mut self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        output_tys: &[Type],
+        output_effs: &[EffType],
+        span: Location,
+        origin: ConstraintOrigin,
+        assumptions: ConstraintAssumptions<'_>,
+        is_ty_adt: impl Fn(Type) -> bool,
+        trait_solver: &mut TraitSolver<'_>,
+        arena: &mut NodeArena,
+    ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
         let mut input_tys = self.normalize_types(input_tys);
         let mut output_tys = self.normalize_types(output_tys);
         let mut output_effs = self.substitute_in_effect_types(output_effs);
@@ -1361,6 +1493,7 @@ impl UnifiedTypeInference {
             &output_effs,
             span,
             origin,
+            &|id| trait_solver.output_effect_polarities(id),
         )? {
             GivenMatch::Resolved => return Ok(None),
             GivenMatch::Deferred => {
@@ -1421,6 +1554,15 @@ impl UnifiedTypeInference {
                     trait_solver,
                 )
             {
+                // The compiler provides the dictionary, but its members may have source impls
+                // that restrict their effects.
+                self.check_effects_through_derivation(
+                    trait_id,
+                    &input_tys,
+                    span,
+                    trait_solver,
+                    arena,
+                )?;
                 return Ok(None);
             }
             // Fully resolved, validate the trait implementation.
@@ -1507,14 +1649,18 @@ impl UnifiedTypeInference {
     }
 
     /// Aggregate same-family public constraints before running one unification pass.
+    ///
+    /// Equal trait applications have the same outputs, so their output types and the output
+    /// effects still to learn are equated. Fixed output effects are bounds: they are combined by
+    /// their `polarities` and the effects to learn take the combined bound, whatever their order.
     pub(super) fn aggregate_constraints_for_pass<'a>(
         &mut self,
         constraints: impl IntoIterator<Item = &'a PubTypeConstraint>,
+        polarities: &dyn Fn(TraitId) -> Vec<EffectPolarity>,
     ) -> Result<ConstraintPassAggregation<'a>, InternalCompilationError> {
         let constraints = constraints.into_iter();
         let mut aggregation = ConstraintPassAggregation::with_capacity(constraints.size_hint().0);
         let mut projection_indices = FxHashMap::<(Type, Ustr), usize>::default();
-        type HaveTraitOutputs = (Vec<Type>, Vec<EffType>, Location);
         let mut have_traits: FxHashMap<(TraitId, Vec<Type>), HaveTraitOutputs> =
             FxHashMap::default();
 
@@ -1733,33 +1879,92 @@ impl UnifiedTypeInference {
                     let output_types = self.normalize_types(output_tys);
                     let output_effects = self.substitute_in_effect_types(output_effs);
                     let key = (*trait_id, input_types);
-                    if let Some(have_trait) = have_traits.get(&key) {
-                        assert_eq!(have_trait.0.len(), output_types.len());
-                        for (expected, actual) in have_trait.0.iter().zip(output_types.iter()) {
-                            self.unify_same_type_with_sub_effects(
-                                *actual,
-                                span.use_site,
-                                *expected,
-                                have_trait.2,
-                            )?;
+                    let site = span.use_site;
+                    let outputs = match have_traits.entry(key) {
+                        Entry::Occupied(entry) => {
+                            let outputs = entry.into_mut();
+                            assert_eq!(outputs.types.len(), output_types.len());
+                            for (expected, actual) in outputs.types.iter().zip(&output_types) {
+                                self.unify_same_type_with_sub_effects(
+                                    *actual,
+                                    site,
+                                    *expected,
+                                    outputs.span,
+                                )?;
+                            }
+                            outputs
                         }
-                        assert_eq!(have_trait.1.len(), output_effects.len());
-                        for (expected, actual) in have_trait.1.iter().zip(output_effects.iter()) {
-                            self.unify_same_effect(
-                                actual.clone(),
-                                span.use_site,
-                                expected.clone(),
-                                have_trait.2,
-                            )?;
+                        Entry::Vacant(entry) => entry.insert(HaveTraitOutputs {
+                            types: output_types,
+                            learned: vec![None; output_effects.len()],
+                            bounds: vec![Vec::new(); output_effects.len()],
+                            span: site,
+                        }),
+                    };
+                    assert_eq!(outputs.learned.len(), output_effects.len());
+                    for (index, effect) in output_effects.into_iter().enumerate() {
+                        if !effect.has_variables() {
+                            outputs.bounds[index].push((effect, site));
+                        } else if let Some((learned, learned_site)) = &outputs.learned[index] {
+                            self.unify_same_effect(effect, site, learned.clone(), *learned_site)?;
+                        } else {
+                            outputs.learned[index] = Some((effect, site));
                         }
-                    } else {
-                        have_traits.insert(key, (output_types, output_effects, span.use_site));
                     }
                     aggregation.constraints.push(Cow::Borrowed(constraint));
                 }
             }
         }
+        for ((trait_id, _), outputs) in have_traits {
+            if outputs.bounds.iter().all(Vec::is_empty) {
+                continue;
+            }
+            let polarities = polarities(trait_id);
+            for (index, (learned, bounds)) in
+                outputs.learned.into_iter().zip(outputs.bounds).enumerate()
+            {
+                let polarity = polarities
+                    .get(index)
+                    .copied()
+                    .unwrap_or(EffectPolarity::Invariant);
+                let Some(bound) = self.combine_effect_bounds(&bounds, polarity)? else {
+                    continue;
+                };
+                if let Some((learned, learned_site)) = learned {
+                    self.unify_same_effect(learned, learned_site, bound.0, bound.1)?;
+                }
+            }
+        }
         Ok(aggregation)
+    }
+
+    /// Combine fixed bounds on one output effect: an implementation's performed effect fits all
+    /// of them, so they intersect; a received one includes all of them, so they unite; invariant
+    /// ones must be equal. The site is that of a bound equal to the result, if any.
+    fn combine_effect_bounds(
+        &mut self,
+        bounds: &[(EffType, Location)],
+        polarity: EffectPolarity,
+    ) -> Result<Option<(EffType, Location)>, InternalCompilationError> {
+        let Some((first, first_site)) = bounds.first() else {
+            return Ok(None);
+        };
+        let mut combined = first.clone();
+        for (bound, site) in &bounds[1..] {
+            combined = match polarity {
+                EffectPolarity::Positive => combined.difference(&combined.difference(bound)),
+                EffectPolarity::Negative => combined.union(bound),
+                EffectPolarity::Invariant => {
+                    self.unify_same_effect(bound.clone(), *site, first.clone(), *first_site)?;
+                    combined
+                }
+            };
+        }
+        let site = bounds
+            .iter()
+            .find(|(bound, _)| *bound == combined)
+            .map_or(*first_site, |(_, site)| *site);
+        Ok(Some((combined, site)))
     }
 
     fn unify_projection_subscript_signature(
@@ -2253,6 +2458,17 @@ impl UnifiedTypeInference {
         Ok(())
     }
 
+    /// Whether a `Value` application with these normalized inputs is already expanded.
+    fn is_expanded_value_application(&mut self, inputs: &[Type]) -> bool {
+        // Normalization does not touch the table, so set it aside rather than copy its rows.
+        let expanded = mem::take(&mut self.expanded_value_applications);
+        let found = expanded
+            .iter()
+            .any(|expanded| self.normalize_types(expanded) == inputs);
+        self.expanded_value_applications = expanded;
+        found
+    }
+
     /// Resolve a trait application whose inputs are known: relate its outputs to those of the
     /// implementation the solver selects, output effects by their polarity. A blanket
     /// implementation is instantiated here, its constraints becoming obligations, so that its
@@ -2268,10 +2484,21 @@ impl UnifiedTypeInference {
         trait_solver: &mut TraitSolver<'_>,
         arena: &mut NodeArena,
     ) -> Result<(), InternalCompilationError> {
+        // `Value` has no outputs: an application equal to one already expanded has nothing to add.
+        let value_application = (trait_id == trait_solver.std_trait_id(VALUE_TRAIT_NAME))
+            .then(|| self.normalize_types(input_tys));
+        if let Some(inputs) = &value_application
+            && self.is_expanded_value_application(inputs)
+        {
+            return Ok(());
+        }
         let (impl_output_tys, impl_output_effs) = match trait_solver
             .resolve_application_symbolically(trait_id, input_tys, output_tys, output_effs, span)?
         {
             Some(application) => {
+                if let Some(inputs) = value_application {
+                    self.expanded_value_applications.push(inputs);
+                }
                 let mut subst: InstSubst = Default::default();
                 let mut add_fresh_vars =
                     |ty_vars: Vec<TypeVar>, eff_vars: FxHashSet<EffectVar>, this: &mut Self| {
@@ -2322,12 +2549,29 @@ impl UnifiedTypeInference {
                     .map(|eff| mapper.map_effect_type(eff))
                     .collect::<Vec<_>>();
                 // What the impl requires, this application must provide: report it here.
-                self.obligations
-                    .extend(application.obligations.iter().map(|obligation| {
+                let obligations = application
+                    .obligations
+                    .iter()
+                    .map(|obligation| {
                         obligation
                             .map(&mut mapper)
                             .instantiate_location_cloned(span)
-                    }));
+                    })
+                    .collect::<Vec<_>>();
+                if let Some(module) = application.private_impl_scope {
+                    for obligation in &obligations {
+                        if let PubTypeConstraint::HaveTrait {
+                            trait_id,
+                            input_tys,
+                            ..
+                        } = obligation
+                        {
+                            let input_tys = self.normalize_types(input_tys);
+                            self.obligation_scopes.push((*trait_id, input_tys, module));
+                        }
+                    }
+                }
+                self.obligations.extend(obligations);
                 (impl_output_tys, impl_output_effs)
             }
             None => {
@@ -3048,7 +3292,7 @@ mod given_tests {
             given(vec![first], vec![second]),
             given(vec![boolean], vec![Type::unit()]),
         ];
-        inference.normalize_given_outputs().unwrap();
+        inference.normalize_given_outputs(&|_| Vec::new()).unwrap();
         assert_eq!(inference.substitute_in_type(first), boolean);
         assert_eq!(inference.substitute_in_type(second), Type::unit());
         assert_eq!(inference.given_constraints.len(), 4);
@@ -3071,7 +3315,7 @@ mod given_tests {
             ],
             ..Default::default()
         };
-        assert!(inference.normalize_given_outputs().is_err());
+        assert!(inference.normalize_given_outputs(&|_| Vec::new()).is_err());
         assert_eq!(inference.given_constraints.len(), 2);
     }
 
@@ -3091,7 +3335,8 @@ mod given_tests {
                     &[],
                     &[],
                     Location::new_synthesized(),
-                    Default::default()
+                    Default::default(),
+                    &|_| Vec::new()
                 )
                 .unwrap(),
             GivenMatch::Deferred
@@ -3116,7 +3361,8 @@ mod given_tests {
                     &[],
                     &[],
                     Location::new_synthesized(),
-                    Default::default()
+                    Default::default(),
+                    &|_| Vec::new()
                 )
                 .unwrap(),
             GivenMatch::Resolved
@@ -3144,7 +3390,8 @@ mod given_tests {
                         &[query_output],
                         &[],
                         Location::new_synthesized(),
-                        Default::default()
+                        Default::default(),
+                        &|_| Vec::new()
                     )
                     .unwrap(),
                 GivenMatch::Resolved
@@ -3179,7 +3426,8 @@ mod given_tests {
                         &[Type::variable_id(0)],
                         &[],
                         Location::new_synthesized(),
-                        Default::default()
+                        Default::default(),
+                        &|_| Vec::new()
                     )
                     .is_err()
             );
@@ -3207,7 +3455,8 @@ mod given_tests {
                     &[],
                     &[],
                     Location::new_synthesized(),
-                    origin
+                    origin,
+                    &|_| Vec::new()
                 )
                 .unwrap(),
             GivenMatch::Resolved

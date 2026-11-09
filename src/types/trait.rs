@@ -20,6 +20,7 @@ use crate::{
     },
     module::{FunctionId, ModuleEnv, TraitId, TraitImplId, id::Id},
     types::{
+        effect_polarity::trait_output_effect_polarities,
         effects::{EffType, EffectVar, EffectsInstSubst},
         trait_solver::TraitSolver,
         r#type::{FnType, Type, TypeInstSubst, TypeKind, TypeVar},
@@ -280,7 +281,9 @@ impl Trait {
         for _ in 0..next_effect {
             inference.fresh_effect_var();
         }
-        inference.coalesce_constraint_outputs(&mut constraints)?;
+        inference.coalesce_constraint_outputs(&mut constraints, &|id| {
+            trait_output_effect_polarities(id, &|id| env.trait_def(id))
+        })?;
         Ok(TypeScheme::new_infer_quantifiers_with_constraints(
             inference.substitute_in_fn_type(&self.method(index).1.ty_scheme.ty),
             constraints,
