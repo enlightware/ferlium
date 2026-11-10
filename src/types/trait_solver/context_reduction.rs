@@ -5,14 +5,48 @@
 //! every instantiation of the enclosing inputs. Evidence is built in the defining body, from
 //! the public leaves of the reduction, rather than searched for again in a consumer's scope.
 
-use itertools::Itertools;
-use std::hash::{Hash, Hasher};
+use std::{
+    hash::{Hash, Hasher},
+    rc::Rc,
+};
 
-use super::*;
+use itertools::Itertools;
+use ustr::Ustr;
+
 use crate::{
-    hir::emit_hir::instantiate_function_descr_in_place,
-    module::DefKind,
-    types::type_visitor::{TypeInnerVisitor, collect_ty_vars},
+    FxHashMap, FxHashSet, Location,
+    compiler::error::InternalCompilationError,
+    hir::{
+        FnInstData, NodeArena, dictionary::DictionaryReq,
+        emit_hir::instantiate_function_descr_in_place, function::CallableDefinition,
+    },
+    internal_compilation_error,
+    module::{
+        DefKind, DictionaryEntryRequirements, ModuleId, PendingModuleFunction, TraitId, TraitImpl,
+        TraitImplId, TraitImpls, TypeDefId, Visibility, build_capturing_dictionary_value,
+        dictionary_capture_plan, id::Id,
+    },
+    std::{core_traits_names::VALUE_TRAIT_NAME, value::generated_value_evidence_types},
+    types::{
+        effect_polarity::EffectPolarity,
+        effects::{EffType, EffectVar},
+        r#trait::TraitDictionaryEntryIndex,
+        r#type::{FnType, Type, TypeKind, TypeVar},
+        type_inference::{substitution::InstSubst, unify::UnifiedTypeInference},
+        type_like::{TypeLike, instantiate_types},
+        type_mapper::{BitmapInstantiationMapper, EffectErasingMapper, TypeMapper},
+        type_scheme::{PubTypeConstraint, TypeScheme},
+        type_visitor::{TypeInnerVisitor, collect_ty_vars},
+    },
+};
+
+use super::{
+    TraitSolver,
+    canonical::alpha_canonicalize_types_with_instantiation,
+    improvement::TraitImprovementCandidate,
+    matching::input_heads_may_match,
+    materialization::{BlanketMethodRequirements, materialized_associated_const_values},
+    probe::{ConstraintAssumptions, TraitSolverProbe},
 };
 
 pub(crate) const REDUCTION_WORK_LIMIT: usize = 128;
@@ -1282,7 +1316,11 @@ impl TraitSolver<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::module::LocalTraitId;
+    use crate::{
+        Modules,
+        module::{LocalImplId, LocalTraitId, Module},
+        types::trait_solver::trait_solver_from_module,
+    };
 
     fn dependency(input: Type, output: Type) -> PubTypeConstraint {
         PubTypeConstraint::new_have_trait(
