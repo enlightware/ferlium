@@ -165,7 +165,7 @@ pub struct ModuleEntry {
     pub(crate) revision: Option<Rc<ModuleRevision>>,
     /// Compilation error, if last compilation failed.
     pub(crate) last_error: Option<CompilationError>,
-    /// Deps from latest successful self build, stale or not.
+    /// Dependencies from the latest attempt whose source roots could be collected and validated.
     pub(crate) latest_deps: Vec<ModuleId>,
     /// Latest compilation attempt revision.
     pub(crate) compilation_revision: CompilationRevision,
@@ -212,7 +212,7 @@ impl ModuleEntry {
         }
     }
 
-    /// New module that compiled but whose dependencies are stale, and can be rebuilt later.
+    /// New module whose compilation is deferred until its dependencies are fresh.
     pub fn new_stale(
         src_info: ModuleSrcInfo,
         deps: Vec<ModuleId>,
@@ -248,7 +248,7 @@ impl ModuleEntry {
         }
     }
 
-    /// Our module compiled successfully, but some of its dependencies are stale.
+    /// Defer compilation because a dependency is stale, retaining the last good revision.
     pub(crate) fn update_with_stale(
         &mut self,
         src_info: ModuleSrcInfo,
@@ -349,10 +349,26 @@ impl ModuleEntry {
     }
 }
 
+/// Whether a module is current, and why it is not if compilation could not complete.
+#[derive(Debug, Clone, Copy)]
+pub enum ModuleStatus<'a> {
+    /// The compiled module is current with its source and dependencies.
+    Fresh,
+    /// The latest compilation attempt failed. The error is also available as diagnostics.
+    Failed { error: &'a CompilationError },
+    /// Compilation waits for this direct dependency to become fresh.
+    /// If several dependencies are unavailable, the one with the lowest module ID is reported.
+    WaitingForDependency { dependency: ModuleId },
+    /// A dependency changed and this module has not been rebuilt, although its dependencies
+    /// are now fresh. Native modules have no source for automatic rebuilding.
+    NeedsRebuild,
+}
+
 /// Read-only metadata view over a registered module entry.
 #[derive(Clone, Copy)]
 pub struct ModuleInfo<'a> {
     entry: &'a ModuleEntry,
+    modules: &'a Modules,
 }
 
 impl fmt::Debug for ModuleInfo<'_> {
@@ -370,8 +386,34 @@ impl fmt::Debug for ModuleInfo<'_> {
 }
 
 impl<'a> ModuleInfo<'a> {
-    fn new(entry: &'a ModuleEntry) -> Self {
-        Self { entry }
+    fn new(entry: &'a ModuleEntry, modules: &'a Modules) -> Self {
+        Self { entry, modules }
+    }
+
+    /// Current compilation status, derived from this module and its dependencies.
+    /// A failed attempt takes precedence over waiting on another dependency.
+    pub fn status(&self) -> ModuleStatus<'a> {
+        if !self.entry.stale {
+            return ModuleStatus::Fresh;
+        }
+        if let Some(error) = &self.entry.last_error {
+            return ModuleStatus::Failed { error };
+        }
+        if let Some(dependency) = self
+            .entry
+            .latest_deps
+            .iter()
+            .copied()
+            .filter(|&id| {
+                self.modules
+                    .get(id)
+                    .is_none_or(|entry| entry.stale || entry.module().is_none())
+            })
+            .min_by_key(|id| id.as_u32())
+        {
+            return ModuleStatus::WaitingForDependency { dependency };
+        }
+        ModuleStatus::NeedsRebuild
     }
 
     /// Latest source version for modules backed by Ferlium source.
@@ -389,7 +431,7 @@ impl<'a> ModuleInfo<'a> {
         &self.entry.diagnostics
     }
 
-    /// Dependencies discovered during the latest successful self build.
+    /// Dependencies from the latest attempt whose source roots could be collected and validated.
     pub fn latest_deps(&self) -> &'a [ModuleId] {
         &self.entry.latest_deps
     }
@@ -437,7 +479,7 @@ impl<'a> ModuleRegistry<'a> {
 
     /// Return read-only metadata for a registered module.
     pub fn info(self, module_id: ModuleId) -> Option<ModuleInfo<'a>> {
-        Some(ModuleInfo::new(self.modules.get(module_id)?))
+        Some(ModuleInfo::new(self.modules.get(module_id)?, self.modules))
     }
 
     /// Return whether a module ID is registered in this session.
@@ -479,7 +521,7 @@ impl<'a> ModuleRegistry<'a> {
     ) -> impl Iterator<Item = (ModuleId, Option<&'a Path>, ModuleInfo<'a>)> {
         self.modules
             .enumerate()
-            .map(|(module_id, entry, path)| (module_id, path, ModuleInfo::new(entry)))
+            .map(|(module_id, entry, path)| (module_id, path, ModuleInfo::new(entry, self.modules)))
     }
 
     /// Build a module environment for a compiled module in this registry.
@@ -891,6 +933,18 @@ impl CompilerSession {
 
         let mut scratch = new_module_using_std(self.scratch_module, Path::single_str("$scratch"));
         scratch.add_wildcard_use(target_path, Location::new_synthesized());
+        let environment = super::environment::collect_environment(
+            &scratch,
+            None,
+            &arena,
+            &self.modules,
+            locals.iter().map(|local| local.ty),
+        );
+        assert!(
+            environment.unavailable_dependency(&self.modules).is_none(),
+            "scratch expressions require fresh modules"
+        );
+        environment.install(&mut scratch);
         let entry_id = match emit_expr_entry_with_private_impls(
             expr_ast,
             &arena,
@@ -1033,10 +1087,38 @@ impl CompilerSession {
 
     /// Register a module without Ferlium source in this compilation session and return its id.
     ///
-    /// Modules defining named representations referenced by native signatures must be registered
-    /// first, so registration can validate those native ABI contracts against a complete type.
-    pub fn register_module(&mut self, path: module::Path, module: Module) -> ModuleId {
+    /// Modules supplying types or traits used by its interface must be registered first.
+    /// Registration records those dependencies and validates native ABI contracts against their
+    /// definitions.
+    /// The host must register each module once and ensure its impls obey ownership and coherence
+    /// with the rest of the program. Registration derives impl visibility from the declarations;
+    /// it does not check host impls for overlap. Replacing a registered native module is unsupported.
+    pub fn register_module(&mut self, path: module::Path, mut module: Module) -> ModuleId {
         log::trace!("Registering module {path}");
+        assert!(
+            self.modules.get_id_by_name(&path).is_none(),
+            "native modules must be registered only once"
+        );
+        assert_eq!(
+            module.module_id(),
+            self.modules.next_id(),
+            "native module must use the next available module id"
+        );
+        let environment = super::environment::collect_environment(
+            &module,
+            None,
+            &ast::PExprArena::default(),
+            self.raw_modules(),
+            [],
+        );
+        assert!(
+            environment
+                .unavailable_dependency(self.raw_modules())
+                .is_none(),
+            "native registration requires fresh dependencies"
+        );
+        environment.install(&mut module);
+        module.derive_impl_visibility(self.raw_modules());
         module.validate_native_optional_results(ModuleEnv::new(&module, self.raw_modules()));
         let module_id = self
             .modules
@@ -1113,7 +1195,9 @@ impl CompilerSession {
             .map_err(|error| CompilationError::resolve_types(error, &env))
     }
 
-    /// Compile a source code and return the compiled module and an expression (if any), or an error.
+    /// Compile source and return its module ID and expression (if any), or an error.
+    /// If a dependency is stale, the source is saved for automatic retry and no expression is
+    /// returned. Inspect `modules().info(module_id).status()` for the current compilation status.
     /// All spans are in byte offsets.
     pub fn compile(
         &mut self,
@@ -1827,6 +1911,114 @@ mod tests {
             type_scheme::TypeScheme,
         },
     };
+
+    #[test]
+    fn native_interfaces_record_the_owners_of_exposed_types() {
+        use crate::hir::native_functions::tests::native_member_fixture;
+
+        let mut session = CompilerSession::new();
+        let owner = session.modules().next_id();
+        let std = session.expect_fresh_module(STD_MODULE_ID);
+        let value = std.get_trait_id_str("Value").unwrap();
+        let module = native_member_fixture(owner, std.trait_def(value), value);
+        let make = module.get_function("make".into()).unwrap().clone();
+        session.register_module(Path::single_str("owner"), module);
+
+        let bridge = session.modules().next_id();
+        let mut module = Module::new(bridge, Path::single_str("bridge"));
+        module.add_function("make".into(), make);
+        session.register_module(Path::single_str("bridge"), module);
+        assert!(
+            session
+                .expect_fresh_module(bridge)
+                .deps()
+                .any(|id| id == owner)
+        );
+        session
+            .compile(
+                "pub fn display() -> string { to_string(bridge::make()) }",
+                "consumer",
+                Path::single_str("consumer"),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn native_registration_derives_impl_visibility_from_declarations() {
+        use crate::{
+            hir::function::Function,
+            module::{BlanketTraitImplSubKey, Visibility},
+            types::r#trait::Trait,
+        };
+
+        let mut session = CompilerSession::new();
+        let path = Path::single_str("native_privacy");
+        let id = session.modules().next_id();
+        let mut module = Module::new(id, path.clone());
+        for (name, visibility) in [
+            ("Private", Visibility::Module),
+            ("Public", Visibility::Public),
+        ] {
+            let tr = module.add_trait_with_visibility(
+                Trait::new_with_self_input_type(name, "", [], []),
+                visibility,
+            );
+            let tr = module::TraitId::new(id, tr);
+            module.add_concrete_impl_no_locals(tr, [int_type()], [], [], Vec::<Function>::new());
+            module.add_blanket_impl_no_locals(
+                tr,
+                BlanketTraitImplSubKey::new(
+                    vec![Type::tuple([Type::variable_id(0)])],
+                    1,
+                    0,
+                    vec![],
+                ),
+                [],
+                [],
+                Vec::<Function>::new(),
+            );
+        }
+        // A host-defined nominal type follows the same owning-input rule as a source type.
+        let definition = TypeDef {
+            name: "Hidden".into(),
+            doc: None,
+            generic_params: vec![],
+            generic_effect_params: vec![],
+            shape: TypeScheme::new_infer_quantifiers(Type::unit()),
+            shape_docs: TypeDefShapeDocs::Struct(crate::types::r#type::TypeDefProductDocs::Tuple(
+                vec![],
+            )),
+            span: Location::new_synthesized(),
+            attributes: vec![],
+            default_variant: None,
+            has_custom_value_impl: false,
+        };
+        let hidden =
+            module.add_type_def_with_visibility(definition.name, definition, Visibility::Module);
+        let tr = module.get_trait_id_str("Public").unwrap();
+        module.add_concrete_impl_no_locals(
+            tr,
+            [Type::named(hidden, vec![])],
+            [],
+            [],
+            Vec::<Function>::new(),
+        );
+        session.register_module(path, module);
+        let module = session.expect_fresh_module(id);
+        for (key, &imp) in module.impls.concrete() {
+            let expected =
+                module.trait_def(key.trait_id).name == "Public" && key.input_tys == [int_type()];
+            assert_eq!(module.impls.get_impl_by_local_id(imp).public, expected);
+        }
+        for (&trait_id, impls) in module.impls.blanket() {
+            for &imp in impls.values() {
+                assert_eq!(
+                    module.impls.get_impl_by_local_id(imp).public,
+                    module.trait_def(trait_id).name == "Public"
+                );
+            }
+        }
+    }
 
     #[test]
     fn physical_preparation_reuses_revisions_and_rejects_stale_dependencies() {

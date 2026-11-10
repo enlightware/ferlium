@@ -19,7 +19,7 @@ pub mod trait_impl;
 mod type_alias_name;
 pub mod uses;
 
-use std::{fmt, hash::Hash, mem, ops};
+use std::{fmt, hash::Hash, mem, ops, rc::Rc};
 
 pub use debug_info::*;
 use derive_new::new;
@@ -85,6 +85,7 @@ macro_rules! qualified_name_env_from_module_fields {
                 $module.type_defs.as_slice(),
                 $module.traits.as_slice(),
                 &$module.projection_subscripts,
+                &$module.environment,
             ),
             $modules,
         )
@@ -561,8 +562,10 @@ impl ops::IndexMut<usize> for TypeDefSlots {
 #[derive(Debug)]
 pub struct Module {
     pub(crate) path: Path,
-    /// Modules referenced by IDs in compiled module data.
+    /// Modules referenced by source or compiled data, including unused imported roots.
     pub(crate) deps: FxHashSet<ModuleId>,
+    /// Fixed lookup environment established before source inference.
+    pub(crate) environment: FxHashSet<ModuleId>,
 
     pub(crate) uses: Uses,
 
@@ -699,6 +702,10 @@ impl Module {
         Self {
             path,
             deps: FxHashSet::default(),
+            environment: [STD_MODULE_ID]
+                .into_iter()
+                .filter(|id| *id != module_id)
+                .collect(),
             uses: Uses::default(),
             def_table: DefTable::new(),
             unsafe_items: FxHashSet::default(),
@@ -718,6 +725,10 @@ impl Module {
         Self {
             path,
             deps: FxHashSet::default(),
+            environment: [STD_MODULE_ID]
+                .into_iter()
+                .filter(|id| *id != module_id)
+                .collect(),
             uses,
             def_table: DefTable::new(),
             unsafe_items: FxHashSet::default(),
@@ -2298,6 +2309,41 @@ impl Module {
                 let def = ty.data().as_named().expect("an owning input is named").def;
                 self.is_type_def_public(def)
             })
+    }
+
+    /// Host-built impls acquire the same declaration-derived visibility as source impls once
+    /// their foreign trait definitions are available at registration.
+    pub(crate) fn derive_impl_visibility(&mut self, others: &Modules) {
+        let current = &*self;
+        let visibility: Vec<_> = current
+            .impls
+            .concrete()
+            .iter()
+            .map(|(key, &id)| {
+                (
+                    id,
+                    current.is_trait_impl_exportable(key.trait_id, &key.input_tys, others),
+                )
+            })
+            .chain(
+                current
+                    .impls
+                    .blanket()
+                    .iter()
+                    .flat_map(|(&trait_id, entries)| {
+                        entries.iter().map(move |(key, &id)| {
+                            (
+                                id,
+                                current.is_trait_impl_exportable(trait_id, &key.input_tys, others),
+                            )
+                        })
+                    }),
+            )
+            .collect();
+        let impls = Rc::make_mut(&mut self.impls.data);
+        for (id, public) in visibility {
+            impls[id.as_index()].public = public;
+        }
     }
 
     /// Return all own definitions in this module.

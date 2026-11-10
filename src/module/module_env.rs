@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use ustr::{Ustr, ustr};
 
 use crate::{
-    FxHashMap, Location,
+    FxHashMap, FxHashSet, Location,
     ast::{self, UstrSpan},
     compiler::{CompilationCapabilities, MirOptimization, error::InternalCompilationError},
     format::FormatWith,
@@ -59,6 +59,19 @@ fn unavailable_trait<T>(id: TraitId) -> T {
     panic!("Trait #{}:{} is unavailable", id.module, id.index)
 }
 
+/// Compiled named modules in the environment, preserving registry order.
+pub(crate) fn named_modules_in_environment<'a>(
+    modules: &'a Modules,
+    environment: &'a FxHashSet<ModuleId>,
+) -> impl Iterator<Item = (&'a Path, &'a Module)> {
+    modules.iter_named().filter_map(|(path, entry)| {
+        let module = entry.module()?;
+        environment
+            .contains(&module.module_id())
+            .then_some((path, module))
+    })
+}
+
 fn visible_projection_entry(
     module: &Module,
     current_module: ModuleId,
@@ -91,6 +104,7 @@ pub(crate) struct CurrentTypeItems<'m> {
     pub(crate) type_defs: &'m [TypeDefSlot],
     pub(crate) traits: &'m [Trait],
     pub(crate) projection_subscripts: &'m FxHashMap<ProjectionKey, ProjectionEntry>,
+    pub(crate) environment: &'m FxHashSet<ModuleId>,
 }
 
 impl<'m> CurrentTypeItems<'m> {
@@ -100,6 +114,7 @@ impl<'m> CurrentTypeItems<'m> {
         type_defs: &'m [TypeDefSlot],
         traits: &'m [Trait],
         projection_subscripts: &'m FxHashMap<ProjectionKey, ProjectionEntry>,
+        environment: &'m FxHashSet<ModuleId>,
     ) -> Self {
         Self {
             module,
@@ -107,6 +122,7 @@ impl<'m> CurrentTypeItems<'m> {
             type_defs,
             traits,
             projection_subscripts,
+            environment,
         }
     }
 
@@ -120,6 +136,7 @@ impl<'m> CurrentTypeItems<'m> {
             current.type_defs.as_slice(),
             current.traits.as_slice(),
             &current.projection_subscripts,
+            &current.environment,
         )
     }
 
@@ -238,14 +255,14 @@ impl<'m> QualifiedNameEnv<'m> {
             ));
         }
 
-        self.modules.iter_named().find_map(|(mod_path, entry)| {
-            entry.module().and_then(|module| {
+        named_modules_in_environment(self.modules, self.current.environment).find_map(
+            |(mod_path, module)| {
                 module
                     .type_aliases
                     .get_bare_native_name(native)
                     .map(|ty_name| format!("{mod_path}::{ty_name}"))
-            })
-        })
+            },
+        )
     }
 
     pub(crate) fn native_type_name(&self, native: &NativeType) -> Option<String> {
@@ -256,14 +273,14 @@ impl<'m> QualifiedNameEnv<'m> {
             ));
         }
 
-        self.modules.iter_named().find_map(|(mod_path, entry)| {
-            entry.module().and_then(|module| {
+        named_modules_in_environment(self.modules, self.current.environment).find_map(
+            |(mod_path, module)| {
                 module
                     .type_aliases
                     .get_native_name(native)
                     .map(|ty_name| format!("{mod_path}::{ty_name}"))
-            })
-        })
+            },
+        )
     }
 
     pub(crate) fn format_type(&self, ty: Type) -> String {
@@ -615,8 +632,8 @@ impl<'m> ModuleEnv<'m> {
             return Some(alias_name.rendered);
         }
 
-        if let Some(name) = self.modules.iter_named().find_map(|(mod_path, entry)| {
-            entry.module().and_then(|module| {
+        if let Some(name) = named_modules_in_environment(self.modules, &self.current.environment)
+            .find_map(|(mod_path, module)| {
                 module.type_aliases.get_name(ty).map(|ty_name| {
                     if self.current.uses(mod_path, ty_name) {
                         ty_name.to_string()
@@ -625,14 +642,12 @@ impl<'m> ModuleEnv<'m> {
                     }
                 })
             })
-        }) {
+        {
             return Some(name);
         }
 
-        self.modules
-            .iter_named()
-            .filter_map(|(mod_path, entry)| {
-                let module = entry.module()?;
+        named_modules_in_environment(self.modules, &self.current.environment)
+            .filter_map(|(mod_path, module)| {
                 find_generic_alias_name(module, ty, self).map(|alias_name| {
                     let rendered = if self.current.uses(mod_path, alias_name.name) {
                         alias_name.rendered
@@ -658,8 +673,8 @@ impl<'m> ModuleEnv<'m> {
             return Some(alias_name.rendered);
         }
 
-        if let Some(name) = self.modules.iter_named().find_map(|(mod_path, entry)| {
-            entry.module().and_then(|module| {
+        if let Some(name) = named_modules_in_environment(self.modules, &self.current.environment)
+            .find_map(|(mod_path, module)| {
                 module.type_aliases.get_name(ty).map(|ty_name| {
                     if self.current.uses(mod_path, ty_name) {
                         ty_name.to_string()
@@ -668,14 +683,12 @@ impl<'m> ModuleEnv<'m> {
                     }
                 })
             })
-        }) {
+        {
             return Some(name);
         }
 
-        self.modules
-            .iter_named()
-            .filter_map(|(mod_path, entry)| {
-                let module = entry.module()?;
+        named_modules_in_environment(self.modules, &self.current.environment)
+            .filter_map(|(mod_path, module)| {
                 find_generic_alias_name_with(module, ty, &mut format_type).map(|alias_name| {
                     let rendered = if self.current.uses(mod_path, alias_name.name) {
                         alias_name.rendered
@@ -695,8 +708,8 @@ impl<'m> ModuleEnv<'m> {
             .get_bare_native_name(native)
             .map_or_else(
                 || {
-                    self.modules.iter_named().find_map(|(mod_name, entry)| {
-                        entry.module().and_then(|module| {
+                    named_modules_in_environment(self.modules, &self.current.environment).find_map(
+                        |(mod_name, module)| {
                             module
                                 .type_aliases
                                 .get_bare_native_name(native)
@@ -707,8 +720,8 @@ impl<'m> ModuleEnv<'m> {
                                         format!("{mod_name}::{ty_name}")
                                     }
                                 })
-                        })
-                    })
+                        },
+                    )
                 },
                 |name| Some(name.to_string()),
             )
@@ -864,8 +877,11 @@ impl<'m> ModuleEnv<'m> {
             .filter(|entry| entry.origin == ProjectionOrigin::Explicit)
             .map(|entry| SubscriptId::new(self.current.module_id(), entry.subscript))
             .or_else(|| {
-                self.modules.enumerate().find_map(|(module_id, entry, _)| {
-                    let module = entry.module()?;
+                let lookup = |module_id| {
+                    if !self.current.environment.contains(&module_id) {
+                        return None;
+                    }
+                    let module = self.modules.get(module_id)?.module()?;
                     visible_projection_entry(
                         module,
                         self.current.module_id(),
@@ -873,7 +889,14 @@ impl<'m> ModuleEnv<'m> {
                         module.get_projection_subscript(key)?,
                     )
                     .map(|entry| SubscriptId::new(module_id, entry.subscript))
-                })
+                };
+                match key.receiver {
+                    ProjectionReceiverKey::Nominal(def) => lookup(def.module),
+                    ProjectionReceiverKey::Structural(_) => self
+                        .modules
+                        .enumerate()
+                        .find_map(|(module_id, _, _)| lookup(module_id)),
+                }
             })
     }
 

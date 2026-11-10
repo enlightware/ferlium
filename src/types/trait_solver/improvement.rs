@@ -9,7 +9,7 @@ use crate::{
     FxHashSet, Location,
     compiler::error::InternalCompilationError,
     hir::NodeArena,
-    module::{TraitId, id::Id},
+    module::{TraitId, id::Id, named_modules_in_environment},
     types::{
         effect_polarity::EffectPolarity,
         effects::EffType,
@@ -151,11 +151,9 @@ impl<'a> TraitSolver<'a> {
             }
         }
 
-        for (_, entry) in self.others.iter_named() {
-            let Some(module) = entry.module() else {
-                continue;
-            };
-
+        for (_, module) in
+            named_modules_in_environment(self.others, self.current_type_items.environment)
+        {
             for (key, id) in module.impls.concrete_key_to_id.iter() {
                 if key.trait_id == trait_id {
                     let imp = &module.impls.data[id.as_index()];

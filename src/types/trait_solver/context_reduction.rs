@@ -24,7 +24,7 @@ use crate::{
     module::{
         DefKind, DictionaryEntryRequirements, ModuleId, PendingModuleFunction, TraitId, TraitImpl,
         TraitImplId, TraitImpls, TypeDefId, Visibility, build_capturing_dictionary_value,
-        dictionary_capture_plan, id::Id,
+        dictionary_capture_plan, id::Id, named_modules_in_environment,
     },
     std::{core_traits_names::VALUE_TRAIT_NAME, value::generated_value_evidence_types},
     types::{
@@ -827,10 +827,10 @@ impl TraitSolver<'_> {
             }
         };
         collect(self.current_type_items.module.id, self.impls, true);
-        for (_, entry) in self.others.iter_named() {
-            if let Some(module) = entry.module() {
-                collect(module.module_id(), &module.impls, false);
-            }
+        for (_, module) in
+            named_modules_in_environment(self.others, self.current_type_items.environment)
+        {
+            collect(module.module_id(), &module.impls, false);
         }
         candidates
     }

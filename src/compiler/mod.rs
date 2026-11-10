@@ -3,6 +3,7 @@
 
 mod artifacts;
 pub mod diagnostics;
+pub(crate) mod environment;
 pub mod error;
 mod limits;
 pub(crate) mod lints;
@@ -30,7 +31,7 @@ pub(crate) use pipeline::{add_code_to_module_with_capabilities, check_extended_m
 pub(crate) use session::Modules;
 pub use session::{
     CompilationCapabilities, CompilationOutput, CompilationRevision, CompilerSession, ModuleInfo,
-    ModuleRegistry, ModuleSource, SourceVersion,
+    ModuleRegistry, ModuleSource, ModuleStatus, SourceVersion,
 };
 
 #[doc(hidden)]

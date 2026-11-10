@@ -24,10 +24,7 @@ pub(super) fn predeclare_subscripts(
     for subscript in &source.subscripts {
         validate_subscript_members(subscript)?;
         if let Some(key) = projection_key_for_subscript(output, others, subscript)? {
-            let env = ModuleEnv::new(output, others);
-            if output.get_projection_subscript(key).is_some()
-                || env.projection_subscript(key).is_some()
-            {
+            if output.get_projection_subscript(key).is_some() {
                 return Err(internal_compilation_error!(InvalidSubscriptDefinition {
                     subject: SubscriptDefinitionSubject::Subscript(subscript.name.0),
                     kind: InvalidSubscriptDefinitionKind::DuplicateProjection,

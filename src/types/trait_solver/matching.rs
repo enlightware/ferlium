@@ -91,21 +91,27 @@ impl TypeMapper for DefaultedEffectRowsMapper<'_> {
 pub(super) fn visible_blanket_impls<'b>(
     local: &'b BlanketImpls,
     others: &'b Modules,
+    environment: &'b FxHashSet<ModuleId>,
     trait_id: TraitId,
 ) -> impl Iterator<Item = (Option<ModuleId>, &'b BlanketTraitImpls)> + use<'b> {
     local
         .get(&trait_id)
         .map(|blankets| (None, blankets))
         .into_iter()
-        .chain(others.enumerates().flat_map(move |(module_id, entry, _)| {
-            entry.module().and_then(|module| {
-                module
-                    .impls
-                    .blanket_key_to_id
-                    .get(&trait_id)
-                    .map(|blankets| (Some(module_id), blankets))
-            })
-        }))
+        .chain(
+            others
+                .enumerates()
+                .filter(move |(id, _, _)| environment.contains(id))
+                .flat_map(move |(module_id, entry, _)| {
+                    entry.module().and_then(|module| {
+                        module
+                            .impls
+                            .blanket_key_to_id
+                            .get(&trait_id)
+                            .map(|blankets| (Some(module_id), blankets))
+                    })
+                }),
+        )
 }
 
 /// Whether an impl's input types may match the requested ones, see [`input_head_may_match`].
@@ -1196,7 +1202,12 @@ impl<'a> TraitSolver<'a> {
         // Share the local table to avoid borrowing issues: adding a blanket implementation
         // during the search copies it and leaves this view unchanged.
         let local_blankets = self.impls.blanket_key_to_id.clone();
-        let blankets = visible_blanket_impls(&local_blankets, self.others, trait_id);
+        let blankets = visible_blanket_impls(
+            &local_blankets,
+            self.others,
+            self.current_type_items.environment,
+            trait_id,
+        );
         let fully_determined = input_tys.iter().all(Type::is_constant);
         // By structure, the candidate is seen without effects, as the application is.
         let by_structure = matches!(mode, BlanketConstraintMode::Structural);

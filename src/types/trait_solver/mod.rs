@@ -36,8 +36,8 @@ use crate::{
     module::{
         self, BlanketImpls, ConcreteImpls, ConcreteTraitImplKey, CurrentTypeItems, DefTable,
         FunctionId, GeneratedImplSource, LocalFunctionId, LocalImplId, LocalTraitId, Module,
-        ModuleId, PendingFunctionCollector, ProjectionKey, QualifiedNameEnv, ResolvedValueLayout,
-        TraitId, TraitImpl, TraitImplId, TraitImpls, TypeDefId, id::Id,
+        ModuleId, PendingFunctionCollector, ProjectionKey, ProjectionReceiverKey, QualifiedNameEnv,
+        ResolvedValueLayout, TraitId, TraitImpl, TraitImplId, TraitImpls, TypeDefId, id::Id,
     },
     std::{
         STD_MODULE_ID,
@@ -265,6 +265,7 @@ macro_rules! trait_solver_from_module {
                 $module.type_defs.as_slice(),
                 $module.traits.as_slice(),
                 &$module.projection_subscripts,
+                &$module.environment,
             ),
             &mut $module.impls,
             &$module.def_table,
@@ -373,7 +374,8 @@ fn is_compiler_provided_no_output_trait_application(
 
 impl<'a> TraitSolver<'a> {
     fn can_use_other_impl(&self, module_id: ModuleId, imp: &TraitImpl) -> bool {
-        imp.public || self.privileged_impl_module == Some(module_id)
+        self.current_type_items.environment.contains(&module_id)
+            && (imp.public || self.privileged_impl_module == Some(module_id))
     }
 
     pub(crate) fn reject_inaccessible_private_repr(
@@ -470,15 +472,26 @@ impl<'a> TraitSolver<'a> {
             ));
         }
 
-        self.others.enumerate().find_map(|(module_id, entry, _)| {
-            let module = entry.module()?;
+        let lookup = |module_id| {
+            if !self.current_type_items.environment.contains(&module_id) {
+                return None;
+            }
+            let module = self.others.get(module_id)?.module()?;
             let entry = module.get_projection_subscript(key)?;
             if entry.visibility != module::Visibility::Public {
                 return None;
             }
-            self.deps.insert(module_id);
             Some(module::SubscriptId::new(module_id, entry.subscript))
-        })
+        };
+        let subscript = match key.receiver {
+            ProjectionReceiverKey::Nominal(def) => lookup(def.module),
+            ProjectionReceiverKey::Structural(_) => self
+                .others
+                .enumerate()
+                .find_map(|(module_id, _, _)| lookup(module_id)),
+        }?;
+        self.deps.insert(subscript.module);
+        Some(subscript)
     }
 
     pub(crate) fn qualified_name_env(&self) -> QualifiedNameEnv<'_> {

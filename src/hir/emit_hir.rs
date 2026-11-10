@@ -658,6 +658,8 @@ pub enum EmitModuleFrom {
     Uses(Uses),
     /// An existing module extended
     Existing(B<Module>),
+    /// A complete source module whose environment was collected by the session.
+    Prepared(B<Module>),
 }
 
 /// A failed module emission together with the module state available for diagnostics.
@@ -918,11 +920,26 @@ pub(crate) fn emit_module_with_capabilities(
 ) -> Result<Module, Box<ModuleEmissionError>> {
     // A module emitted from one source is complete here. An extended module is validated by
     // whoever extends it, once all its sources are added.
-    let complete = matches!(emit_from, EmitModuleFrom::Uses(_));
+    let prepared = matches!(emit_from, EmitModuleFrom::Prepared(_));
+    let complete = !matches!(emit_from, EmitModuleFrom::Existing(_));
     let mut output = match emit_from {
         EmitModuleFrom::Uses(uses) => Module::from_uses(module_id, module_path, uses),
-        EmitModuleFrom::Existing(module) => *module,
+        EmitModuleFrom::Existing(module) | EmitModuleFrom::Prepared(module) => *module,
     };
+
+    if !prepared {
+        // These entry points build std or extend an internal module. Session compilation
+        // prepares its environment and handles stale dependencies before reaching HIR.
+        let environment = crate::compiler::environment::collect_environment(
+            &output,
+            Some(&source),
+            parsed_arena,
+            others,
+            [],
+        );
+        debug_assert!(environment.unavailable_dependency(others).is_none());
+        environment.install(&mut output);
+    }
 
     match emit_module_contents(
         source,

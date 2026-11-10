@@ -13,6 +13,7 @@ use crate::{
     module::{
         CandidateSearch, ConcreteTraitImplKey, FunctionId, GeneratedImplSource, Module, ModuleEnv,
         ModuleId, TraitDictionary, TraitId, TraitImpl, TraitImplId, id::Id,
+        named_modules_in_environment,
     },
     std::core_traits_names::{REPR_TRAIT_NAME, VALUE_TRAIT_NAME},
     types::{
@@ -49,17 +50,14 @@ impl<'a> TraitSolver<'a> {
     /// An absence that a pending impl may fill is recorded as blocked.
     pub fn has_concrete_impl(&self, key: &ConcreteTraitImplKey) -> bool {
         let found = self.impls.concrete_key_to_id.contains_key(key)
-            || self.others.iter_named().any(|(_, entry)| {
-                entry.module().is_some_and(|module| {
+            || named_modules_in_environment(self.others, self.current_type_items.environment).any(
+                |(_, module)| {
                     let impls = &module.impls;
-                    let id = impls.concrete_key_to_id.get(key);
-                    if let Some(id) = id {
+                    impls.concrete_key_to_id.get(key).is_some_and(|id| {
                         self.can_use_other_impl(module.module_id(), &impls.data[id.as_index()])
-                    } else {
-                        false
-                    }
-                })
-            });
+                    })
+                },
+            );
         if !found {
             self.impls.pending.blocks(key.trait_id, &key.input_tys);
         }
@@ -88,19 +86,23 @@ impl<'a> TraitSolver<'a> {
         {
             return Some(TraitImplId::new(self.current_type_items.module.id, id));
         }
-        let found = self.others.enumerates().find_map(|(module_id, entry, _)| {
-            entry.module().and_then(|module| {
-                let impls = &module.impls;
-                impls.concrete_key_to_id.get(key).and_then(|id| {
-                    let imp = &impls.data[id.as_index()];
-                    if self.can_use_other_impl(module_id, imp) {
-                        Some((module_id, *id))
-                    } else {
-                        None
-                    }
+        let found = self
+            .others
+            .enumerates()
+            .filter(|(id, _, _)| self.current_type_items.environment.contains(id))
+            .find_map(|(module_id, entry, _)| {
+                entry.module().and_then(|module| {
+                    let impls = &module.impls;
+                    impls.concrete_key_to_id.get(key).and_then(|id| {
+                        let imp = &impls.data[id.as_index()];
+                        if self.can_use_other_impl(module_id, imp) {
+                            Some((module_id, *id))
+                        } else {
+                            None
+                        }
+                    })
                 })
-            })
-        });
+            });
         found.map(|(module_id, impl_id)| {
             self.deps.insert(module_id);
             TraitImplId::new(module_id, impl_id)
@@ -121,13 +123,13 @@ impl<'a> TraitSolver<'a> {
         fake_current.traits = self.current_type_items.traits.to_vec();
         let env = ModuleEnv::new(&fake_current, self.others);
         self.impls.log_debug_impls_headers(trait_id, env);
-        for (module_path, entry) in self.others.iter_named() {
-            if let Some(module) = entry.module() {
-                let impls = &module.impls;
-                if impls.blanket_key_to_id.contains_key(&trait_id) {
-                    log::trace!("In module {}:", module_path);
-                    impls.log_debug_impls_headers(trait_id, env);
-                }
+        for (module_path, module) in
+            named_modules_in_environment(self.others, self.current_type_items.environment)
+        {
+            let impls = &module.impls;
+            if impls.blanket_key_to_id.contains_key(&trait_id) {
+                log::trace!("In module {}:", module_path);
+                impls.log_debug_impls_headers(trait_id, env);
             }
         }
     }

@@ -13,6 +13,12 @@ type, trait, mutability, and effect constraints belong to that language-specific
 The framework's principal-type guarantees depend on conditions on the domain and solver;
 citing HM(X) does not establish those guarantees for every implementation choice below.
 
+## Compilation environment
+
+Trait selection and coherence use the current module, std, and the modules imported or referenced anywhere in the source, together with their dependencies.
+This environment is fixed for the whole compilation, including the optional final expression.
+Unrelated loaded modules cannot change inference.
+
 ## Effects and trait selection
 
 Changing only effect annotations or inferred effect bounds cannot select a different impl. It can

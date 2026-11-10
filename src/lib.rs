@@ -34,7 +34,7 @@ pub use compiler::error::{CompilationError, LocatedError};
 pub use compiler::{
     CompilationCapabilities, CompilationOutput, CompilationRevision, CompilerSession,
     DiagnosticSeverity, MirOptimization, ModuleDiagnostic, ModuleInfo, ModuleRegistry,
-    ModuleSource, SourceVersion, parse_module_and_expr,
+    ModuleSource, ModuleStatus, SourceVersion, parse_module_and_expr,
 };
 pub(crate) use compiler::{add_code_to_module_with_capabilities, check_extended_module_coherence};
 pub use execution::ExecutionTarget;

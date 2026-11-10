@@ -382,39 +382,45 @@ fn iter_visible_impls<'a>(
                 )
             })
         });
-    let imported = others.enumerates().flat_map(move |(module_id, entry, _)| {
-        entry.module().into_iter().flat_map(move |module| {
-            let concrete = module
-                .impls
-                .concrete()
-                .iter()
-                .filter(move |(key, _)| selected(key.trait_id))
-                .map(move |(key, &id)| {
-                    (
-                        TraitKey::Concrete(key.clone()),
-                        module.impls.get_impl_by_local_id(id),
-                        Some(module_id),
-                    )
-                })
-                .filter(move |(_, imp, _)| imp.public || module_id == private_scope);
-            let blankets = module
-                .impls
-                .blanket()
-                .iter()
-                .filter(move |(trait_id, _)| selected(**trait_id))
-                .flat_map(move |(trait_id, blanket_impls)| {
-                    blanket_impls.iter().map(move |(sub_key, &id)| {
+    let imported = others
+        .enumerates()
+        .filter(move |(id, _, _)| current.environment.contains(id))
+        .flat_map(move |(module_id, entry, _)| {
+            entry.module().into_iter().flat_map(move |module| {
+                let concrete = module
+                    .impls
+                    .concrete()
+                    .iter()
+                    .filter(move |(key, _)| selected(key.trait_id))
+                    .map(move |(key, &id)| {
                         (
-                            TraitKey::Blanket(BlanketTraitImplKey::new(*trait_id, sub_key.clone())),
+                            TraitKey::Concrete(key.clone()),
                             module.impls.get_impl_by_local_id(id),
                             Some(module_id),
                         )
                     })
-                })
-                .filter(move |(_, imp, _)| imp.public || module_id == private_scope);
-            concrete.chain(blankets)
-        })
-    });
+                    .filter(move |(_, imp, _)| imp.public || module_id == private_scope);
+                let blankets = module
+                    .impls
+                    .blanket()
+                    .iter()
+                    .filter(move |(trait_id, _)| selected(**trait_id))
+                    .flat_map(move |(trait_id, blanket_impls)| {
+                        blanket_impls.iter().map(move |(sub_key, &id)| {
+                            (
+                                TraitKey::Blanket(BlanketTraitImplKey::new(
+                                    *trait_id,
+                                    sub_key.clone(),
+                                )),
+                                module.impls.get_impl_by_local_id(id),
+                                Some(module_id),
+                            )
+                        })
+                    })
+                    .filter(move |(_, imp, _)| imp.public || module_id == private_scope);
+                concrete.chain(blankets)
+            })
+        });
     local.chain(local_blankets).chain(imported)
 }
 

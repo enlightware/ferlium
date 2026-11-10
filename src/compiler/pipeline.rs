@@ -138,7 +138,8 @@ pub(crate) fn compile_with_source_id(
          src_info: ModuleSrcInfo,
          old_revision: Option<Rc<ModuleRevision>>,
          error: &CompilationError,
-         warnings: &[CompilationWarning]| {
+         warnings: &[CompilationWarning],
+         deps: Option<&[ModuleId]>| {
             let error = error.clone();
             let mut diagnostics = diagnostics_from_warnings(
                 module_id,
@@ -163,12 +164,17 @@ pub(crate) fn compile_with_source_id(
                     compilation_revision,
                     diagnostics,
                 );
+                if let Some(deps) = deps {
+                    entry.latest_deps = deps.to_vec();
+                }
                 mark_stale_transitively(modules, module_id)
             } else if let Some(path) = path_for_new {
-                modules.insert(
-                    path,
-                    ModuleEntry::new_with_error(src_info, error, compilation_revision, diagnostics),
-                );
+                let mut entry =
+                    ModuleEntry::new_with_error(src_info, error, compilation_revision, diagnostics);
+                if let Some(deps) = deps {
+                    entry.latest_deps = deps.to_vec();
+                }
+                modules.insert(path, entry);
             } else {
                 panic!("Existing module not found — should never happen.");
             }
@@ -187,6 +193,7 @@ pub(crate) fn compile_with_source_id(
                 old_revision,
                 &error,
                 &warnings,
+                None,
             );
             return Err(error);
         }
@@ -195,8 +202,74 @@ pub(crate) fn compile_with_source_id(
         ast_inspector(&module_ast, expr_ast, &arena, modules);
     }
 
+    // Establish the environment without reading foreign definitions. A stale dependency's
+    // trait/type indices must never be interpreted against a newer provider revision.
+    let mut prepared = Module::from_uses(module_id, module_path.clone(), uses);
+    let environment =
+        super::environment::collect_environment(&prepared, Some(&module_ast), &arena, modules, []);
+    let unavailable_dependency = environment.unavailable_dependency(modules);
+    environment.install(&mut prepared);
+    if let Some(cycle) =
+        find_module_deps_cycle(modules, module_id, &prepared, old_revision.is_some())
+    {
+        let error = compilation_error!(CircularImportDependency {
+            origin: module_path.to_string(),
+            import_chain: cycle
+                .into_iter()
+                .map(|id| modules
+                    .get_name(id)
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| module_path.to_string()))
+                .collect(),
+            span: Location::new_synthesized(),
+        });
+        process_compilation_failed(
+            modules,
+            module_ref.into_path(),
+            src_info,
+            old_revision,
+            &error,
+            &warnings,
+            None,
+        );
+        return Err(error);
+    }
+    let deps: Vec<_> = prepared.deps().collect();
+    if unavailable_dependency.is_some() {
+        let diagnostics = diagnostics_from_warnings(
+            module_id,
+            source_version,
+            compilation_revision,
+            source_id,
+            warnings.iter().copied(),
+        );
+        if let Some(entry) = modules.get_mut(module_id) {
+            entry.update_with_stale(
+                src_info,
+                old_revision,
+                deps,
+                compilation_revision,
+                diagnostics,
+            );
+            mark_stale_transitively(modules, module_id);
+        } else {
+            // Only reachable for ByPath when the module does not yet exist.
+            if let Some(path) = module_ref.into_path() {
+                modules.insert(
+                    path,
+                    ModuleEntry::new_stale(src_info, deps, compilation_revision, diagnostics),
+                );
+            }
+        }
+
+        return Ok(CompilationOutput {
+            module_id,
+            expr: None,
+        });
+    }
+
     // Emit HIR for the module.
-    let emit_from = EmitModuleFrom::Uses(uses);
+    let emit_from = EmitModuleFrom::Prepared(b(prepared));
     let mut module = match emit_module_with_capabilities(
         module_ast,
         &arena,
@@ -221,6 +294,7 @@ pub(crate) fn compile_with_source_id(
                 old_revision,
                 &error,
                 &warnings,
+                Some(&deps),
             );
             return Err(error);
         }
@@ -250,6 +324,7 @@ pub(crate) fn compile_with_source_id(
                     old_revision,
                     &error,
                     &warnings,
+                    Some(&deps),
                 );
                 return Err(error);
             }
@@ -269,128 +344,89 @@ pub(crate) fn compile_with_source_id(
             old_revision,
             &error,
             &warnings,
+            Some(&deps),
         );
         return Err(error);
     }
 
-    // Detect cycles in the module dependency graph.
-    if let Some(cycle) = find_module_deps_cycle(modules, module_id, &module, old_revision.is_some())
-    {
-        let error = compilation_error!(CircularImportDependency {
-            origin: modules.get_name(module_id).unwrap().to_string(),
-            import_chain: cycle
-                .into_iter()
-                .map(|id| modules.get_name(id).unwrap().to_string())
-                .collect(),
+    // Emission only adds edges to modules already reachable from the roots checked above,
+    // so it cannot introduce a new dependency cycle.
+    if let Some(dependency) = module.deps().find(|id| !module.environment.contains(id)) {
+        let error = compilation_error!(Internal {
             span: Location::new_synthesized(),
+            error: format!(
+                "compilation discovered dependency {dependency} outside its fixed environment"
+            ),
         });
-        let path_for_new = module_ref.into_path();
         process_compilation_failed(
             modules,
-            path_for_new,
+            module_ref.into_path(),
             src_info,
             old_revision,
             &error,
             &warnings,
+            Some(&deps),
         );
         return Err(error);
     }
-
-    // Compilation was successful, are any dependencies stale?
     let deps: Vec<_> = module.deps().collect();
-    let deps_stale = deps.iter().any(|&dep| modules.get(dep).unwrap().stale);
-    if deps_stale {
-        if let Some(entry) = modules.get_mut(module_id) {
-            let diagnostics = diagnostics_from_warnings(
-                module_id,
-                source_version,
-                compilation_revision,
-                source_id,
-                warnings.iter().copied(),
-            );
-            entry.update_with_stale(
-                src_info,
-                old_revision,
-                deps,
-                compilation_revision,
-                diagnostics,
-            );
-            mark_stale_transitively(modules, module_id);
-        } else {
-            // Only reachable for ByPath when the module does not yet exist.
-            if let Some(path) = module_ref.into_path() {
-                let diagnostics = diagnostics_from_warnings(
-                    module_id,
-                    source_version,
-                    compilation_revision,
-                    source_id,
-                    warnings.iter().copied(),
-                );
-                modules.insert(
-                    path,
-                    ModuleEntry::new_stale(src_info, deps, compilation_revision, diagnostics),
-                );
-            }
+    // No stale deps — store the fresh module.
+    let artifacts = if build_mir {
+        for dependency in &deps {
+            ensure_mir_artifacts(modules, *dependency);
         }
+        ModuleArtifacts::with_mir(&module, modules)
     } else {
-        // No stale deps — store the fresh module.
-        let artifacts = if build_mir {
-            for dependency in &deps {
-                ensure_mir_artifacts(modules, *dependency);
-            }
-            ModuleArtifacts::with_mir(&module, modules)
-        } else {
-            ModuleArtifacts::default()
-        };
-        let diagnostics = diagnostics_from_warnings(
-            module_id,
-            source_version,
-            compilation_revision,
-            source_id,
-            warnings.iter().copied(),
-        );
-        // For ByPath: consume the path out of module_ref (no extra clone).
-        // For Existing: write directly through the known ID.
-        match module_ref {
-            ModuleRef::ByPath(path) => {
-                modules.replace(
-                    path,
-                    ModuleEntry::new_fresh_with_artifacts(
-                        src_info,
-                        module,
-                        artifacts,
-                        compilation_revision,
-                        diagnostics,
-                    ),
-                );
-            }
-            ModuleRef::Existing(id) => {
-                *modules.get_mut(id).unwrap() = ModuleEntry::new_fresh_with_artifacts(
+        ModuleArtifacts::default()
+    };
+    let diagnostics = diagnostics_from_warnings(
+        module_id,
+        source_version,
+        compilation_revision,
+        source_id,
+        warnings.iter().copied(),
+    );
+    // For ByPath: consume the path out of module_ref (no extra clone).
+    // For Existing: write directly through the known ID.
+    match module_ref {
+        ModuleRef::ByPath(path) => {
+            modules.replace(
+                path,
+                ModuleEntry::new_fresh_with_artifacts(
                     src_info,
                     module,
                     artifacts,
                     compilation_revision,
                     diagnostics,
-                );
-            }
-        }
-        // Cascade-recompile every stale direct dependent that can be rebuilt from source.
-        // Each successful recompilation recurses into its own dependents via the same
-        // mechanism, so the entire reverse-dependency graph is eventually brought up to date.
-        let to_recompile = stale_dependents_to_recompile(modules, module_id);
-        for (dep_id, dep_source_id, dep_source_version, dep_uses) in to_recompile {
-            let _ = compile_with_source_id(
-                dep_source_id,
-                dep_source_version,
-                source_table,
-                modules,
-                ModuleRef::Existing(dep_id),
-                dep_uses,
-                capabilities,
-                ExecutionTarget::Hir,
-                None,
+                ),
             );
         }
+        ModuleRef::Existing(id) => {
+            *modules.get_mut(id).unwrap() = ModuleEntry::new_fresh_with_artifacts(
+                src_info,
+                module,
+                artifacts,
+                compilation_revision,
+                diagnostics,
+            );
+        }
+    }
+    // Cascade-recompile every stale direct dependent that can be rebuilt from source.
+    // Each successful recompilation recurses into its own dependents via the same
+    // mechanism, so the entire reverse-dependency graph is eventually brought up to date.
+    let to_recompile = stale_dependents_to_recompile(modules, module_id);
+    for (dep_id, dep_source_id, dep_source_version, dep_uses) in to_recompile {
+        let _ = compile_with_source_id(
+            dep_source_id,
+            dep_source_version,
+            source_table,
+            modules,
+            ModuleRef::Existing(dep_id),
+            dep_uses,
+            capabilities,
+            ExecutionTarget::Hir,
+            None,
+        );
     }
 
     Ok(CompilationOutput { module_id, expr })

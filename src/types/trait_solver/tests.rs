@@ -465,6 +465,7 @@ fn open_generated_value_dictionaries_ignore_caller_local_variable_numbers() {
         module.type_defs.as_slice(),
         module.traits.as_slice(),
         &module.projection_subscripts,
+        &module.environment,
     );
     let value_trait_id = modules
         .get(STD_MODULE_ID)
@@ -581,6 +582,7 @@ fn unmaterialized_output_cache_does_not_reuse_constrained_effects() {
         module.type_defs.as_slice(),
         module.traits.as_slice(),
         &module.projection_subscripts,
+        &module.environment,
     );
     let mut deps = FxHashSet::default();
     let mut solver = TraitSolver::new(
