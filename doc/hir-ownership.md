@@ -73,6 +73,7 @@ Std `array_index` is a source subscript with `AddressorPlace` provenance, backed
 ## Owned Materialization
 
 Every final-HIR `Immediate` contains immutable constant data with a concrete `TrivialCopy` representation, so it never owns a resource requiring semantic clone or drop.
+A unit-like struct constructor wraps a `()` immediate in a block carrying the named type; the immediate remains concrete even when the struct is generic or has a custom `Value` impl.
 A managed source literal is materialized explicitly: for example, a string literal is a `StaticStr` immediate passed to the private `string_from_static` constructor, which produces an owned `string`.
 Aggregate construction materializes managed literal leaves before assembling the runtime tuple, record, variant, or array.
 

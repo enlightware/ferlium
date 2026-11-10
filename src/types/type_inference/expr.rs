@@ -37,7 +37,7 @@ use crate::{
             let_arguments_overlapping_mutable,
         },
         function::{ArgConvention, CallableDefinition, arg_conventions_for_args},
-        node_is_place_reference, node_is_stable_place_reference,
+        hir_syn, node_is_place_reference, node_is_stable_place_reference,
         node_is_stable_storage_place_reference, place_resolution_may_create_temp,
         value::LiteralValue,
     },
@@ -1189,7 +1189,7 @@ impl TypeInference {
                         ));
                         K::Variant(HirVariant::new(tag, payload))
                     } else {
-                        K::Immediate(LiteralValue::new_native(()))
+                        Self::unit_struct_constructor(env.ir_arena, expr_span)
                     };
                     (node, ty, MutType::constant(), EffType::empty())
                 }
@@ -5273,6 +5273,18 @@ impl TypeInference {
         Self::block(nodes, cleanup)
     }
 
+    /// Construct the unit representation inside the nominally typed expression. The named type
+    /// may be generic or have custom `Value` behavior, so it cannot itself type an immediate.
+    fn unit_struct_constructor(arena: &mut NodeArena, span: Location) -> NodeKind {
+        let unit = arena.alloc(hir::Node::new(
+            NodeKind::Immediate(LiteralValue::new_native(())),
+            Type::unit(),
+            no_effects(),
+            span,
+        ));
+        hir_syn::block([unit])
+    }
+
     fn block(nodes: Vec<NodeId>, cleanup: Vec<LocalDeclId>) -> NodeKind {
         NodeKind::Block(b(hir::Block {
             body: b(SVec2::from_vec(nodes)),
@@ -6047,7 +6059,11 @@ impl TypeInference {
                 } else {
                     let node_ids = self.materialize_owned_values(env, node_ids, expr_span);
                     let inner_kind = if node_ids.is_empty() {
-                        K::Immediate(LiteralValue::new_native(()))
+                        if tag.is_some() {
+                            K::Immediate(LiteralValue::new_native(()))
+                        } else {
+                            Self::unit_struct_constructor(env.ir_arena, expr_span)
+                        }
                     } else {
                         K::Tuple(b(SVec2::from_vec(node_ids)))
                     };

@@ -2898,6 +2898,34 @@ fn create_empty_struct_values() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn create_unit_like_generic_struct_values() {
+    for constructor in ["Tag", "Tag()"] {
+        let mut session = TestSession::new();
+        assert_val_eq!(
+            session.run(&format!(
+                r#"
+                struct Tag<T>;
+                trait Kind<Self> {{ fn kind(x: Self) -> int; }}
+                impl Kind for Tag<int> {{ fn kind(x: Tag<int>) -> int {{ 1 }} }}
+                impl Kind for Tag<bool> {{ fn kind(x: Tag<bool>) -> int {{ 2 }} }}
+
+                #[inline(never)]
+                fn make<T>(x: T) -> (Tag<T>, Tag<T>) {{
+                    let a: Tag<T> = {constructor};
+                    (a, a)
+                }}
+                let a = make(0);
+                let b = make(true);
+                (kind(a.0), kind(a.1), kind(b.0), kind(b.1), a.0 == a.1, to_string(b.0))
+                "#,
+            )),
+            tuple!(int(1), int(1), int(2), int(2), bool(true), string("Tag ()")),
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn create_tuple_struct_values() {
     let mut session = TestSession::new();
     assert_val_eq!(

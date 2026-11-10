@@ -3568,6 +3568,35 @@ fn discarded_empty_struct_temporary_runs_semantic_drop() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn unit_like_generic_struct_construction_preserves_custom_value_behavior() {
+    for constructor in ["Tag", "Tag()"] {
+        let mut session = TestSession::new();
+        session.allow_unsafe();
+        let source = format!(
+            r#"
+            struct Tag<T>;
+            impl<T> Value for Tag<T> {{
+                fn eq(left: Tag<T>, right: Tag<T>) -> bool {{ true }}
+                fn to_string(value: Tag<T>) -> string {{ "tag" }}
+                fn hash(value: Tag<T>, state: &mut hasher) {{}}
+                fn clone(source: Tag<T>) -> Tag<T> {{
+                    {constructor}
+                }}
+                fn drop(target: &mut Tag<T>) {{ testing::record_tracked_drop(1); }}
+            }}
+            #[inline(never)]
+            fn make<T>(x: T) -> Tag<T> {{ {constructor} }}
+            testing::reset_tracked_drops();
+            let text = {{ let value = make(0); to_string(value) }};
+            (text, testing::tracked_drop_log())
+            "#,
+        );
+        assert_val_eq!(session.run(&source), tuple!(string("tag"), int(1)));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn discarded_nonempty_struct_temporary_runs_semantic_drop() {
     let mut session = TestSession::new();
     session.allow_unsafe();
