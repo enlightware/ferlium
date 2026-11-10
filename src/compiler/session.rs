@@ -988,6 +988,7 @@ impl CompilerSession {
     }
 
     /// Render a value by evaluating Ferlium's `to_string(value)` in `module_id`.
+    /// The module must be fresh: rendering a value of a stale module is a host error and panics.
     pub fn value_to_string(
         &mut self,
         module_id: ModuleId,
@@ -1021,6 +1022,7 @@ impl CompilerSession {
     }
 
     /// Render a value for interactive inspection by evaluating `inspect(value)`.
+    /// The module must be fresh: rendering a value of a stale module is a host error and panics.
     pub fn value_to_inspect_text(
         &mut self,
         module_id: ModuleId,
