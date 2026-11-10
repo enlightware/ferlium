@@ -17,9 +17,7 @@ use crate::{
     execution::ReferenceInterpreterLimits,
     hir::{
         function::Function,
-        native_functions::{
-            NativeAddressorMut, NativeAddressorRef, NativeFnN, NativeFnNN, NativeOptionalFnN,
-        },
+        native_functions::{NativeFnN, NativeFnNN, NativeOptionalFnN},
     },
     mir::{
         BasicBlock, BlockId, Operation, OperationKind, ParameterId, Value as MirValue,
@@ -1775,36 +1773,29 @@ fn wasm_codegen_native_dictionary_adapters() {
 
 #[wasm_bindgen_test]
 fn wasm_codegen_native_addressors() {
-    unsafe extern "C" fn shared(value: *const String) -> *const String {
-        value
-    }
-    unsafe extern "C" fn mutable(value: *mut String) -> *mut String {
-        value
-    }
     for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
         let mut session = CompilerSession::new();
         session.set_mir_optimization(optimization);
         session.set_physical_mir_optimization(optimization);
         let path = Path::single_str("native_members");
-        let mut module = Module::new(session.modules().next_id(), path.clone());
-        // SAFETY: identity projections remain rooted and allow ordinary string replacement.
-        unsafe {
-            module.add_native_member(
-                ustr("native_self"),
-                Some(NativeAddressorRef::new(shared).description(["self"], "", no_effects())),
-                Some(NativeAddressorMut::new(mutable).description(["self"], "", no_effects())),
-            );
-        }
+        let value_trait_id = session
+            .module_env()
+            .expect_std_trait_id(crate::std::core_traits_names::VALUE_TRAIT_NAME);
+        let module = crate::hir::native_functions::tests::native_member_fixture(
+            session.modules().next_id(),
+            session.module_env().trait_def(value_trait_id),
+            value_trait_id,
+        );
         session.register_module(path, module);
         assert_wasm_runs::<isize, isize>(
             &mut session,
             r#"
                 use native_members::*;
                 fn compute(x: int) -> int {
-                    let mut text = "before";
-                    let before = len(text.native_self);
-                    text.native_self = to_string(x);
-                    before + len(text.native_self)
+                    let mut owner = make();
+                    let before = len(owner.text);
+                    owner.text = to_string(x);
+                    before + len(owner.text)
                 }
             "#,
             123,

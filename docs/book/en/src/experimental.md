@@ -43,6 +43,7 @@ The `self` parameter names the value being projected; its type is already given 
 In these projection bodies, the final expression is the stored place that should be exposed.
 That is why reads and assignments through `pixel.x` affect `pixel.coords[0]`.
 
+Define custom projections in the same module as their receiver type.
 An explicit custom projection is rejected if it duplicates an accessible structural field.
 For types whose representation is private, a custom projection can expose a public field-like view without exposing the stored fields directly.
 

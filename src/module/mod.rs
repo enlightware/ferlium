@@ -62,9 +62,9 @@ use crate::{
         r#trait::{Trait, TraitDefaultMethod},
         trait_solver::application_key,
         r#type::{
-            BareNativeType, CallResultConvention, FnArgType, LocalTypeAliasId, SubscriptMemberType,
-            SubscriptResultConvention, SubscriptType, Type, TypeAliasEntry, TypeAliases, TypeDef,
-            TypeDefSlot, TypeDisplayEnv, TypeKind, TypeVar,
+            BareNativeType, CallResultConvention, FnArgType, LocalTypeAliasId, NativeType,
+            SubscriptMemberType, SubscriptResultConvention, SubscriptType, Type, TypeAliasEntry,
+            TypeAliases, TypeDef, TypeDefSlot, TypeDisplayEnv, TypeKind, TypeVar,
         },
         type_like::TypeLike,
         type_scheme::{PubTypeConstraint, TypeScheme, extra_parameters_from_constraints},
@@ -901,6 +901,13 @@ impl Module {
             matches!(&*receiver.data(), TypeKind::Native(native) if native.arguments.is_empty()),
             "native members need a closed Rust-native receiver"
         );
+        assert!(
+            receiver
+                .data()
+                .as_native()
+                .is_some_and(|native| self.owns_native_type(native)),
+            "declare the native receiver type in this module before registering its members"
+        );
         let key = ProjectionKey::structural(receiver, field);
         assert!(
             !self.projection_subscripts.contains_key(&key),
@@ -1250,6 +1257,29 @@ impl Module {
     }
 
     // Type aliases
+
+    /// Declare a closed Rust-native type in its defining Ferlium module.
+    ///
+    /// The host must declare a Rust type in only one module. Other modules may reference it
+    /// in signatures, but its native member projections must be registered here.
+    pub fn add_native_type<T: 'static>(
+        &mut self,
+        name: &str,
+        doc: impl Into<String>,
+    ) -> LocalTypeAliasId {
+        self.add_type_alias_str_with_doc(name, Type::primitive::<T>(), doc)
+    }
+
+    /// Whether this module declares the native receiver, rather than merely mentioning it in
+    /// a function signature. Native declarations are host-owned; duplicate declarations across
+    /// modules are a host setup error.
+    pub(crate) fn owns_native_type(&self, native: &NativeType) -> bool {
+        self.type_aliases.get_native_name(native).is_some()
+            || self
+                .type_aliases
+                .get_bare_native_name(&native.bare_ty)
+                .is_some()
+    }
 
     /// Add a documented non-generic type alias to this module (by &str), returning its ID.
     pub(crate) fn add_type_alias_str_with_doc(

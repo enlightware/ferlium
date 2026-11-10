@@ -614,6 +614,7 @@ pub enum InvalidSubscriptDefinitionKind {
     SharedMemberCombinedWithSeparateMembers,
     ProjectionMissingReceiverParameter,
     ProjectionReceiverMustBeNominal,
+    ProjectionReceiverMustBeLocal,
     ProjectionReceiverGenericParametersMismatch,
     ProjectionReceiverParameterMustBeUntyped,
     ProjectionUnexpectedParameter,
@@ -668,6 +669,9 @@ impl InvalidSubscriptDefinitionKind {
             }
             Self::ProjectionReceiverMustBeNominal => {
                 format!("{subject} projection receiver must be a named type")
+            }
+            Self::ProjectionReceiverMustBeLocal => {
+                format!("{subject} must be defined in the module that defines its receiver type")
             }
             Self::ProjectionReceiverGenericParametersMismatch => {
                 format!(

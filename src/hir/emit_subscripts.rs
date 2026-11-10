@@ -133,6 +133,14 @@ fn validate_projection_receiver_type(
         }));
     };
 
+    if named.def.module != env.current.module_id() {
+        return Err(internal_compilation_error!(InvalidSubscriptDefinition {
+            subject: SubscriptDefinitionSubject::Subscript(field.0),
+            kind: InvalidSubscriptDefinitionKind::ProjectionReceiverMustBeLocal,
+            span: receiver_span,
+        }));
+    }
+
     let source_params = subscript.generic_params.type_params();
     let expected_params = env.type_def_param_names(named.def).collect::<Vec<_>>();
     let expected_effect_param_count = env.type_def_effect_param_count(named.def);

@@ -482,11 +482,11 @@ fn addressor_subscript_accepts_explicit_return_place() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn native_member_rooted_in_a_scalar_receiver() {
+fn native_addressor_rooted_in_a_scalar_receiver() {
     let value = experimental_session().run(indoc! { r#"
-        fn read(x: int) -> int { x.int_self }
+        fn read(x: int) -> int { testing::int_self(x) }
         let y: int = 5;
-        read(41) * 10 + y.int_self + 3
+        read(41) * 10 + testing::int_self(y) + 3
     "# });
     assert_val_eq!(value, int(418));
 }

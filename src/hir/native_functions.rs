@@ -1435,7 +1435,7 @@ macro_rules! native_optional_entry {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{
         cell::Cell,
         convert,
@@ -1459,6 +1459,73 @@ mod tests {
         },
         types::effects::{effect, no_effects},
     };
+
+    /// A host-owned receiver used by the physical and Wasm native projection tests.
+    pub(crate) fn native_member_fixture(
+        module_id: ModuleId,
+        value_trait: &crate::types::r#trait::Trait,
+        value_trait_id: crate::module::TraitId,
+    ) -> Module {
+        use crate::{
+            std::{hash::Hasher, string::String, value::native_layout_associated_consts},
+            types::r#type::Type,
+        };
+
+        #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+        struct Text(String);
+        impl NativeValueType for Text {}
+
+        extern "C" fn equal(a: &Text, b: &Text) -> bool {
+            a == b
+        }
+        fn display(value: &Text) -> String {
+            value.0.clone()
+        }
+        extern "C" fn hash(value: &Text, state: &mut Hasher) {
+            state.write_string(&value.0);
+        }
+        unsafe extern "C" fn shared(value: *const Text) -> *const String {
+            // SAFETY: the addressor adapter supplies an initialized, shared receiver.
+            unsafe { &raw const (*value).0 }
+        }
+        unsafe extern "C" fn mutable(value: *mut Text) -> *mut String {
+            // SAFETY: the addressor adapter supplies an initialized, exclusive receiver.
+            unsafe { &raw mut (*value).0 }
+        }
+        let mut module = Module::new(module_id, Path::single_str("native_members"));
+        module.add_native_type::<Text>("Text", "A host-owned text container.");
+        module.add_concrete_impl_for_trait_def_no_locals(
+            value_trait_id,
+            value_trait,
+            [Type::primitive::<Text>()],
+            [],
+            native_layout_associated_consts::<Text>(),
+            [
+                Box::new(NativeFnRR::new(equal)) as crate::hir::function::Function,
+                Box::new(NativeOutFnR::from_rust(display)),
+                Box::new(NativeFnRM::new(hash)),
+                native_value_clone_function::<Text>(),
+                native_value_drop_function::<Text>(),
+            ],
+        );
+        module.add_function(
+            "make".into(),
+            NativeOutFn0::from_rust(|| Text(String::new("before"))).description(
+                [],
+                "",
+                no_effects(),
+            ),
+        );
+        // SAFETY: both members expose the initialized field with the receiver's lifetime.
+        unsafe {
+            module.add_native_member(
+                "text".into(),
+                Some(NativeAddressorRef::new(shared).description(["self"], "", no_effects())),
+                Some(NativeAddressorMut::new(mutable).description(["self"], "", no_effects())),
+            );
+        }
+        module
+    }
 
     #[test]
     fn physical_native_adapters_use_typed_scalar_transport() {

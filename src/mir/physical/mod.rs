@@ -4090,43 +4090,24 @@ mod tests {
 
     #[test]
     fn native_member_contracts_survive_projection_evidence_and_runtime_matching() {
-        use crate::{
-            hir::native_functions::{NativeAddressorMut, NativeAddressorRef},
-            std::string::String as NativeString,
-        };
-        unsafe extern "C" fn shared(value: *const NativeString) -> *const NativeString {
-            value
-        }
-        unsafe extern "C" fn mutable(value: *mut NativeString) -> *mut NativeString {
-            value
-        }
         let mut session = CompilerSession::new();
         let path = Path::single_str("native_members");
         let host_id = session.modules().next_id();
-        let mut host = Module::new(host_id, path.clone());
-        // SAFETY: identity projections preserve rooting and permit ordinary string mutation.
-        unsafe {
-            host.add_native_member(
-                "native_self".into(),
-                Some(NativeAddressorRef::new(shared).description(
-                    ["self"],
-                    "Shared member",
-                    no_effects(),
-                )),
-                Some(NativeAddressorMut::new(mutable).description(
-                    ["self"],
-                    "Mutable member",
-                    no_effects(),
-                )),
-            );
-        }
+        let value_trait_id = session
+            .module_env()
+            .expect_std_trait_id(crate::std::core_traits_names::VALUE_TRAIT_NAME);
+        let host = crate::hir::native_functions::tests::native_member_fixture(
+            host_id,
+            session.module_env().trait_def(value_trait_id),
+            value_trait_id,
+        );
         session.register_module(path, host);
         let module = compile(
             &mut session,
             r#"
             fn assign<T>(slot: &mut T, value: T) { slot = value; }
-            fn member(value) { value.native_self }
-            fn change(value: &mut string) { assign(value.native_self, "changed"); member(value) }
+            fn member(value) { value.text }
+            fn change(value: &mut native_members::Text) { assign(value.text, "changed"); member(value) }
         "#,
             "use_native_members",
         );

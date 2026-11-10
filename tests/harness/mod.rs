@@ -917,6 +917,15 @@ fn add_tracked_members(module: &mut Module) {
     use ferlium::hir::native_functions::{
         NativeAddressorMut, NativeAddressorRef, NativeFallibleAddressorMut,
     };
+    // SAFETY: this addressor returns its initialized scalar receiver unchanged.
+    module.add_function(
+        ustr("int_self"),
+        unsafe { NativeAddressorRef::new(int_self_ref) }.description(
+            ["value"],
+            "A rooted scalar addressor.",
+            no_effects(),
+        ),
+    );
     // SAFETY: these entries expose initialized fields (or the receiver itself), with no guard
     // or extra Rust invariants; the failure entry writes output only on success.
     unsafe {
@@ -954,15 +963,6 @@ fn add_tracked_members(module: &mut Module) {
                 "Rooted native value",
                 no_effects(),
             )),
-        );
-        module.add_native_member(
-            ustr("int_self"),
-            Some(NativeAddressorRef::new(int_self_ref).description(
-                ["self"],
-                "Rooted scalar value",
-                no_effects(),
-            )),
-            None,
         );
         module.add_native_member(
             ustr("checked_payload"),
@@ -1060,6 +1060,10 @@ fn testing_module(
     value_trait_def: &Trait,
 ) -> Module {
     let mut module = Module::new(module_id, Path::single_str("testing"));
+    module.add_native_type::<CloneTrackedNative>(
+        "CloneTracked",
+        "A clone-counting native test value.",
+    );
     add_tracked_members(&mut module);
     let test_assoc_trait = test_assoc_trait();
     let test_witnessed_project_trait = test_witnessed_project_trait();

@@ -460,56 +460,6 @@ fn public_projection_subscript_exposes_private_repr_across_modules() {
     assert_val_eq!(session.run("user::write()"), int(17));
 }
 
-#[test]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn duplicate_foreign_projection_subscripts_are_rejected_across_modules() {
-    let mut session = TestSession::new();
-    session.allow_experimental();
-
-    compile_module(
-        &mut session,
-        "base",
-        indoc! { r#"
-            #[private_repr]
-            pub struct Secret {
-                inner: int,
-            }
-        "# },
-    );
-    compile_module(
-        &mut session,
-        "first",
-        indoc! { r#"
-            use base::Secret;
-
-            pub subscript Secret.value(self) -> int {
-                ref {
-                    let local = 1;
-                    yield local
-                }
-            }
-        "# },
-    );
-    assert!(
-        session
-            .try_compile_module(
-                "second",
-                indoc! { r#"
-                    use base::Secret;
-
-                    pub subscript Secret.value(self) -> int {
-                        ref {
-                            let local = 2;
-                            yield local
-                        }
-                    }
-                "# },
-            )
-            .is_err(),
-        "a visible projection for a foreign type and field should be unique"
-    );
-}
-
 fn private_repr_enum_module_src() -> &'static str {
     indoc! { r#"
         #[private_repr]
