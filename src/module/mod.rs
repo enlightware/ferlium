@@ -1971,6 +1971,7 @@ impl Module {
         associated_const_tys: impl IntoIterator<Item = Type>,
         public: bool,
         source_span: Option<Location>,
+        others: &Modules,
     ) -> LocalImplId {
         let associated_const_values = associated_const_values.into();
         let associated_const_getters = associated_const_getters.into();
@@ -1992,10 +1993,18 @@ impl Module {
         }
         let dictionary_ty =
             self.computer_dictionary_ty(&emit_output.functions, associated_const_tys);
-        let entry_requirements = emit_output.method_requirements;
-        let (captures, mut mappings) =
+        let mut entry_requirements = emit_output.method_requirements;
+        entry_requirements.extend(associated_const_getters.iter().map(|id| {
+            DictionaryEntryRequirements::from_callable(
+                self.functions[id.as_index()]
+                    .definition
+                    .ty_scheme
+                    .extra_parameters(ModuleEnv::new(self, others))
+                    .requirements,
+            )
+        }));
+        let (captures, mappings) =
             dictionary_capture_plan(trait_id, &emit_output.input_tys, &entry_requirements);
-        mappings.extend((0..associated_const_getters.len()).map(|_| vec![]));
         let dictionary_value = build_capturing_dictionary_value(
             &emit_output.functions,
             &associated_const_getters,

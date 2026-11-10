@@ -53,7 +53,7 @@ use crate::{
         effects::{EffType, Effect, EffectVar, EffectsInstSubst},
         mutability::MutType,
         r#trait::{Trait, TraitDefaultMethod, TraitMethodIndex},
-        trait_solver::{TraitSolver, trait_solver_from_module},
+        trait_solver::{EvidencePlan, TraitSolver, trait_solver_from_module},
         r#type::{
             CallResultConvention, FnArgType, FnType, Type, TypeDisplayEnv, TypeInstSubst, TypeVar,
         },
@@ -89,6 +89,7 @@ pub(super) struct EmitTraitCtx<'a> {
 }
 
 pub(crate) struct EmitTraitOutput {
+    pub(crate) evidence_plan: EvidencePlan,
     pub(crate) input_tys: Vec<Type>,
     pub(crate) output_tys: Vec<Type>,
     pub(crate) output_effs: Vec<EffType>,
@@ -1529,6 +1530,7 @@ where
             )),
         );
         Some(EmitTraitOutput {
+            evidence_plan: Default::default(),
             input_tys,
             output_tys,
             output_effs,
@@ -2380,6 +2382,69 @@ where
             minimize_body_effects(output, &[], head_effect_vars, &mut ty_inf)?;
             ty_inf.finalize_effects()?;
 
+            // Body inference may not specialize written generics. Context reduction below may
+            // determine output-only variables from functional dependencies; its input roots
+            // remain rigid throughout.
+            let impl_ctx = trait_ctx.as_ref().expect("impl context");
+            let resolved_roots = (0..impl_ctx.generic_type_params.len())
+                .map(|index| {
+                    let ty = impl_annotation_subst
+                        .as_ref()
+                        .and_then(|(subst, _)| subst.get(&TypeVar::new(index as u32)))
+                        .expect("a written impl generic has a type variable");
+                    ty_inf.substitute_in_type(*ty)
+                })
+                .collect::<Vec<_>>();
+            distinct_written_type_vars(impl_ctx.generic_type_params, resolved_roots, || {
+                GenericParamsOwner::TraitImpl {
+                    trait_name: impl_ctx.trait_def.name,
+                }
+            })?;
+
+            let input_tys = ty_inf.substitute_in_types(&trait_output.input_tys);
+            if output.is_trait_impl_exportable(
+                trait_ctx.as_ref().expect("impl context").trait_id,
+                &input_tys,
+                others,
+            ) {
+                ty_inf.normalize_remaining_constraints();
+                let constraints = ty_inf.remaining_constraints().to_vec();
+                let mut solver = trait_solver_from_module!(output, others);
+                let constraints = solver
+                    .reduce_public_requirements(constraints, &input_tys, &mut ty_inf, solver_arena)
+                    .map_err(|error| {
+                        error.with_private_requirement_names(
+                            impl_ctx.generic_type_params.iter().enumerate().filter_map(
+                                |(index, name)| {
+                                    let root = *impl_annotation_subst
+                                        .as_ref()?
+                                        .0
+                                        .get(&TypeVar::new(index as u32))?;
+                                    let root = ty_inf.substitute_in_type(root);
+                                    Some((*root.data().as_variable()?, name.0))
+                                },
+                            ),
+                        )
+                    })?;
+                trait_output.evidence_plan = constraints.evidence;
+                for id in &local_fns {
+                    for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
+                        pending_functions
+                            .get_mut(&function_id)
+                            .expect("pending impl body")
+                            .evidence_plan = trait_output.evidence_plan.clone();
+                    }
+                }
+                ty_inf.replace_remaining_constraints(constraints.requirements);
+                ty_inf.finalize_effects()?;
+                let generated = solver.finish().commit(
+                    &mut output.functions,
+                    &mut output.def_table,
+                    &mut pending_functions,
+                );
+                elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
+            }
+
             // Check for remaining orphans.
             ty_inf.normalize_remaining_constraints();
             let input_tys = ty_inf.substitute_in_types(&trait_output.input_tys);
@@ -2482,6 +2547,7 @@ where
             }
         }
 
+        trait_output.evidence_plan.substitute(&mut ty_inf);
         // Take final substituted constraints.
         ty_inf.normalize_remaining_constraints();
         let all_constraints = ty_inf.take_constraints();
@@ -2492,20 +2558,6 @@ where
         let trait_ctx = trait_ctx.unwrap();
         let trait_id = trait_ctx.trait_id;
         let trait_def = &trait_ctx.trait_def;
-        let resolved_roots = (0..trait_ctx.generic_type_params.len())
-            .map(|index| {
-                impl_annotation_subst
-                    .as_ref()
-                    .and_then(|(subst, _)| subst.get(&TypeVar::new(index as u32)))
-                    .map(|ty| ty_inf.substitute_in_type(*ty))
-                    .expect("a written impl generic has a type variable")
-            })
-            .collect::<Vec<_>>();
-        distinct_written_type_vars(trait_ctx.generic_type_params, resolved_roots, || {
-            GenericParamsOwner::TraitImpl {
-                trait_name: trait_def.name,
-            }
-        })?;
         let trait_effect_subst = trait_def.effect_param_subst_for_effs(&trait_output.output_effs);
         for (i, id) in local_fns.iter().enumerate() {
             let i = TraitMethodIndex::from_index(i);
@@ -2580,6 +2632,7 @@ where
         // Apply unbound substitution to code and types.
         if !subst.0.is_empty() {
             let mut mapper = BitmapInstantiationMapper::new(&subst);
+            trait_output.evidence_plan.instantiate_in_place(&mut mapper);
             instantiate_types_in_place(&mut trait_output.input_tys, &mut mapper);
             instantiate_types_in_place(&mut trait_output.output_tys, &mut mapper);
             for id in local_fns.iter() {
@@ -2639,6 +2692,7 @@ where
             *eff = mapper.map_effect_type(eff);
         }
         instantiate_types_in_place(&mut trait_output.constraints, &mut mapper);
+        trait_output.evidence_plan.instantiate_in_place(&mut mapper);
         for (method_index, id) in local_fns.iter().enumerate() {
             let uses_self = methods_use_self[method_index];
             let method_index = TraitMethodIndex::from_index(method_index);
@@ -3201,6 +3255,119 @@ where
                 error: format!("Unused constraints in module compilation: {}", constraints),
                 span: unused_constraints[0].use_site(),
             }));
+        }
+
+        // Check body contracts before reducing their exported representation. Every member of
+        // an exported recursive group needs the public leaves: a private member cannot recover
+        // them backwards from a dictionary for the unreduced private requirement.
+        let exports_group = ast_functions()
+            .any(|input| input.function.visibility.is_public() && input.trait_default.is_none());
+        let mut published_requirements_changed = false;
+        for ((input, id), explicit_roots) in ast_functions()
+            .zip(&local_fns)
+            .zip(&function_explicit_root_tys)
+        {
+            if !exports_group || input.trait_default.is_some() {
+                continue;
+            }
+            let scheme = output.functions[id.as_index()].definition.ty_scheme.clone();
+            let rigid = scheme
+                .ty
+                .args
+                .iter()
+                .map(|arg| arg.ty)
+                .chain(explicit_roots.iter().copied())
+                .collect::<Vec<_>>();
+            let mut solver = trait_solver_from_module!(output, others);
+            if scheme
+                .constraints
+                .iter()
+                .all(|c| solver.requirement_is_public(c))
+            {
+                continue;
+            }
+            published_requirements_changed = true;
+            let constraints = solver
+                .reduce_public_requirements(scheme.constraints, &rigid, &mut ty_inf, solver_arena)
+                .map_err(|error| {
+                    error.with_private_requirement_names(
+                        input
+                            .function
+                            .generic_params
+                            .type_params()
+                            .iter()
+                            .zip(explicit_roots)
+                            .filter_map(|(name, root)| {
+                                let root = ty_inf.substitute_in_type(*root);
+                                Some((*root.data().as_variable()?, name.0))
+                            }),
+                    )
+                })?;
+            let generated = solver.finish().commit(
+                &mut output.functions,
+                &mut output.def_table,
+                &mut pending_functions,
+            );
+            elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
+            let evidence_plan = constraints.evidence;
+            let constraints = constraints.requirements;
+            for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
+                pending_functions
+                    .get_mut(&function_id)
+                    .expect("pending function body")
+                    .evidence_plan = evidence_plan.clone();
+                output.functions[function_id.as_index()]
+                    .definition
+                    .ty_scheme
+                    .constraints = constraints.clone();
+                pending_functions
+                    .get_mut(&function_id)
+                    .expect("pending function body")
+                    .definition
+                    .ty_scheme
+                    .constraints = constraints.clone();
+            }
+        }
+        if published_requirements_changed {
+            ty_inf.finalize_effects()?;
+            substitute_and_canonicalize_functions(
+                output,
+                &mut pending_functions,
+                &associated_lambdas,
+                &local_fns,
+                &mut ty_inf,
+            );
+            for id in &local_fns {
+                let scheme = &output.functions[id.as_index()].definition.ty_scheme;
+                let quantifiers = scheme
+                    .ty_quantifiers
+                    .iter()
+                    .filter_map(|var| {
+                        ty_inf
+                            .substitute_in_type(Type::variable(*var))
+                            .data()
+                            .as_variable()
+                            .copied()
+                    })
+                    .chain(TypeScheme::list_ty_vars(
+                        &scheme.ty,
+                        scheme.constraints.iter(),
+                    ))
+                    .unique()
+                    .collect::<Vec<_>>();
+                for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
+                    output.functions[function_id.as_index()]
+                        .definition
+                        .ty_scheme
+                        .ty_quantifiers = quantifiers.clone();
+                    pending_functions
+                        .get_mut(&function_id)
+                        .expect("pending function body")
+                        .definition
+                        .ty_scheme
+                        .ty_quantifiers = quantifiers.clone();
+                }
+            }
         }
 
         // Fifth pass, normalize the type schemes, substitute the types in the functions.

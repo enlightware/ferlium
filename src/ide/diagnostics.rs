@@ -450,6 +450,10 @@ pub(super) fn compilation_error_to_data(
             span,
             format!("Unbound type variable `{ty_var}` in `{ty}`"),
         )],
+        PrivateRequirementInPublicContract { requirement, span, .. } => vec![error_data_from_location(
+            span,
+            format!("Cannot publish private requirement `{requirement}`. Its evidence must be constructible for every input type from public requirements"),
+        )],
         UnresolvedConstraints { constraints, span } => vec![error_data_from_location(
             span,
             format!("Unresolved constraints: `{}`", constraints.join(" ∧ ")),

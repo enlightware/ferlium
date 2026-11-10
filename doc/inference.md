@@ -61,6 +61,30 @@ to equal type structure. Every original bound must remain satisfied after these 
 parameters must remain distinct and polymorphic. Ferlium has no top type or general union/intersection
 constructors, so joins such as `int` with `bool` can fail.
 
+### Public requirements
+
+Before publishing an exported function or implementation, requirements mentioning private types or
+traits are reduced in the defining module. An impl can be selected only if it applies uniformly,
+without choosing unresolved input types, and no other candidate could apply after instantiation.
+Independent variables remain generic, including those occurring only in a function's result and
+outputs supplied by public prerequisites. A uniformly selected impl may determine its own outputs;
+these substitutions also reach the impl head and bodies. A cycle of output dependencies alone does
+not establish determination.
+
+The compiler records these choices and elaboration replays them without selecting impls again.
+The defining body constructs private dictionaries from the public evidence its caller supplies.
+Ground public requirements are discharged in the provider; retained public requirements are solved
+in the caller's scope, even if the provider has a private impl for the caller's type. Published
+requirements therefore mention only public names, and callers need no access to private impls.
+
+Missing evidence and reductions exceeding the work limit are errors at the definition. Recursive
+`Value` construction may pass through custom impls when it refers back to a generated dictionary:
+the custom dictionary is built inside a generated entry using its self evidence. This preserves the
+custom methods without eagerly building cyclic captures. Cycles consisting only of source impl
+prerequisites remain errors. Other derivations currently require ground inputs.
+
+As with other inferred requirements, changing a private helper may tighten the published contract.
+
 ## Type relations
 
 The structural solver in `src/types/type_inference/unify.rs` uses three relations:

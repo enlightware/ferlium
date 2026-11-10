@@ -10,7 +10,7 @@ use std::{
 use ustr::{Ustr, ustr};
 
 use crate::{
-    FxHashMap, FxHashSet, Location,
+    FxHashSet, Location,
     ast::{Path, UnnamedArg},
     compiler::error::InternalCompilationError,
     containers::b,
@@ -27,10 +27,10 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        self, ConcreteTraitImplKey, EvidenceBindingId, FunctionId, LocalDecl, LocalDeclId,
-        LocalImplId, Module, ModuleEnv, PendingFunctionBody, PendingLocalDrop,
-        PendingModuleFunction, ProjectionIndex, ResolvedValueLayout, TraitDictionaryEntry, TraitId,
-        TraitImpl, TraitImplId, TraitImpls, TypeDefId, id::Id,
+        self, ConcreteTraitImplKey, FunctionId, LocalDecl, LocalDeclId, LocalImplId, Module,
+        ModuleEnv, PendingFunctionBody, PendingLocalDrop, PendingModuleFunction, ProjectionIndex,
+        ResolvedValueLayout, TraitDictionaryEntry, TraitId, TraitImpl, TraitImplId, TraitImpls,
+        TypeDefId, id::Id,
     },
     std::{
         STD_MODULE_ID,
@@ -721,13 +721,18 @@ pub(crate) fn variant_payload_storage_for_payload_type(
     env: &impl TypeLayoutEnv,
 ) -> Option<VariantPayloadStorage> {
     let (structural_ty, cases) = structural_variant(variant_ty, env)?;
-    cases
-        .iter()
-        .any(|(_, candidate)| *candidate == payload_ty)
-        .then(|| payload_storage_in_variant(structural_ty, payload_ty, env))
+    if !cases.iter().any(|(_, candidate)| *candidate == payload_ty) {
+        return None;
+    }
+    let storage = payload_storage_in_variant(structural_ty, payload_ty, env);
+    // Substitution may introduce a recursive path through an open payload (for example
+    // Option<T> with T = List, where List contains Option<List>). Its active tag already carries
+    // the representation choice; use that at runtime until inline storage is known to be stable.
+    (storage.is_indirect() || variant_ty.is_constant()).then_some(storage)
 }
 
-/// Return one indirect payload type when `variant_ty` owns recursive payload storage.
+/// Return one possibly indirect payload type for representation cleanup.
+/// Open variants may become recursive after substituting their type arguments.
 ///
 /// Every indirect case uses the same pointer-sized union slot, so one pointee type is sufficient
 /// for typed address calculation and representation cleanup.
@@ -737,9 +742,9 @@ pub(crate) fn variant_indirect_payload_type(
 ) -> Option<Type> {
     let (structural_ty, cases) = structural_variant(variant_ty, env)?;
     cases.into_iter().find_map(|(_, payload_ty)| {
-        payload_storage_in_variant(structural_ty, payload_ty, env)
-            .is_indirect()
-            .then_some(payload_ty)
+        (payload_storage_in_variant(structural_ty, payload_ty, env).is_indirect()
+            || (!variant_ty.is_constant() && payload_ty != Type::unit()))
+        .then_some(payload_ty)
     })
 }
 
@@ -1391,6 +1396,7 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
                 arguments_unnamed: UnnamedArg::All,
                 ty: CallImplType::value(fn_ty),
                 input_tys: vec![input_ty],
+                output_tys: Vec::new(),
                 output_effs: Vec::new(),
                 inst_data: hir::FnInstData::none(),
             })),
@@ -1457,7 +1463,6 @@ fn named_trait_method_call_node(
 
 fn value_layout_expr_node(
     expr: &ValueLayoutExpr,
-    evidence: &FxHashMap<Type, EvidenceBindingId>,
     ctx: &mut ValueBodyCtx<'_, '_>,
     arena: &mut NodeArena,
     locals: &mut Vec<LocalDecl>,
@@ -1470,30 +1475,23 @@ fn value_layout_expr_node(
         ValueLayoutExpr::AssociatedConst { ty, index } => {
             let value_trait = ctx.solver.std_trait_id(VALUE_TRAIT_NAME);
             let trait_def = ctx.solver.trait_def(value_trait);
-            let dictionary_ty = trait_def.get_dictionary_type_for_tys(&[*ty], &[], &[]);
-            let dictionary = alloc_synth_node(
-                arena,
-                hir::NodeKind::LoadDictionary(hir::LoadDictionary {
-                    extra_parameter: evidence[ty],
-                }),
-                dictionary_ty,
-            );
             alloc_synth_node(
                 arena,
-                hir::hir_syn::call_dictionary_function(
-                    dictionary,
-                    trait_def.dictionary_associated_const_index(*index),
-                    Vec::new(),
-                    Vec::new(),
-                    CallImplType::value(FnType::new_by_val([], int_type(), EffType::empty())),
-                    None,
-                ),
+                hir::NodeKind::GetTraitAssociatedConst(b(hir::GetTraitAssociatedConst {
+                    trait_id: value_trait,
+                    associated_const_index: *index,
+                    associated_const_name: trait_def.associated_const(*index).name,
+                    associated_const_span: span,
+                    input_tys: vec![*ty],
+                    output_tys: vec![],
+                    output_effs: vec![],
+                })),
                 int_type(),
             )
         }
         ValueLayoutExpr::Add(left, right) => {
-            let left = value_layout_expr_node(left, evidence, ctx, arena, locals, span)?;
-            let right = value_layout_expr_node(right, evidence, ctx, arena, locals, span)?;
+            let left = value_layout_expr_node(left, ctx, arena, locals, span)?;
+            let right = value_layout_expr_node(right, ctx, arena, locals, span)?;
             named_trait_method_call_node(
                 ctx,
                 NUM_TRAIT_NAME,
@@ -1507,8 +1505,8 @@ fn value_layout_expr_node(
         ValueLayoutExpr::Max(left, right) => {
             use hir::hir_syn::*;
 
-            let left = value_layout_expr_node(left, evidence, ctx, arena, locals, span)?;
-            let right = value_layout_expr_node(right, evidence, ctx, arena, locals, span)?;
+            let left = value_layout_expr_node(left, ctx, arena, locals, span)?;
+            let right = value_layout_expr_node(right, ctx, arena, locals, span)?;
             let local_slot = locals.len();
             let (store_left, left_id) = store_new_local(
                 left,
@@ -1560,8 +1558,8 @@ fn value_layout_expr_node(
             )
         }
         ValueLayoutExpr::AlignTo(offset, align) => {
-            let offset = value_layout_expr_node(offset, evidence, ctx, arena, locals, span)?;
-            let align = value_layout_expr_node(align, evidence, ctx, arena, locals, span)?;
+            let offset = value_layout_expr_node(offset, ctx, arena, locals, span)?;
+            let align = value_layout_expr_node(align, ctx, arena, locals, span)?;
             let one = alloc_synth_node(arena, hir::hir_syn::native(1_isize), int_type());
             let align_minus_one = named_trait_method_call_node(
                 ctx,
@@ -1626,11 +1624,6 @@ pub(crate) fn generated_value_layout_getter(
             PubTypeConstraint::new_have_trait(value_trait, vec![ty], Vec::new(), Vec::new(), span)
         })
         .collect::<Vec<_>>();
-    let evidence = evidence_tys
-        .into_iter()
-        .enumerate()
-        .map(|(index, ty)| (ty, EvidenceBindingId::from_index(index)))
-        .collect();
     let definition = CallableDefinition::new_infer_quantifiers_with_constraints(
         FnType::new_by_val([], int_type(), EffType::empty()),
         constraints,
@@ -1640,14 +1633,7 @@ pub(crate) fn generated_value_layout_getter(
     let mut arena = NodeArena::default();
     let mut locals = Vec::new();
     let mut ctx = ValueBodyCtx::generic(solver);
-    let root = value_layout_expr_node(
-        &expression,
-        &evidence,
-        &mut ctx,
-        &mut arena,
-        &mut locals,
-        span,
-    )?;
+    let root = value_layout_expr_node(&expression, &mut ctx, &mut arena, &mut locals, span)?;
     Ok(PendingModuleFunction::new(
         definition,
         PendingScriptFunction::new(arena, root, 0),

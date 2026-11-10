@@ -205,6 +205,7 @@ enum CheckedStaticCallee {
         method_span: Location,
         arguments_unnamed: UnnamedArg,
         input_tys: Vec<Type>,
+        output_tys: Vec<Type>,
         output_effs: Vec<EffType>,
     },
 }
@@ -4516,6 +4517,7 @@ impl TypeInference {
                     method_span: path_span,
                     arguments_unnamed,
                     input_tys,
+                    output_tys,
                     output_effs,
                 },
                 abi_arg_tys: inst_fn_ty.args.clone(),
@@ -4600,6 +4602,7 @@ impl TypeInference {
                 method_span,
                 arguments_unnamed,
                 input_tys,
+                output_tys,
                 output_effs,
             } => NodeKind::TraitMethodApply(b(hir::TraitMethodApplication {
                 trait_id,
@@ -4610,6 +4613,7 @@ impl TypeInference {
                 arguments_unnamed,
                 ty: CallImplType::new(call.inst_fn_ty, call.result_convention),
                 input_tys,
+                output_tys,
                 output_effs,
                 inst_data: call.inst_data,
             })),

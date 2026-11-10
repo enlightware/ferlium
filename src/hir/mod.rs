@@ -755,6 +755,7 @@ pub struct TraitMethodApplication<P: HirPhase = Unelaborated> {
     pub arguments_unnamed: UnnamedArg,
     pub ty: CallImplType,
     pub input_tys: Vec<Type>,
+    pub output_tys: Vec<Type>,
     /// The trait application's output effects, as instantiated at this call.
     pub output_effs: Vec<EffType>,
     pub inst_data: FnInstData,
@@ -2237,6 +2238,7 @@ pub(crate) fn instantiate_node_in_place<M: TypeMapper>(
         TraitMethodApply(app) => {
             app.ty = app.ty.map(mapper);
             instantiate_types_in_place(&mut app.input_tys, mapper);
+            instantiate_types_in_place(&mut app.output_tys, mapper);
             instantiate_effect_types_in_place(&mut app.output_effs, mapper);
             app.inst_data.instantiate_in_place(mapper);
         }

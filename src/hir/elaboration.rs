@@ -16,7 +16,6 @@ use crate::{
             find_projection_subscript_dict_index_for_receiver_ty, find_trait_impl_dict_index,
             find_variant_payload_indirection_index, instantiate_dictionary_requirements,
         },
-        emit_hir::instantiate_function_descr_in_place,
         hir_syn::{call_dictionary_function, get_dictionary},
         value_dispatch::{resolve_local_clone, resolve_local_drop},
     },
@@ -34,8 +33,9 @@ use crate::{
     types::{
         effects::EffectVar,
         r#trait::{Trait, TraitDictionaryEntryIndex, TraitMethodIndex},
-        trait_solver::{TraitSolver, trait_solver_from_module},
-        type_scheme::TypeScheme,
+        trait_solver::{
+            EvidencePlanSource, REDUCTION_WORK_LIMIT, TraitSolver, trait_solver_from_module,
+        },
     },
 };
 
@@ -193,11 +193,27 @@ fn trait_dictionary_node_kind(
         ));
     }
 
-    if !input_tys.iter().all(|ty| ty.is_trait_input_resolved()) {
-        panic!(
-            "dictionary for trait {trait_id:?} with inputs {input_tys:?} was not found in caller requirements {:?}; type inference should have failed",
-            ctx.dicts.requirements
-        )
+    if !input_tys.iter().all(|ty| ty.is_trait_input_resolved())
+        || recorded_evidence_root(trait_id, &input_tys, &output_tys, &output_effs, ctx).is_some()
+    {
+        let binding = trait_dictionary_evidence_binding(
+            arena,
+            trait_id,
+            &input_tys,
+            &output_tys,
+            &output_effs,
+            span,
+            ctx,
+        )?;
+        let ty = ctx.evidence_bindings[binding.as_index()]
+            .requirement
+            .to_dict_type(ctx.trait_solver);
+        return Ok((
+            NodeKind::LoadDictionary(hir::LoadDictionary {
+                extra_parameter: binding,
+            }),
+            ty,
+        ));
     }
     let dictionary = ctx.trait_solver.solve_impl_for_application(
         trait_id,
@@ -211,16 +227,12 @@ fn trait_dictionary_node_kind(
     let impl_data = ctx.trait_solver.get_impl_data_by_id(dictionary);
     let ty = impl_data.dictionary_ty;
     let capture_schema = impl_data.dictionary_value.capture_schema().to_vec();
-    // The prerequisites of an impl of another module are solved in its private scope.
-    let scope = ctx.trait_solver.prerequisite_scope(dictionary);
-    ctx.trait_solver.push_private_impl_scope(scope);
     let capture_infos = extra_arg_kind_from_inst_data(
         &hir::FnInstData::new(capture_schema, Vec::new(), Vec::new()),
         span,
         ctx,
         arena,
     );
-    ctx.trait_solver.pop_private_impl_scope(scope);
     let capture_infos = capture_infos?;
     let captures = capture_infos
         .into_iter()
@@ -245,6 +257,271 @@ pub(crate) fn trait_dictionary_evidence_binding(
     span: Location,
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
 ) -> Result<EvidenceBindingId, InternalCompilationError> {
+    let requirement = DictionaryReq::new_trait_impl(
+        trait_id,
+        input_tys.to_vec(),
+        output_tys.to_vec(),
+        output_effs.to_vec(),
+    );
+    if ctx.active_dictionary_constructions.len() >= REDUCTION_WORK_LIMIT
+        || ctx.active_dictionary_constructions.contains(&requirement)
+    {
+        return Err(internal_compilation_error!(TraitImplNotFound {
+            trait_ref: trait_id,
+            input_tys: input_tys.to_vec(),
+            fn_span: span,
+        }));
+    }
+    ctx.active_dictionary_constructions.push(requirement);
+    let result = trait_dictionary_evidence_binding_inner(
+        arena,
+        trait_id,
+        input_tys,
+        output_tys,
+        output_effs,
+        span,
+        ctx,
+    );
+    ctx.active_dictionary_constructions.pop();
+    result
+}
+
+/// Realize a definition-site choice. In particular, a selected node never asks the solver
+/// which impl applies again. Public leaves are bound only after parameter order is final.
+fn replay_evidence_plan(
+    arena: &mut NodeArena,
+    root: usize,
+    span: Location,
+    ctx: &mut DictElaborationCtx<'_, '_, '_>,
+) -> Result<EvidenceBindingId, InternalCompilationError> {
+    enum Work {
+        Visit(usize),
+        Construct {
+            node: usize,
+            requirement: DictionaryReq,
+            definition: TraitDictionaryId,
+            captures: Vec<usize>,
+        },
+    }
+    let mut pending = vec![Work::Visit(root)];
+    while let Some(work) = pending.pop() {
+        match work {
+            Work::Construct {
+                node,
+                requirement,
+                definition,
+                captures,
+            } => {
+                let captures = captures
+                    .into_iter()
+                    .map(|id| ctx.planned_bindings[id].expect("capture was elaborated first"))
+                    .collect();
+                ctx.planned_bindings[node] = Some(ctx.intern_evidence_binding(
+                    requirement,
+                    EvidenceBindingSource::ConstructedDictionary {
+                        definition,
+                        captures,
+                    },
+                ));
+            }
+            Work::Visit(index) => {
+                if ctx.planned_bindings[index].is_some() {
+                    continue;
+                }
+                let node = &ctx.evidence_plan.nodes[index];
+                let value_trait = ctx.trait_solver.std_trait_id(VALUE_TRAIT_NAME);
+                let requirement = node
+                    .constraint
+                    .dictionary_requirement_key(value_trait)
+                    .expect("evidence plan nodes have a dictionary requirement");
+                let (selected, captures) = match &node.source {
+                    EvidencePlanSource::Public => {
+                        ctx.planned_bindings[index] = Some(evidence_binding_for_requirement(
+                            arena,
+                            &requirement,
+                            span,
+                            ctx,
+                        )?);
+                        continue;
+                    }
+                    EvidencePlanSource::SelfReference { .. } => {
+                        return Err(internal_compilation_error!(Internal {
+                            error: "Recursive Value evidence escaped its dictionary entry".into(),
+                            span,
+                        }));
+                    }
+                    EvidencePlanSource::Pending => {
+                        return Err(internal_compilation_error!(Internal {
+                            error: "An unresolved evidence plan reached elaboration".into(),
+                            span,
+                        }));
+                    }
+                    EvidencePlanSource::Selected {
+                        application,
+                        captures,
+                    } => {
+                        let selected = ctx.trait_solver.materialize_uniform_dictionary(
+                            application,
+                            &requirement,
+                            span,
+                        )?;
+                        (selected, captures.clone())
+                    }
+                    EvidencePlanSource::GeneratedValue { members } => {
+                        if let Some((entry_plan, original_ids)) =
+                            ctx.evidence_plan.recursive_entry_plan(index)
+                        {
+                            let selected =
+                                ctx.trait_solver.materialize_recursive_value_dictionary(
+                                    &requirement,
+                                    &entry_plan,
+                                    span,
+                                    arena,
+                                )?;
+                            let schema = ctx
+                                .trait_solver
+                                .get_impl_data_by_id(selected)
+                                .dictionary_value
+                                .capture_schema();
+                            let captures = schema
+                                .iter()
+                                .map(|capture| {
+                                    let original = entry_plan.nodes.iter().zip(&original_ids)
+                                        .find_map(|(node, original)| {
+                                            let requirement = node.constraint.dictionary_requirement_key(value_trait)?;
+                                            (matches!(node.source, EvidencePlanSource::Public)
+                                                && requirement.same_contract(capture)).then_some(*original)
+                                        });
+                                    original.ok_or_else(|| internal_compilation_error!(Internal {
+                                        error: "Recursive Value capture is absent from its entry plan".into(),
+                                        span,
+                                    }))
+                                })
+                                .collect::<Result<Vec<_>, _>>()?;
+                            (selected, captures)
+                        } else {
+                            let DictionaryReq::TraitImpl {
+                                trait_id,
+                                input_tys,
+                                ..
+                            } = &requirement
+                            else {
+                                unreachable!()
+                            };
+                            let (canonical, instantiation) =
+                                alpha_canonicalize_types_with_instantiation(input_tys);
+                            let (selected, _) = ctx
+                                .trait_solver
+                                .materialize_compiler_provided_value_dictionary(
+                                    arena, *trait_id, &canonical, span,
+                                )?;
+                            let mut mapper = BitmapInstantiationMapper::new(&instantiation);
+                            let captures = ctx
+                                .trait_solver
+                                .get_impl_data_by_id(selected)
+                                .dictionary_value
+                                .capture_schema()
+                                .iter()
+                                .map(|req| req.instantiate(&mut mapper))
+                                .map(|capture| {
+                                    let member = members.iter().copied()
+                                        .filter(|member| *member != index)
+                                        .find(|member| {
+                                            let requirement = ctx.evidence_plan.nodes[*member]
+                                                .constraint.dictionary_requirement_key(value_trait);
+                                            requirement.as_ref() == Some(&capture)
+                                        });
+                                    member.ok_or_else(|| internal_compilation_error!(Internal {
+                                        error: "Generated Value evidence differs from its recorded members".into(),
+                                        span,
+                                    }))
+                                })
+                                .collect::<Result<Vec<_>, _>>()?;
+                            (selected, captures)
+                        }
+                    }
+                    EvidencePlanSource::Ground(selected) => {
+                        let selected = *selected;
+                        let schema = ctx
+                            .trait_solver
+                            .get_impl_data_by_id(selected)
+                            .dictionary_value
+                            .capture_schema()
+                            .to_vec();
+                        let captures = schema
+                            .iter()
+                            .map(|req| evidence_binding_for_requirement(arena, req, span, ctx))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        ctx.planned_bindings[index] = Some(ctx.intern_evidence_binding(
+                            requirement,
+                            EvidenceBindingSource::ConstructedDictionary {
+                                definition: TraitDictionaryId::new(
+                                    selected.module,
+                                    selected.impl_id,
+                                ),
+                                captures,
+                            },
+                        ));
+                        continue;
+                    }
+                };
+                let construction = pending.len();
+                let capture_count = captures.len();
+                pending.push(Work::Construct {
+                    node: index,
+                    requirement,
+                    definition: TraitDictionaryId::new(selected.module, selected.impl_id),
+                    captures,
+                });
+                // Read from the queued construction to avoid a second vector of child visits.
+                // Reverse pushes preserve the capture order on this LIFO worklist.
+                for child in (0..capture_count).rev() {
+                    let Work::Construct { captures, .. } = &pending[construction] else {
+                        unreachable!("the construction stays queued below its children");
+                    };
+                    let child = captures[child];
+                    pending.push(Work::Visit(child));
+                }
+            }
+        }
+    }
+    Ok(ctx.planned_bindings[root].expect("the plan root was elaborated"))
+}
+
+// Body requests use complete contracts at the boundary of the plan. Only original roots
+// participate: prerequisite captures follow their own recorded edges, never sibling searches.
+fn recorded_evidence_root(
+    trait_id: TraitId,
+    input_tys: &[Type],
+    output_tys: &[Type],
+    output_effs: &[EffType],
+    ctx: &DictElaborationCtx<'_, '_, '_>,
+) -> Option<usize> {
+    let requested = DictionaryReq::new_trait_impl(
+        trait_id,
+        input_tys.to_vec(),
+        output_tys.to_vec(),
+        output_effs.to_vec(),
+    );
+    ctx.evidence_plan.roots.iter().copied().find(|index| {
+        let node = &ctx.evidence_plan.nodes[*index];
+        !matches!(node.source, EvidencePlanSource::Public)
+            && node
+                .constraint
+                .dictionary_requirement_key(ctx.trait_solver.std_trait_id(VALUE_TRAIT_NAME))
+                .is_some_and(|planned| planned.same_contract(&requested))
+    })
+}
+
+fn trait_dictionary_evidence_binding_inner(
+    arena: &mut NodeArena,
+    trait_id: TraitId,
+    input_tys: &[Type],
+    output_tys: &[Type],
+    output_effs: &[EffType],
+    span: Location,
+    ctx: &mut DictElaborationCtx<'_, '_, '_>,
+) -> Result<EvidenceBindingId, InternalCompilationError> {
     if let Some(index) = find_trait_impl_dict_index(ctx.dicts, trait_id, input_tys) {
         return Ok(EvidenceBindingId::from_index(index));
     }
@@ -254,6 +531,11 @@ pub(crate) fn trait_dictionary_evidence_binding(
         output_effs,
         &ctx.retained_effect_vars,
     );
+    if let Some(index) =
+        recorded_evidence_root(trait_id, &input_tys, &output_tys, &output_effs, ctx)
+    {
+        return replay_evidence_plan(arena, index, span, ctx);
+    }
     let is_open_generated_value = {
         let trait_def = ctx.trait_solver.trait_def(trait_id);
         is_value_trait(trait_id, trait_def)
@@ -300,11 +582,10 @@ pub(crate) fn trait_dictionary_evidence_binding(
         return Ok(ctx.intern_evidence_binding(requirement, source));
     }
     if !input_tys.iter().all(|ty| ty.is_trait_input_resolved()) {
-        return Err(internal_compilation_error!(Internal {
-            error: format!(
-                "dictionary for trait {trait_id:?} with inputs {input_tys:?} was not found in caller evidence"
-            ),
-            span,
+        return Err(internal_compilation_error!(TraitImplNotFound {
+            trait_ref: trait_id,
+            input_tys,
+            fn_span: span,
         }));
     }
 
@@ -320,14 +601,10 @@ pub(crate) fn trait_dictionary_evidence_binding(
     let definition = TraitDictionaryId::new(selected.module, selected.impl_id);
     let impl_data = ctx.trait_solver.get_impl_data_by_id(selected);
     let capture_schema = impl_data.dictionary_value.capture_schema().to_vec();
-    // The prerequisites of an impl of another module are solved in its private scope.
-    let scope = ctx.trait_solver.prerequisite_scope(selected);
-    ctx.trait_solver.push_private_impl_scope(scope);
     let captures = capture_schema
         .iter()
         .map(|requirement| evidence_binding_for_requirement(arena, requirement, span, ctx))
         .collect::<Result<Vec<_>, _>>();
-    ctx.trait_solver.pop_private_impl_scope(scope);
     let captures = captures?;
     let requirement = DictionaryReq::new_trait_impl(trait_id, input_tys, output_tys, output_effs);
     let static_captures = captures
@@ -1399,45 +1676,14 @@ pub(crate) fn elaborate_generated_functions_with_private_impls(
         let Some(mut function) = pending_functions.remove(&id) else {
             continue;
         };
+        if function.definition.ty_scheme != module.functions[id.as_index()].definition.ty_scheme {
+            return Err(internal_compilation_error!(Internal {
+                error: "A pending generated body and its placeholder have different schemes".into(),
+                span: function.code.arena[function.code.entry_node_id].span,
+            }));
+        }
         function.definition = module.functions[id.as_index()].definition.clone();
         function.spans = module.functions[id.as_index()].spans.clone();
-
-        // Generators author pending HIR with canonical variable ids A, B, … . An enclosing
-        // inference pass may have renamed the quantifiers in the committed placeholder without
-        // visiting a function generated during that pass. Re-establish the positional
-        // correspondence before dictionary lookup; matching evidence alpha-equivalently at each
-        // use would be ambiguous for functions with several independent variables.
-        let target_type_quantifiers = TypeScheme::list_ty_vars(
-            &function.definition.ty_scheme.ty,
-            function.definition.ty_scheme.constraints.iter(),
-        );
-        let type_subst = target_type_quantifiers
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, target)| (TypeVar::new(index as u32), Type::variable(target)))
-            .collect();
-        let target_effect_quantifiers = TypeScheme::list_eff_vars(
-            &function.definition.ty_scheme.ty,
-            function.definition.ty_scheme.constraints.iter(),
-        );
-        let effect_subst = target_effect_quantifiers
-            .iter()
-            .copied()
-            .sorted()
-            .enumerate()
-            .map(|(index, target)| {
-                (
-                    EffectVar::new(index as u32),
-                    EffType::single_variable(target),
-                )
-            })
-            .collect();
-        let subst = (type_subst, effect_subst);
-        let mut mapper = BitmapInstantiationMapper::new(&subst);
-        instantiate_function_descr_in_place(&mut function, &mut mapper);
-        function.definition.ty_scheme.ty_quantifiers = target_type_quantifiers;
-        function.definition.ty_scheme.eff_quantifiers = target_effect_quantifiers;
 
         let dicts = module.functions[id.as_index()]
             .definition
@@ -2666,6 +2912,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 let arguments_unnamed = app.arguments_unnamed;
                 let ty = app.ty.clone();
                 let input_tys = app.input_tys.clone();
+                let output_tys = app.output_tys.clone();
                 let output_effs = app.output_effs.clone();
                 let inst_data = app.inst_data.clone();
                 assert!(
@@ -2710,7 +2957,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                         &mut self.generated,
                         trait_id,
                         &input_tys,
-                        &[],
+                        &output_tys,
                         &output_effs,
                         method_span,
                         self.ctx,

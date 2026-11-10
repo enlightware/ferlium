@@ -30,7 +30,7 @@ use crate::{
     },
     hir::{NodeArena, value::LiteralValue},
     internal_compilation_error,
-    module::{LocalFunctionId, ModuleId, TraitId},
+    module::{LocalFunctionId, TraitId},
     parser::location::Location,
     std::{
         core_traits_names::{FROM_ITERATOR_TRAIT_NAME, REPR_TRAIT_NAME, VALUE_TRAIT_NAME},
@@ -82,7 +82,6 @@ pub(crate) struct UnifiedTypeInferenceSnapshot {
     remaining_ty_constraints_len: usize,
     obligations_len: usize,
     expanded_value_applications_len: usize,
-    obligation_scopes_len: usize,
 }
 
 /// Equality state, retained bounds and public obligations during inference.
@@ -110,10 +109,6 @@ pub struct UnifiedTypeInference {
     /// the obligations: an equal application reuses that expansion, so that recursive `Value`
     /// impls expand once. This guards expansion only; it proves nothing.
     expanded_value_applications: Vec<Vec<Type>>,
-    /// The trait applications required by an implementation from another module, with that
-    /// module: they are solved with its private impls visible, as when its dictionary is
-    /// materialized.
-    obligation_scopes: Vec<(TraitId, Vec<Type>, ModuleId)>,
 }
 
 /// Lexical owner for deferred obligations. Restores the enclosing owner on every
@@ -373,7 +368,6 @@ impl UnifiedTypeInference {
             remaining_ty_constraints_len: self.remaining_ty_constraints.len(),
             obligations_len: self.obligations.len(),
             expanded_value_applications_len: self.expanded_value_applications.len(),
-            obligation_scopes_len: self.obligation_scopes.len(),
         }
     }
 
@@ -391,8 +385,6 @@ impl UnifiedTypeInference {
         self.obligations.truncate(snapshot.obligations_len);
         self.expanded_value_applications
             .truncate(snapshot.expanded_value_applications_len);
-        self.obligation_scopes
-            .truncate(snapshot.obligation_scopes_len);
     }
 
     pub fn unify_type_inference(
@@ -430,7 +422,6 @@ impl UnifiedTypeInference {
             effects,
             obligations: vec![],
             expanded_value_applications: vec![],
-            obligation_scopes: vec![],
         };
         // Keep source/inference order stable. Constraint equality deliberately ignores spans, so
         // iterating a hash set here made the diagnostic span and dictionary order depend on the
@@ -1419,68 +1410,6 @@ impl UnifiedTypeInference {
 
     #[allow(clippy::too_many_arguments)]
     fn unify_have_trait(
-        &mut self,
-        trait_id: TraitId,
-        input_tys: &[Type],
-        output_tys: &[Type],
-        output_effs: &[EffType],
-        span: Location,
-        origin: ConstraintOrigin,
-        assumptions: ConstraintAssumptions<'_>,
-        is_ty_adt: impl Fn(Type) -> bool,
-        trait_solver: &mut TraitSolver<'_>,
-        arena: &mut NodeArena,
-    ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
-        let Some(module) = self.obligation_scope(trait_id, input_tys) else {
-            return self.unify_have_trait_in_scope(
-                trait_id,
-                input_tys,
-                output_tys,
-                output_effs,
-                span,
-                origin,
-                assumptions,
-                is_ty_adt,
-                trait_solver,
-                arena,
-            );
-        };
-        trait_solver.in_private_impl_scope(module, |trait_solver| {
-            self.unify_have_trait_in_scope(
-                trait_id,
-                input_tys,
-                output_tys,
-                output_effs,
-                span,
-                origin,
-                assumptions,
-                is_ty_adt,
-                trait_solver,
-                arena,
-            )
-        })
-    }
-
-    /// The module whose private impls an application required by its impl may use.
-    fn obligation_scope(&mut self, trait_id: TraitId, input_tys: &[Type]) -> Option<ModuleId> {
-        if self.obligation_scopes.is_empty() {
-            return None;
-        }
-        let input_tys = self.normalize_types(input_tys);
-        // Normalization does not touch the table, so set it aside rather than copy its rows.
-        let scopes = mem::take(&mut self.obligation_scopes);
-        let module = scopes
-            .iter()
-            .find(|(scope_trait, scope_inputs, _)| {
-                *scope_trait == trait_id && self.normalize_types(scope_inputs) == input_tys
-            })
-            .map(|(_, _, module)| *module);
-        self.obligation_scopes = scopes;
-        module
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn unify_have_trait_in_scope(
         &mut self,
         trait_id: TraitId,
         input_tys: &[Type],
@@ -2568,19 +2497,6 @@ impl UnifiedTypeInference {
                             .instantiate_location_cloned(span)
                     })
                     .collect::<Vec<_>>();
-                if let Some(module) = application.private_impl_scope {
-                    for obligation in &obligations {
-                        if let PubTypeConstraint::HaveTrait {
-                            trait_id,
-                            input_tys,
-                            ..
-                        } = obligation
-                        {
-                            let input_tys = self.normalize_types(input_tys);
-                            self.obligation_scopes.push((*trait_id, input_tys, module));
-                        }
-                    }
-                }
                 self.obligations.extend(obligations);
                 (impl_output_tys, impl_output_effs)
             }

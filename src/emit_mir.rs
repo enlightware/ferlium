@@ -688,7 +688,12 @@ impl<'a> Emitter<'a> {
                         .iter()
                         .map(|capture| self.context.static_evidence.get(capture).cloned())
                         .collect::<Option<Vec<_>>>();
-                    if let Some(captures) = static_captures {
+                    let type_is_captured = self
+                        .env
+                        .module_by_id(definition.module_id)
+                        .and_then(|module| module.get_impl_data(definition.impl_id))
+                        .is_some_and(|imp| imp.captures_determine_type(self.env));
+                    if let Some(captures) = static_captures.filter(|_| type_is_captured) {
                         let evidence = mir::value::StaticEvidence::Dictionary {
                             definition: *definition,
                             captures: captures.into_boxed_slice(),

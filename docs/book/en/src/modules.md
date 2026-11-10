@@ -52,6 +52,10 @@ Trait implementations do not have their own visibility modifier.
 An implementation of a public trait is public, unless its owning input, its first input defined in its module, is a private type: then only that module can use it.
 A public implementation cannot mention private types in its inputs or outputs.
 
+Public functions and implementations can use private helpers, types, and traits internally.
+However, the requirements they place on callers must mention only public types and traits.
+The compiler checks this when compiling the defining module and reports an error there if a private requirement cannot be handled internally.
+
 Private definitions are still visible inside their own module.
 This also applies when the host evaluates an expression in the context of an existing module.
 

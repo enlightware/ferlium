@@ -208,6 +208,9 @@ pub(crate) fn check_trait_impl(
 
     for (key, imp, module_id) in
         iter_visible_impls(current, others, current.module_id(), Some(trait_id))
+            // Materialized dictionaries and derivations are not source declarations. In
+            // particular, helper inference may derive Value before its blanket is published.
+            .filter(|(_, imp, _)| imp.public || imp.source_span.is_some())
     {
         if impls_overlap(current, others, &new_key, &key, module_id)? {
             return Err(internal_compilation_error!(OverlappingTraitImpls {

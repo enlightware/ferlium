@@ -968,6 +968,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         captures: Vec<Evidence>,
         is_static: bool,
         span: Option<Location>,
+        application_ty: Option<Type>,
     ) -> Result<Evidence, RuntimeError> {
         let metadata = self
             .program
@@ -981,6 +982,12 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             self.session.expect_fresh_module(definition.module_id),
             self.session.raw_modules(),
         );
+        // Generic dictionaries can have parameters absent from their captures (for example
+        // a blanket implementation with no prerequisites). The construction site's type also
+        // instantiates the dictionary; capture types alone need not determine it.
+        if let Some(ty) = application_ty {
+            types.bind(metadata.ty(), ty, env)?;
+        }
         for (ty, capture) in metadata.capture_types().iter().zip(&captures) {
             types.bind(*ty, capture.ty(), env)?;
         }
@@ -1031,7 +1038,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                         .iter()
                         .map(|id| self.static_evidence[id].clone())
                         .collect();
-                    self.build_evidence(*definition, captures, true, None)?
+                    self.build_evidence(*definition, captures, true, None, None)?
                 }
                 InternedStaticEvidence::VariantPayloadStorage(value) => Evidence::Storage(*value),
                 InternedStaticEvidence::Subscript {
@@ -2049,7 +2056,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     .build_array(destination, element, &values, operation.span.location)?;
                 None
             }
-            BuildDictionary { definition, .. } => {
+            BuildDictionary { definition, ty } => {
                 let captures = (0..operation.operands.len())
                     .map(|i| operand(i)?.evidence(&self.memory))
                     .collect::<Result<_, _>>()?;
@@ -2058,6 +2065,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     captures,
                     false,
                     Some(operation.span.location),
+                    Some(self.types.resolve(*ty)),
                 )?;
                 Some(Binding::Evidence(evidence))
             }

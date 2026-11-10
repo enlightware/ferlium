@@ -177,6 +177,7 @@ pub(crate) fn diagnostics_from_error(
         | InvalidRecursiveType { span, .. }
         | UnboundTypeVar { span, .. }
         | UnresolvedConstraints { span, .. }
+        | PrivateRequirementInPublicContract { span, .. }
         | InvalidVariantConstructor { span }
         | VariantNameConflictsWithType { span, .. }
         | ReservedName { span, .. }

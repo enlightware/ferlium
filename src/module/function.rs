@@ -41,6 +41,7 @@ use crate::{
     primitive::BufferPrimitive,
     types::{
         mutability::MutType,
+        trait_solver::EvidencePlan,
         r#type::{FnArgType, Type},
     },
 };
@@ -438,6 +439,7 @@ define_id_type!(
 /// A local function whose body has not yet been elaborated into final HIR.
 #[derive(Debug, Clone)]
 pub struct PendingModuleFunction {
+    pub(crate) evidence_plan: EvidencePlan,
     pub name: Option<Ustr>,
     pub subscript_member_name: Option<Ustr>,
     pub definition: CallableDefinition,
@@ -565,6 +567,7 @@ impl PendingModuleFunction {
         Self {
             name,
             subscript_member_name: None,
+            evidence_plan: Default::default(),
             definition,
             code,
             spans,
@@ -630,6 +633,7 @@ impl PendingModuleFunction {
         let root = self.code.entry_node_id;
         ctx.set_retained_effect_vars(self.definition.ty_scheme.eff_quantifiers.clone());
         ctx.reset_evidence_bindings();
+        ctx.set_evidence_plan(std::mem::take(&mut self.evidence_plan));
         LocalDecl::assign_sequential_slots(&mut self.locals);
         // Record the source-level conventions of visible parameters for later
         // elaboration and lowering.

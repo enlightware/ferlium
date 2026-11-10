@@ -16,7 +16,7 @@ use crate::{
     types::{
         effects::{EffType, EffectVar},
         mutability::MutType,
-        trait_solver::{TraitSolver, alpha_canonicalize_dictionary_requirements},
+        trait_solver::{EvidencePlan, TraitSolver, alpha_canonicalize_dictionary_requirements},
         r#type::{FnType, SubscriptType, Type, TypeVar},
         type_like::{TypeLike, instantiate_effect_types_in_place, instantiate_types_in_place},
         type_mapper::TypeMapper,
@@ -62,6 +62,23 @@ impl DictionaryReq {
             requirement,
             field,
             subscript_ty,
+        }
+    }
+
+    /// Exact contract identity, including fixed effect bounds. Used when attaching a recorded
+    /// construction to a particular request, rather than looking up interchangeable evidence.
+    pub(crate) fn same_contract(&self, other: &Self) -> bool {
+        if !self.same_capture_schema_entry(other) {
+            return false;
+        }
+        match (self, other) {
+            (
+                Self::TraitImpl { output_effs, .. },
+                Self::TraitImpl {
+                    output_effs: other, ..
+                },
+            ) => output_effs == other,
+            _ => true,
         }
     }
 
@@ -551,6 +568,8 @@ pub type ModuleInstData = FxHashMap<LocalFunctionId, LateFunctionInstData>;
 
 /// Shared context for dictionary and value-dispatch elaboration.
 pub struct DictElaborationCtx<'d, 'sr, 'sm> {
+    pub(crate) evidence_plan: EvidencePlan,
+    pub(crate) planned_bindings: Vec<Option<EvidenceBindingId>>,
     /// The dictionaries for the current expression being elaborated.
     pub dicts: &'d ExtraParameters,
     /// The dictionaries for the current module, if compiling a module.
@@ -563,6 +582,7 @@ pub struct DictElaborationCtx<'d, 'sr, 'sm> {
         Option<PendingGeneratedStructuralProjectionSubscripts>,
     /// Function-scoped hidden evidence, in dependency order.
     pub evidence_bindings: Vec<EvidenceBinding>,
+    pub(crate) active_dictionary_constructions: Vec<DictionaryReq>,
     /// Effect variables quantified by the callable currently being elaborated.
     pub(crate) retained_effect_vars: FxHashSet<EffectVar>,
 }
@@ -575,15 +595,24 @@ impl<'d, 'sr, 'sm> DictElaborationCtx<'d, 'sr, 'sm> {
         generated_projection_subscripts: PendingGeneratedStructuralProjectionSubscripts,
     ) -> Self {
         let mut this = Self {
+            evidence_plan: Default::default(),
+            planned_bindings: Vec::new(),
             dicts,
             module_inst_data,
             trait_solver,
             generated_projection_subscripts: Some(generated_projection_subscripts),
             evidence_bindings: Vec::new(),
+            active_dictionary_constructions: Vec::new(),
             retained_effect_vars: FxHashSet::default(),
         };
         this.reset_evidence_bindings();
         this
+    }
+
+    pub(crate) fn set_evidence_plan(&mut self, mut plan: EvidencePlan) {
+        plan.default_unquantified_effects(&self.retained_effect_vars);
+        self.planned_bindings = vec![None; plan.nodes.len()];
+        self.evidence_plan = plan;
     }
 
     /// Start an evidence graph with one parameter binding per inferred requirement.
@@ -675,21 +704,18 @@ impl<'d, 'sr, 'sm> DictElaborationCtx<'d, 'sr, 'sm> {
         }
     }
 
-    /// Reuse an identical selected artifact and ordered capture list within this function.
+    /// Reuse an identical selected artifact, instantiation and capture list within this function.
     ///
-    /// Construction identity is entirely described by `source`. The requirement retained on the
-    /// first binding is descriptive type information for later lowering/defaulting; every caller
-    /// interning the same source must therefore describe the same evidence type.
+    /// Captures need not determine all parameters of a generic dictionary. Preserve its use-site
+    /// type even when two instantiations use the same artifact and capture list.
     pub(crate) fn intern_evidence_binding(
         &mut self,
         requirement: DictionaryReq,
         source: EvidenceBindingSource,
     ) -> EvidenceBindingId {
-        if let Some(index) = self
-            .evidence_bindings
-            .iter()
-            .position(|binding| binding.source == source)
-        {
+        if let Some(index) = self.evidence_bindings.iter().position(|binding| {
+            binding.source == source && binding.requirement.same_capture_schema_entry(&requirement)
+        }) {
             return EvidenceBindingId::from_index(index);
         }
         let id = EvidenceBindingId::from_index(self.evidence_bindings.len());

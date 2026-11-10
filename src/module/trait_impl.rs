@@ -35,6 +35,7 @@ use crate::{
     types::{
         effects::{EffType, EffectVar, format_effect_binding_value},
         r#trait::{Trait, TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex},
+        trait_solver::UniformDictionaryKey,
         r#type::{FnType, Type, TypeKind, TypeVar, fmt_fn_type_with_arg_names},
         type_inference::substitution::InstSubst,
         type_like::TypeLike,
@@ -442,6 +443,22 @@ pub struct TraitImpl {
 }
 
 impl TraitImpl {
+    /// Whether captures determine every runtime type in this dictionary. Otherwise a generic
+    /// construction also needs its use-site type and cannot become untyped static evidence.
+    pub(crate) fn captures_determine_type(&self, env: ModuleEnv<'_>) -> bool {
+        let variables = self.dictionary_ty.inner_ty_vars();
+        if variables.is_empty() {
+            return true;
+        }
+        let captured = self
+            .dictionary_value
+            .capture_schema()
+            .iter()
+            .flat_map(|req| req.to_dict_type_in_env(&env).inner_ty_vars())
+            .collect::<FxHashSet<_>>();
+        variables.iter().all(|var| captured.contains(var))
+    }
+
     pub fn with_associated_const_values(
         mut self,
         associated_const_values: impl Into<Vec<LiteralValue>>,
@@ -627,6 +644,9 @@ pub(crate) type BlanketImpls = IndexMap<TraitId, BlanketTraitImpls, FxBuildHashe
 /// indexes separate from the data so filtering visibility does not copy dictionaries.
 #[derive(Clone, Debug, new)]
 pub struct TraitImpls {
+    /// Materialized definition-site evidence; rolled back with the impl table.
+    #[new(default)]
+    pub(crate) uniform_dictionaries: Rc<FxHashMap<UniformDictionaryKey, LocalImplId>>,
     /// The ID of the module this TraitImpls belongs to, used to construct dictionary values.
     pub(crate) module_id: ModuleId,
     #[new(default)]

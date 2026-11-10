@@ -2188,3 +2188,751 @@ fn a_derivation_made_elsewhere_does_not_override_a_private_impl_in_its_scope() {
         assert_val_eq!(session.run(program), string("X (0)/custom"), "{program}");
     }
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn public_impls_build_private_evidence_from_the_consumers_evidence() {
+    let declarations = [
+        "impl<T> Hidden for [T] where T: Inspect { fn hidden(x: [T]) -> string { inspect(x[0]) } }",
+        "impl<T> Use for P<T> where [T]: Hidden { fn use_(x: P<T>) -> string { hidden([x.0]) } }",
+    ];
+    for reverse in [false, true] {
+        let mut declarations = declarations;
+        if reverse {
+            declarations.reverse();
+        }
+        let provider = format!(
+            r#"
+            struct Cb<T>(T)
+            trait Run<Self |-> ! E> {{ fn run(x: Self) -> int ! E; }}
+            impl<! E> Run for <Self = Cb<(() -> int ! E)> |-> ! E = E> {{
+                fn run(x: Cb<(() -> int ! E)>) -> int {{ x.0() }}
+            }}
+            struct X<T>(T)
+            impl<T> Inspect for X<T> where T: Run<! E = ()> {{
+                fn inspect(x: X<T>) -> string {{ "custom" }}
+            }}
+            pub fn make_x() {{ X(Cb(|| idiv(4, 2))) }}
+            trait Hidden<Self> {{ fn hidden(x: Self) -> string ! fallible; }}
+            pub struct P<T>(T)
+            pub trait Use<Self> {{ fn use_(x: Self) -> string ! fallible; }}
+            {}
+        "#,
+            declarations.join("\n")
+        );
+        for program in [
+            "let o = inspect(a::make_x()); let i = a::Use::use_(a::P(a::make_x())); f\"{o}/{i}\"",
+            "let i = a::Use::use_(a::P(a::make_x())); let o = inspect(a::make_x()); f\"{o}/{i}\"",
+        ] {
+            let mut session = TestSession::new();
+            compile_module(&mut session, "a", &provider);
+            assert_val_eq!(
+                session.run(program),
+                string("X (Cb (<function>))/X (Cb (<function>))")
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn private_requirements_fail_at_the_public_impl_definition() {
+    for hidden_impl in [
+        "",
+        "impl<T> Hidden for [T] where [[T]]: Hidden { fn hidden(x: [T]) -> int { hidden([x]) } }",
+    ] {
+        let mut session = TestSession::new();
+        let source = format!(
+            r#"
+            trait Hidden<Self> {{ fn hidden(x: Self) -> int; }}
+            pub struct P<T>(T)
+            pub trait Use<Self> {{ fn use_(x: Self) -> int; }}
+            {hidden_impl}
+            impl<T> Use for P<T> where [T]: Hidden {{ fn use_(x: P<T>) -> int {{ hidden([x.0]) }} }}
+        "#
+        );
+        assert!(
+            module_fails_with(&mut session, "a", &source, |e| matches!(
+                e,
+                CompilationErrorImpl::PrivateRequirementInPublicContract { .. }
+            )),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_possible_specialization_prevents_private_derivation() {
+    let mut session = TestSession::new();
+    assert!(
+        session
+            .try_compile_module(
+                "a",
+                r#"
+        struct X<T>(T)
+        impl Inspect for X<int> { fn inspect(x: X<int>) -> string { "custom" } }
+        pub struct P<T>(T)
+        pub trait Use<Self> { fn use_(x: Self) -> string ! fallible; }
+        impl<T> Use for P<T> where X<T>: Inspect {
+            fn use_(x: P<T>) -> string { inspect(X(x.0)) }
+        }
+    "#
+            )
+            .is_err()
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn exported_functions_reduce_private_requirements() {
+    let mut session = TestSession::new();
+    compile_module(
+        &mut session,
+        "a",
+        r#"
+        trait Hidden<Self> { fn hidden(x: Self) -> string ! fallible; }
+        impl<T> Hidden for [T] where T: Inspect {
+            fn hidden(x: [T]) -> string { inspect(x[0]) }
+        }
+        pub fn f<T>(x: T) -> string { hidden([x]) }
+    "#,
+    );
+    assert_val_eq!(session.run("a::f(7)"), string("7"));
+    assert!(
+        session
+            .try_compile_module(
+                "b",
+                r#"
+        trait Hidden<Self> { fn hidden(x: Self) -> int; }
+        pub fn f<T>(x: T) -> int { hidden(x) }
+    "#
+            )
+            .is_err()
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn exported_recursive_groups_reduce_private_requirements() {
+    let functions = [
+        "pub fn f<T>(x: T, n: int) -> string { if n == 0 { hidden([x]) } else { g(x, n - 1) } }",
+        "fn g<T>(x: T, n: int) -> string { f(x, n) }",
+    ];
+    for reverse in [false, true] {
+        let mut functions = functions;
+        if reverse {
+            functions.reverse();
+        }
+        let mut session = TestSession::new();
+        compile_module(
+            &mut session,
+            "a",
+            &format!(
+                r#"
+            trait Hidden<Self> {{ fn hidden(x: Self) -> string ! fallible; }}
+            impl<T> Hidden for [T] where T: Inspect {{
+                fn hidden(x: [T]) -> string {{ inspect(x[0]) }}
+            }}
+            {}
+        "#,
+                functions.join("\n")
+            ),
+        );
+        assert_val_eq!(session.run("a::f(7, 2)"), string("7"));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn private_reduction_determines_inferred_function_outputs() {
+    let mut session = TestSession::new();
+    compile_module(
+        &mut session,
+        "a",
+        r#"
+        trait Hidden<Self |-> Out> { fn hidden(x: Self) -> Out; }
+        impl<T> Hidden for <Self = [T] |-> Out = int> {
+            fn hidden(x: [T]) -> int { len(x) }
+        }
+        pub fn f<T>(x: T) { hidden([x]) }
+    "#,
+    );
+    assert_val_eq!(session.run("a::f(true) + 1"), int(2));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn private_reduction_quantifies_outputs_of_its_public_leaves() {
+    let mut session = TestSession::new();
+    compile_module(
+        &mut session,
+        "a",
+        r#"
+        pub trait Read<Self |-> Out> { fn read(x: Self) -> Out; }
+        trait Hidden<Self> { fn hidden(x: Self) -> string ! fallible; }
+        impl<T, O> Hidden for [T] where T: Read<Out = O>, O: Inspect {
+            fn hidden(x: [T]) -> string { inspect(read(x[0])) }
+        }
+        pub fn f<T>(x: T) -> string { hidden([x]) }
+        pub struct P<T>(T)
+        pub trait Use<Self> { fn use_(x: Self) -> string ! fallible; }
+        impl<T> Use for P<T> where [T]: Hidden {
+            fn use_(x: P<T>) -> string { hidden([x.0]) }
+        }
+    "#,
+    );
+    compile_module(
+        &mut session,
+        "b",
+        r#"
+        use a::Read;
+        pub struct X;
+        impl Read for <Self = X |-> Out = int> { fn read(x: X) -> int { 7 } }
+    "#,
+    );
+    assert_val_eq!(session.run("a::f(b::X)"), string("7"));
+    assert_val_eq!(session.run("a::Use::use_(a::P(b::X))"), string("7"));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn private_recursive_value_evidence_is_constructed_in_exported_bodies() {
+    let mut session = TestSession::new();
+    compile_module(
+        &mut session,
+        "a",
+        r#"
+        enum List<T> { Empty, Cons(T, List<T>) }
+        pub fn f<T>(x: T) -> string where T: Value {
+            let values: List<T> = List::Cons(x, List::Empty);
+            to_string(values)
+        }
+    "#,
+    );
+    assert_val_eq!(
+        session.run("a::f(7)"),
+        string("List::Cons (7, List::Empty)")
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn public_value_evidence_builds_a_private_custom_field_dictionary() {
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    compile_module(
+        &mut session,
+        "a",
+        r#"
+        pub trait Read<Self |-> Out> { fn read(x: Self) -> Out; }
+        impl Read for <Self = int |-> Out = int> { fn read(x: int) -> int { x } }
+        impl Read for <Self = bool |-> Out = bool> { fn read(x: bool) -> bool { x } }
+        struct Cell<T>(T)
+        impl<T, O> Value for Cell<T> where T: Value, T: Read<Out = O>, O: Value {
+            fn eq(x: Cell<T>, y: Cell<T>) -> bool { eq(x.0, y.0) }
+            fn to_string(x: Cell<T>) -> string { to_string(read(x.0)) }
+            fn hash(x: Cell<T>, state: &mut hasher) { hash(x.0, state) }
+            fn clone(x: Cell<T>) -> Cell<T> { Cell(x.0) }
+            fn drop(x: &mut Cell<T>) {}
+        }
+        #[private_repr]
+        pub struct Outer<T>(Cell<T>)
+        pub fn make<T>(x: T) -> Outer<T> { Outer(Cell(x)) }
+    "#,
+    );
+    assert_val_eq!(
+        session.run("to_string((a::make(7), a::make(true)))"),
+        string("(Outer (7), Outer (true))")
+    );
+    compile_module(
+        &mut session,
+        "b",
+        r#"
+        use a::Read;
+        struct Local<T>(T)
+        impl<T, O> Read for <Self = Local<T> |-> Out = O> where T: Read<Out = O> {
+            fn read(x: Local<T>) -> O { read(x.0) }
+        }
+        pub fn rendered<T>(x: T) -> string { to_string(a::make(Local(x))) }
+    "#,
+    );
+    assert_val_eq!(session.run("b::rendered(7)"), string("Outer (7)"));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn private_dictionary_construction_preserves_distinct_phantom_arguments() {
+    let mut session = TestSession::new();
+    compile_module(
+        &mut session,
+        "a",
+        r#"
+        struct Tag<T>(int)
+        pub fn tags<T, U>(x: T, y: U) -> string {
+            let a: Tag<T> = Tag(0);
+            let b: Tag<U> = Tag(0);
+            to_string((a, b))
+        }
+    "#,
+    );
+    assert_val_eq!(
+        session.run("a::tags(7, true)"),
+        string("(Tag (0), Tag (0))")
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn reducing_outputs_rechecks_the_public_impl_head() {
+    let mut session = TestSession::new();
+    assert!(module_fails_with(
+        &mut session,
+        "a",
+        r#"
+        struct Hidden;
+        trait Conv<Self |-> Out> { fn conv(x: Self) -> Out; }
+        impl<T> Conv for <Self = [T] |-> Out = Hidden> {
+            fn conv(x: [T]) -> Hidden { Hidden }
+        }
+        pub struct P<T>(T)
+        pub trait Get<Self |-> Out> { fn get(x: Self) -> Out; }
+        impl<T, O> Get for <Self = P<T> |-> Out = O> where [T]: Conv<Out = O> {
+            fn get(x: P<T>) -> O { conv([x.0]) }
+        }
+    "#,
+        |e| matches!(
+            e,
+            CompilationErrorImpl::PublicTraitImplMentionsPrivateType { .. }
+        )
+    ));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn public_leaves_are_conditions_not_specializations_of_the_impl_head() {
+    let impls = [
+        "impl Read for [int] { fn read(x: [int]) -> int { 7 } }",
+        "impl<T> Hidden for [T] where [T]: Read { fn hidden(x: [T]) -> int { read(x) } }",
+    ];
+    for reverse in [false, true] {
+        let mut impls = impls;
+        if reverse {
+            impls.reverse();
+        }
+        let mut session = TestSession::new();
+        compile_module(
+            &mut session,
+            "a",
+            &format!(
+                r#"
+            pub trait Read<Self> {{ fn read(x: Self) -> int; }}
+            trait Hidden<Self> {{ fn hidden(x: Self) -> int; }}
+            {}
+            pub fn f<T>(x: T) -> int {{ hidden([x]) }}
+        "#,
+                impls.join("\n")
+            ),
+        );
+        assert_val_eq!(session.run("a::f(0)"), int(7));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn private_impls_cannot_choose_an_exported_functions_return_only_quantifier() {
+    let int_impl = "impl Def for int { fn def() -> int { 0 } }";
+    let bool_impl = "impl Def for bool { fn def() -> bool { false } }";
+    for impls in [
+        vec![int_impl],
+        vec![int_impl, bool_impl],
+        vec![bool_impl, int_impl],
+    ] {
+        for function_first in [false, true] {
+            let mut session = TestSession::new();
+            let function = "pub fn g() { def() }";
+            let impls = impls.join("\n");
+            let items = if function_first {
+                format!("{function}\n{impls}")
+            } else {
+                format!("{impls}\n{function}")
+            };
+            let source = format!("trait Def<Self> {{ fn def() -> Self; }}\n{items}");
+            assert!(
+                module_fails_with(&mut session, "a", &source, |error| {
+                    matches!(
+                        error,
+                        CompilationErrorImpl::PrivateRequirementInPublicContract { .. }
+                    )
+                }),
+                "{source}"
+            );
+        }
+    }
+    let mut session = TestSession::new();
+    let definition = session.compile_and_get_fn_def(
+        &format!("trait Def<Self> {{ fn def() -> Self; }}\n{int_impl}\nfn h() {{ def() }}"),
+        "h",
+    );
+    assert_eq!(definition.ty_scheme.ty_quantifiers.len(), 1);
+    assert_eq!(definition.ty_scheme.constraints.len(), 1);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recorded_private_evidence_is_shared_across_calls_functions_and_lambdas() {
+    let mut session = TestSession::new();
+    let id = compile_module(
+        &mut session,
+        "shared",
+        r#"
+        trait Hidden<Self> { fn hidden(x: Self) -> string ! fallible; }
+        impl<T> Hidden for [T] where T: Inspect {
+            fn hidden(x: [T]) -> string { inspect(x[0]) }
+        }
+        pub fn twice<T>(x: T, y: T) -> string { concat(hidden([x]), hidden([y])) }
+        pub fn once<T>(x: T) -> string { hidden([x]) }
+        pub fn in_lambda<T>(x: T) -> string {
+            let f = || hidden([x]);
+            f()
+        }
+        "#,
+    );
+    let module = session.session().expect_fresh_module(id);
+    let thunks = module
+        .own_symbols()
+        .filter(|name| name.as_str().starts_with("__uniform_dictionary_"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        thunks.len(),
+        1,
+        "the same selected impl needs one thunk: {thunks:?}"
+    );
+    assert_val_eq!(session.run("shared::twice(7, 8)"), string("78"));
+    assert_val_eq!(session.run("shared::once(true)"), string("true"));
+    assert_val_eq!(session.run("shared::in_lambda(9)"), string("9"));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn private_requirement_errors_use_the_declarations_generic_names() {
+    for (name, source) in [
+        (
+            "function",
+            "trait Hidden<Self> { fn hidden(x: Self) -> int; } pub fn f<Element>(x: Element) -> int { hidden(x) }",
+        ),
+        (
+            "implementation",
+            "trait Hidden<Self> { fn hidden(x: Self) -> int; } pub struct P<T>(T) pub trait Use<Self> { fn use_(x: Self) -> int; } impl<Element> Use for P<Element> where Element: Hidden { fn use_(x: P<Element>) -> int { hidden(x.0) } }",
+        ),
+    ] {
+        let mut session = TestSession::new();
+        assert!(module_fails_with(
+            &mut session,
+            name,
+            source,
+            |error| matches!(error,
+                CompilationErrorImpl::PrivateRequirementInPublicContract { requirement, .. } if requirement == "Element: Hidden"
+            )
+        ));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn private_selection_does_not_choose_a_public_prerequisites_output() {
+    let int_impl = "impl Hidden2 for int { fn hidden2(x: int) -> int { x } }";
+    let bool_impl = "impl Hidden2 for bool { fn hidden2(x: bool) -> int { 0 } }";
+    for impls in [
+        vec![int_impl],
+        vec![int_impl, bool_impl],
+        vec![bool_impl, int_impl],
+    ] {
+        for prerequisites in [
+            "T: Read<Out = O>, O: Hidden2",
+            "O: Hidden2, T: Read<Out = O>",
+        ] {
+            for item in [
+                "pub fn f<T>(x: T) -> int { hidden2(read(x)) }".to_owned(),
+                format!(
+                    "impl<T, O> Hidden for [T] where {prerequisites} {{ fn hidden(x: [T]) -> int {{ hidden2(read(x[0])) }} }} pub fn f<T>(x: T) -> int {{ hidden([x]) }}"
+                ),
+                format!(
+                    "impl<T, O> Use for P<T> where {prerequisites} {{ fn use_(x: P<T>) -> int {{ hidden2(read(x.0)) }} }}"
+                ),
+            ] {
+                let declarations = format!("{}\n{item}", impls.join("\n"));
+                let source = format!(
+                    r#"
+                    pub trait Read<Self |-> Out> {{ fn read(x: Self) -> Out; }}
+                    trait Hidden2<Self> {{ fn hidden2(x: Self) -> int; }}
+                    trait Hidden<Self> {{ fn hidden(x: Self) -> int ! fallible; }}
+                    pub struct P<T>(T)
+                    pub trait Use<Self> {{ fn use_(x: Self) -> int; }}
+                    {declarations}
+                "#
+                );
+                let mut session = TestSession::new();
+                assert!(
+                    module_fails_with(&mut session, "a", &source, |error| matches!(
+                        error,
+                        CompilationErrorImpl::PrivateRequirementInPublicContract { .. }
+                    )),
+                    "{source}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_uniform_private_output_can_determine_a_later_private_input() {
+    for body in [
+        "same(read(x), conv([x]))",
+        "same(conv([x]), read(x))",
+        "let y = read(x); let r = hidden(y); same(y, conv([x])); r",
+        "let y = read(x); same(y, conv([x])); hidden(y)",
+    ] {
+        let mut session = TestSession::new();
+        compile_module(
+            &mut session,
+            "a",
+            &format!(
+                r#"
+            pub trait Read<Self |-> Out> {{ fn read(x: Self) -> Out; }}
+            trait Conv<Self |-> Out> {{ fn conv(x: Self) -> Out; }}
+            impl<T> Conv for <Self = [T] |-> Out = int> {{
+                fn conv(x: [T]) -> int {{ 1 }}
+            }}
+            trait Hidden<Self> {{ fn hidden(x: Self) -> int; }}
+            impl Hidden for int {{ fn hidden(x: int) -> int {{ x }} }}
+            impl Hidden for bool {{ fn hidden(x: bool) -> int {{ 0 }} }}
+            fn same<T>(x: T, y: T) -> T {{ x }}
+            pub fn f<T>(x: T) -> int {{ {body} }}
+        "#
+            ),
+        );
+        compile_module(
+            &mut session,
+            "b",
+            r#"
+            pub struct X;
+            use a::Read;
+            impl Read for <Self = X |-> Out = int> {
+                fn read(x: X) -> int { 1 }
+            }
+        "#,
+        );
+        assert_val_eq!(session.run("a::f(b::X)"), int(1), "{body}");
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recorded_private_captures_preserve_distinct_effect_bounds() {
+    let impls = [
+        "impl<T> H1 for W<T> where W<T>: Hid<! E = ()> { fn h1(x: W<T>) -> int { hid(x) } }",
+        "impl<T> H2 for W<T> where W<T>: Hid<! E = (fallible)> { fn h2(x: W<T>) -> int { hid(x) } }",
+    ];
+    for reverse in [false, true] {
+        let mut impls = impls;
+        if reverse {
+            impls.reverse();
+        }
+        for body in [
+            "h1(W(x)) + h2(W(x)) + hid(W(x))",
+            "hid(W(x)) + h2(W(x)) + h1(W(x))",
+            "h2(W(x)) + h1(W(x)) + hid(W(x))",
+        ] {
+            let provider = format!(
+                r#"
+                pub trait Run<Self |-> ! E> {{ fn run(x: Self) -> int ! E; }}
+                struct W<T>(T)
+                trait Hid<Self |-> ! E> {{ fn hid(x: Self) -> int ! E; }}
+                impl<T, ! E> Hid for <Self = W<T> |-> ! E = E> where T: Run<! E = E> {{
+                    fn hid(x: W<T>) -> int {{ run(x.0) }}
+                }}
+                trait H1<Self> {{ fn h1(x: Self) -> int; }}
+                trait H2<Self> {{ fn h2(x: Self) -> int ! fallible; }}
+                {}
+                pub fn f<T>(x: T) -> int {{ {body} }}
+            "#,
+                impls.join("\n")
+            );
+            let mut session = TestSession::new();
+            compile_module(&mut session, "a", &provider);
+            compile_module(
+                &mut session,
+                "b",
+                r#"
+                pub struct X;
+                use a::Run;
+                impl Run for <Self = X |-> ! E = ()> {
+                    fn run(x: X) -> int { 2 }
+                }
+                pub struct Y;
+                impl Run for <Self = Y |-> ! E = (fallible)> {
+                    fn run(x: Y) -> int { idiv(4, 2) }
+                }
+            "#,
+            );
+            assert_val_eq!(session.run("a::f(b::X)"), int(6), "{provider}");
+            assert!(session.try_compile("a::f(b::Y)").is_err(), "{provider}");
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generated_recursive_value_constructs_custom_members_from_self() {
+    for array_backed in [false, true] {
+        let custom = r#"
+        impl<T> Value for Cell<T> where T: Value {
+            fn eq(x: Cell<T>, y: Cell<T>) -> bool { eq(x.0, y.0) }
+            fn to_string(x: Cell<T>) -> string {
+                match x.0 {
+                    Some(value) => effects_unsafe { let inner = CELL_CONTENT; f"Cell({inner})" },
+                    None => "Cell(empty)",
+                }
+            }
+            fn hash(x: Cell<T>, state: &mut hasher) { hash(x.0, state) }
+            fn clone(x: Cell<T>) -> Cell<T> { Cell(x.0) }
+            fn drop(x: &mut Cell<T>) { x.0 = None; }
+        }
+    "#
+        .replace(
+            "CELL_CONTENT",
+            if array_backed { "value[0]" } else { "value" },
+        );
+        let field = if array_backed {
+            "Option<[T]>"
+        } else {
+            "Option<T>"
+        };
+        let construction = if array_backed {
+            "List::Cons(x, Cell(Some([List::Cons(x, Cell(Some([List::Nil])))])))"
+        } else {
+            "List::Cons(x, Cell(Some(List::Cons(x, Cell(Some(List::Nil))))))"
+        };
+        for public in [false, true] {
+            for reverse in [false, true] {
+                let visibility = if public { "#[private_repr] pub" } else { "" };
+                let ty = format!("{visibility} enum List<T> {{ Nil, Cons(T, Cell<List<T>>) }}");
+                let items = if reverse {
+                    format!("{ty}\n{custom}")
+                } else {
+                    format!("{custom}\n{ty}")
+                };
+                let mut session = TestSession::new();
+                session.allow_unsafe();
+                compile_module(
+                    &mut session,
+                    "a",
+                    &format!(
+                        r#"
+                struct Cell<T>({field})
+                {items}
+                pub fn make<T>(x: T) -> List<T> where T: Value {{
+                    {construction}
+                }}
+                pub fn f<T>(x: T) -> string where T: Value {{
+                    let values = make(x);
+                    let other = values;
+                    assert(eq(values, other));
+                    to_string((values, other))
+                }}
+            "#
+                    ),
+                );
+                let rendered = "List::Cons (7, Cell(List::Cons (7, Cell(List::Nil))))";
+
+                assert_val_eq!(
+                    session.run("a::f(7)"),
+                    string(&format!("({rendered}, {rendered})")),
+                );
+                if public {
+                    assert_val_eq!(session.run("to_string(a::make(7))"), string(rendered));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_value_evidence_crosses_multiple_custom_members() {
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    compile_module(
+        &mut session,
+        "a",
+        r#"
+        struct Cell<T>(Option<T>)
+        impl<T> Value for Cell<T> where T: Value {
+            fn eq(x: Cell<T>, y: Cell<T>) -> bool { eq(x.0, y.0) }
+            fn to_string(x: Cell<T>) -> string {
+                match x.0 { Some(inner) => f"Cell({inner})", None => "Cell(empty)" }
+            }
+            fn hash(x: Cell<T>, state: &mut hasher) { hash(x.0, state) }
+            fn clone(x: Cell<T>) -> Cell<T> { Cell(x.0) }
+            fn drop(x: &mut Cell<T>) { x.0 = None; }
+        }
+        enum List<T> { Nil, Cons(T, Cell<Cell<Tree<T>>>) }
+        enum Tree<T> { End, Next(List<T>) }
+        pub fn f<T>(x: T) -> string where T: Value {
+            let value = List::Cons(x, Cell(Some(Cell(Some(Tree::Next(List::Nil))))));
+            let other = value;
+            assert(eq(value, other));
+            to_string(other)
+        }
+    "#,
+    );
+    assert_val_eq!(
+        session.run("a::f(7)"),
+        string("List::Cons (7, Cell(Cell(Tree::Next (List::Nil))))")
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn private_value_prerequisite_cycles_still_need_a_generated_anchor() {
+    for reverse in [false, true] {
+        let mut session = TestSession::new();
+        session.allow_unsafe();
+        let implementations = [("A", "B"), ("B", "A")].map(|(name, other)| {
+            format!(
+                r#"
+            impl<T> Value for {name}<T> where T: Value, {other}<T>: Value {{
+                fn eq(x: {name}<T>, y: {name}<T>) -> bool {{ eq(x.0, y.0) }}
+                fn to_string(x: {name}<T>) -> string {{ to_string(x.0) }}
+                fn hash(x: {name}<T>, state: &mut hasher) {{ hash(x.0, state) }}
+                fn clone(x: {name}<T>) -> {name}<T> {{ {name}(x.0) }}
+                fn drop(x: &mut {name}<T>) {{}}
+            }}
+        "#
+            )
+        });
+        let (first, second) = if reverse {
+            (&implementations[1], &implementations[0])
+        } else {
+            (&implementations[0], &implementations[1])
+        };
+        let source = format!(
+            r#"
+            struct A<T>(T)
+            struct B<T>(T)
+            {first}
+            {second}
+            pub fn f<T>(x: T) -> string where T: Value {{ to_string(A(x)) }}
+        "#
+        );
+        assert!(
+            module_fails_with(&mut session, "a", &source, |error| matches!(
+                error,
+                CompilationErrorImpl::PrivateRequirementInPublicContract { .. }
+            )),
+            "{source}"
+        );
+    }
+}

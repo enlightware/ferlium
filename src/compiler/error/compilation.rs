@@ -13,6 +13,7 @@ use itertools::Itertools;
 use ustr::Ustr;
 
 use crate::{
+    FxHashMap,
     ast::{self, PatternType, PropertyAccess},
     containers::iterable_to_string,
     format::{FormatWith, write_with_separator, write_with_separator_and_format_fn},
@@ -20,7 +21,7 @@ use crate::{
     parser::location::{Location, SourceTable},
     types::{
         effects::{EffType, EffectNames, EffectRow, EffectVar, NamedEffectRow},
-        r#type::{Type, TypeVar},
+        r#type::{Type, TypeDisplayEnv, TypeVar},
         type_inference::unify::SubOrSameType,
         type_scheme::PubTypeConstraint,
     },
@@ -1146,6 +1147,11 @@ pub enum CompilationErrorImpl<S: Scope> {
         constraints: Vec<S::PubTypeConstraint>,
         span: Location,
     },
+    PrivateRequirementInPublicContract {
+        requirement: S::PubTypeConstraint,
+        type_names: FxHashMap<TypeVar, Ustr>,
+        span: Location,
+    },
     InvalidTupleIndex {
         index: usize,
         index_span: Location,
@@ -1484,6 +1490,18 @@ macro_rules! internal_compilation_error {
 }
 
 impl InternalCompilationError {
+    pub(crate) fn with_private_requirement_names(
+        mut self,
+        names: impl IntoIterator<Item = (TypeVar, Ustr)>,
+    ) -> Self {
+        if let CompilationErrorImpl::PrivateRequirementInPublicContract { type_names, .. } =
+            &mut *self.0
+        {
+            type_names.extend(names);
+        }
+        self
+    }
+
     pub fn new_unsafe_feature_use_not_allowed(feature: UnsafeFeature, span: Location) -> Self {
         internal_compilation_error!(UnsafeFeatureUseNotAllowed { feature, span })
     }
@@ -1913,6 +1931,13 @@ impl FormatWith<SourceTable> for CompilationError {
                     fmt_span(span)
                 )
             }
+            PrivateRequirementInPublicContract {
+                requirement, span, ..
+            } => write!(
+                f,
+                "Cannot publish private requirement `{requirement}` at {}. Its evidence must be constructible for every input type from public requirements",
+                fmt_span(span),
+            ),
             InvalidTupleIndex {
                 index,
                 tuple_length,
@@ -2850,6 +2875,18 @@ impl CompilationError {
                         .iter()
                         .map(|c| c.format_with(env).to_string())
                         .collect(),
+                    span,
+                })
+            }
+            PrivateRequirementInPublicContract {
+                requirement,
+                type_names,
+                span,
+            } => {
+                let display = TypeDisplayEnv::new(env, &type_names);
+                compilation_error!(PrivateRequirementInPublicContract {
+                    requirement: requirement.format_with(&display).to_string(),
+                    type_names,
                     span,
                 })
             }

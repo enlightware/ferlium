@@ -57,6 +57,10 @@ impl UnifiedTypeInference {
         &self.remaining_ty_constraints
     }
 
+    pub(crate) fn replace_remaining_constraints(&mut self, constraints: Vec<PubTypeConstraint>) {
+        *self.remaining_ty_constraints = constraints;
+    }
+
     /// Extract the remaining constraints from self.
     pub fn take_constraints(&mut self) -> Vec<PubTypeConstraint> {
         let mut constraints = mem::take(&mut *self.remaining_ty_constraints);
@@ -83,6 +87,7 @@ impl UnifiedTypeInference {
     }
 
     pub fn substitute_in_pending_module_function(&mut self, descr: &mut PendingModuleFunction) {
+        descr.evidence_plan.substitute(self);
         self.substitute_in_fn_type_in_place(&mut descr.definition.ty_scheme.ty);
         self.substitute_in_constraints_in_place(&mut descr.definition.ty_scheme.constraints);
         self.substitute_in_node(&mut descr.code.arena, descr.code.entry_node_id);
@@ -260,6 +265,7 @@ impl UnifiedTypeInference {
             TraitMethodApply(app) => {
                 self.substitute_in_call_impl_type_in_place(&mut app.ty);
                 self.substitute_in_types_in_place(&mut app.input_tys);
+                self.substitute_in_types_in_place(&mut app.output_tys);
                 self.substitute_in_effect_types_in_place(&mut app.output_effs);
                 self.substitute_in_fn_inst_data(&mut app.inst_data);
             }

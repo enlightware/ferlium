@@ -11,7 +11,7 @@ use crate::{
     mir::{
         self, BlockId, Function, Operation, OperationKind,
         edit::FunctionEdit,
-        pass::dataflow::static_evidence_operand,
+        pass::dataflow::{resolve_dictionary_callee, static_evidence_operand},
         terminator::{Terminator, TerminatorKind},
         value::{StaticEvidence, ValueId},
     },
@@ -190,6 +190,13 @@ pub(crate) fn close_static_dictionaries(func: &Function, env: ModuleEnv<'_>) -> 
             let OperationKind::BuildDictionary { definition, .. } = operation.kind else {
                 continue;
             };
+            if !env
+                .module_by_id(definition.module_id)
+                .and_then(|module| module.get_impl_data(definition.impl_id))
+                .is_some_and(|imp| imp.captures_determine_type(env))
+            {
+                continue;
+            }
             let Some(result) = operation.result_id() else {
                 continue;
             };
@@ -216,12 +223,43 @@ pub(crate) fn close_static_dictionaries(func: &Function, env: ModuleEnv<'_>) -> 
             break;
         }
     }
-    if closed.is_empty() {
-        return None;
-    }
-
     let mut edit = FunctionEdit::new(func.clone());
+    let definitions = func
+        .blocks()
+        .flat_map(|id| func.block(id).operations())
+        .filter_map(|op| op.result_id().map(|id| (id, op)))
+        .collect::<FxHashMap<_, _>>();
+    let mut changed = !closed.is_empty();
     for block in edit.blocks().collect::<Vec<_>>() {
+        let block_data = edit.block_mut(block);
+        for operation in
+            block_data
+                .operations
+                .iter_mut()
+                .chain(match &mut block_data.terminator.kind {
+                    TerminatorKind::Invoke { operation, .. } => Some(operation),
+                    _ => None,
+                })
+        {
+            let Some(index) = operation.dispatch_callee_index() else {
+                continue;
+            };
+            if matches!(operation.operands[index], mir::Value::Function(_)) {
+                continue;
+            }
+            // An open dictionary may need its use-site type even without captures, so it
+            // cannot become untyped static evidence. Its capture-free entries are nevertheless
+            // direct functions, and need no dictionary at the call site.
+            if let Some((function, captures)) = resolve_dictionary_callee(
+                &operation.operands[index],
+                &|id| definitions.get(&id).copied(),
+                env,
+            ) && captures.is_empty()
+            {
+                operation.operands[index] = mir::Value::Function(function);
+                changed = true;
+            }
+        }
         edit.block_mut(block).operations.retain(|operation| {
             operation
                 .result_id()
@@ -235,7 +273,7 @@ pub(crate) fn close_static_dictionaries(func: &Function, env: ModuleEnv<'_>) -> 
             *operand = mir::Value::Evidence(b(evidence.clone()));
         }
     });
-    Some(edit.finish(env))
+    changed.then(|| edit.finish(env))
 }
 
 pub(super) fn bool_value(func: &Function, value: &mir::Value) -> Option<bool> {

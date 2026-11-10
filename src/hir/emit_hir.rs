@@ -64,7 +64,7 @@ use crate::{
             emit_function_group, emit_impl_methods,
         },
         emit_subscripts::{predeclare_subscripts, synthetic_subscript_member_function},
-        emit_value_impl::emit_auto_value_impls,
+        emit_value_impl::{add_value_layout_getters, emit_auto_value_impls},
         impl_schedule::ImplSchedule,
     },
     internal_compilation_error,
@@ -196,10 +196,11 @@ pub(super) struct ImplStubData {
     pub(super) method_ids: Vec<LocalFunctionId>,
 }
 
-pub(super) fn instantiate_function_descr_in_place<M: TypeMapper>(
+pub(crate) fn instantiate_function_descr_in_place<M: TypeMapper>(
     descr: &mut UModuleFunction,
     mapper: &mut M,
 ) {
+    descr.evidence_plan.instantiate_in_place(mapper);
     hir::instantiate_node_in_place(&mut descr.code.arena, descr.code.entry_node_id, mapper);
     for local in &mut descr.locals {
         local.ty = local.ty.map(mapper);
@@ -254,6 +255,7 @@ pub(super) fn fill_node_effect_vars(
             app.ty.fill_with_inner_effect_vars(vars);
             app.input_tys
                 .iter()
+                .chain(&app.output_tys)
                 .for_each(|ty| ty.fill_with_inner_effect_vars(vars));
             app.output_effs
                 .iter()
@@ -1132,8 +1134,6 @@ fn emit_module_contents(
     // Temporary unelaborated HIR arena used by trait solving/defaulting paths.
     let mut solver_arena = UNodeArena::default();
 
-    emit_auto_value_impls(output, &mut solver_arena, others, &source.impls)?;
-
     let subscript_ids = predeclare_subscripts(output, &source, others)?;
 
     // Keep the existing deterministic intra-SCC order used as a compatibility workaround for
@@ -1160,6 +1160,9 @@ fn emit_module_contents(
         desugared_arena: &mut desugared_arena,
     };
     schedule.run(&mut ctx, &emission, warnings)?;
+    // Source Value contracts must be available before publishing generated impls: a public
+    // container may need to discharge the private custom Value evidence of one of its fields.
+    emit_auto_value_impls(ctx.output, ctx.solver_arena, others, &source.impls)?;
     for scc_index in (0..sorted_sccs.len()).rev() {
         if !schedule.is_helper(scc_index) {
             emission.emit_scc(&mut ctx, scc_index, warnings)?;
@@ -1444,15 +1447,30 @@ impl ModuleEmission<'_> {
                     emit_output.eff_var_count,
                     &emit_output.constraints,
                 );
-            associated_const_names.truncate(associated_const_values.len());
-            let associated_const_getters = add_source_associated_const_getters(
-                output,
-                others,
-                &associated_const_values,
-                &associated_const_tys,
-                &associated_const_names,
-                imp.span,
-            )?;
+            let associated_const_getters = if associated_const_values.is_empty()
+                && !associated_const_tys.is_empty()
+                && is_value_trait(trait_id, &trait_def_for_consts)
+            {
+                add_value_layout_getters(
+                    output,
+                    others,
+                    emit_output.input_tys[0],
+                    &emit_output.constraints,
+                    &emit_output.evidence_plan,
+                    &associated_const_names,
+                    imp.span,
+                )?
+            } else {
+                associated_const_names.truncate(associated_const_values.len());
+                add_source_associated_const_getters(
+                    output,
+                    others,
+                    &associated_const_values,
+                    &associated_const_tys,
+                    &associated_const_names,
+                    imp.span,
+                )?
+            };
             output.add_emitted_impl(
                 trait_id,
                 emit_output,
@@ -1461,6 +1479,7 @@ impl ModuleEmission<'_> {
                 associated_const_tys,
                 public,
                 Some(imp.span),
+                others,
             )
         };
         let module_env = ModuleEnv::new(output, others);

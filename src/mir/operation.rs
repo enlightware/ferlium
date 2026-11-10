@@ -1986,10 +1986,8 @@ impl OperationKind {
                 1,
                 "dict_entry takes exactly the symbolic dictionary operand"
             ),
-            BuildDictionary { .. } => assert!(
-                !whole.operands.is_empty(),
-                "build_dictionary is only needed for a definition with captures"
-            ),
+            // A generic definition can also need its use-site type when it has no captures.
+            BuildDictionary { .. } => {}
             SubscriptMember { .. } => assert_eq!(
                 whole.operands.len(),
                 1,

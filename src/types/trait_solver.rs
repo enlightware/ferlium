@@ -5,6 +5,11 @@ use std::{borrow::Cow, iter::repeat, mem, rc::Rc};
 
 use ustr::Ustr;
 
+mod context_reduction;
+pub(crate) use context_reduction::{
+    EvidencePlan, EvidencePlanSource, REDUCTION_WORK_LIMIT, UniformDictionaryKey,
+};
+
 #[cfg(debug_assertions)]
 use crate::types::type_visitor::AllVarsCollector;
 use crate::{
@@ -118,9 +123,6 @@ pub struct TraitSolver<'a> {
     pub solving_stack: FxHashSet<(TraitId, Vec<Type>)>,
     /// Partially known trait applications currently being improved, for cycle detection.
     active_improvements: FxHashSet<TraitImprovementKey>,
-    /// Stack of defining modules for imported blanket impls currently being materialized.
-    /// Only the top module's private impls are visible.
-    private_impl_scope: Vec<ModuleId>,
     /// Additional module whose private impls are visible to a privileged scratch expression.
     privileged_impl_module: Option<ModuleId>,
     /// For each other module looked at, the traits it has private impls of, which a derivation
@@ -140,8 +142,6 @@ pub struct TraitSolver<'a> {
 #[derive(Debug, Clone)]
 struct TraitOutputCacheEntry {
     input_tys: Vec<Type>,
-    /// Only the top imported-blanket module exposes private implementations.
-    private_impl_module: Option<ModuleId>,
     privileged_impl_module: Option<ModuleId>,
     output_tys: Vec<Type>,
     output_effs: Vec<EffType>,
@@ -170,24 +170,11 @@ impl<'a> TraitSolver<'a> {
             recursion_depth: 0,
             solving_stack: FxHashSet::default(),
             active_improvements: FxHashSet::default(),
-            private_impl_scope: Vec::new(),
             selecting_by_structure: false,
             privileged_impl_module: None,
             private_impl_traits: FxHashMap::default(),
             unmaterialized_output_cache: FxHashMap::default(),
             quantified_request_effect_vars: FxHashSet::default(),
-        }
-    }
-
-    /// The private impl scope in which the prerequisites of `impl_id` are solved: that of the
-    /// module of the impl it comes from, if it is not the current one.
-    pub(crate) fn prerequisite_scope(&self, impl_id: TraitImplId) -> Option<ModuleId> {
-        if impl_id.module != self.current_type_items.module.id {
-            return Some(impl_id.module);
-        }
-        match self.impls.generated_sources.get(&impl_id.impl_id)? {
-            GeneratedImplSource::Impl { module, .. } => Some(*module),
-            GeneratedImplSource::Derived { scope } => *scope,
         }
     }
 
@@ -211,15 +198,10 @@ impl<'a> TraitSolver<'a> {
             .insert(local_impl_id, GeneratedImplSource::Impl { module, private });
     }
 
-    /// The other module whose private impls are visible besides the current module's, if any:
-    /// while solving an impl's prerequisites in its module's private scope, or in a privileged
-    /// scratch scope.
+    /// The other module whose private impls are visible in a privileged scratch scope, if any.
     fn foreign_private_scope(&self) -> Option<ModuleId> {
         let current = self.current_type_items.module.id;
-        self.private_impl_scope
-            .last()
-            .copied()
-            .or(self.privileged_impl_module)
+        self.privileged_impl_module
             .filter(|&module| module != current)
     }
 
@@ -261,43 +243,13 @@ impl<'a> TraitSolver<'a> {
         match self.impls.generated_sources.get(&local_impl_id).copied() {
             None => true,
             Some(GeneratedImplSource::Impl { module, private }) => {
-                !private
-                    || self.private_impl_scope.last() == Some(&module)
-                    || self.privileged_impl_module == Some(module)
+                !private || self.privileged_impl_module == Some(module)
             }
             Some(GeneratedImplSource::Derived { scope }) => {
                 let trait_id = self.impls.data[local_impl_id.as_index()].trait_id;
                 self.derivation_scope(trait_id) == scope
             }
         }
-    }
-
-    /// Make the private impls of `module`, if any, visible until the matching pop; for callers
-    /// reaching the solver through a context.
-    pub(crate) fn push_private_impl_scope(&mut self, module: Option<ModuleId>) {
-        if let Some(module) = module {
-            self.private_impl_scope.push(module);
-        }
-    }
-
-    /// Undo `push_private_impl_scope(module)`.
-    pub(crate) fn pop_private_impl_scope(&mut self, module: Option<ModuleId>) {
-        if let Some(module) = module {
-            let popped = self.private_impl_scope.pop();
-            debug_assert_eq!(popped, Some(module));
-        }
-    }
-
-    /// Run `f` with the private impls of `module` visible, as when solving inside that module.
-    pub(crate) fn in_private_impl_scope<R>(
-        &mut self,
-        module: ModuleId,
-        f: impl FnOnce(&mut Self) -> R,
-    ) -> R {
-        self.private_impl_scope.push(module);
-        let result = f(self);
-        self.private_impl_scope.pop();
-        result
     }
 
     /// Allow this solver to use private trait implementations from `module_id`.
@@ -408,7 +360,6 @@ pub(crate) struct TraitSolverProbe<'a> {
     deps: FxHashSet<ModuleId>,
     fn_collector: PendingFunctionCollector,
     active_improvements: FxHashSet<TraitImprovementKey>,
-    private_impl_scope: Vec<ModuleId>,
     privileged_impl_module: Option<ModuleId>,
     others: &'a Modules,
 }
@@ -917,7 +868,6 @@ impl<'a> TraitSolverProbe<'a> {
             deps: module.deps.clone(),
             fn_collector: PendingFunctionCollector::new(module.functions.len()),
             active_improvements: FxHashSet::default(),
-            private_impl_scope: Vec::new(),
             privileged_impl_module: None,
             others,
         }
@@ -932,8 +882,10 @@ impl<'a> TraitSolverProbe<'a> {
             .values()
             .any(|id| !impls.data[id.as_index()].public)
         {
-            Rc::make_mut(&mut impls.concrete_key_to_id)
-                .retain(|_, id| impls.data[id.as_index()].public);
+            Rc::make_mut(&mut impls.concrete_key_to_id).retain(|_, id| {
+                let imp = &impls.data[id.as_index()];
+                imp.public || imp.source_span.is_some()
+            });
         }
         Self {
             current_type_items: solver.current_type_items,
@@ -943,7 +895,6 @@ impl<'a> TraitSolverProbe<'a> {
             deps: solver.deps.clone(),
             fn_collector: solver.fn_collector.clone(),
             active_improvements: solver.active_improvements.clone(),
-            private_impl_scope: solver.private_impl_scope.clone(),
             privileged_impl_module: solver.privileged_impl_module,
             others: solver.others,
         }
@@ -965,11 +916,9 @@ impl<'a> TraitSolverProbe<'a> {
             self.others,
         );
         solver.active_improvements = mem::take(&mut self.active_improvements);
-        solver.private_impl_scope = self.private_impl_scope.clone();
         solver.privileged_impl_module = self.privileged_impl_module;
         let result = f(&mut solver);
         self.active_improvements = mem::take(&mut solver.active_improvements);
-        self.private_impl_scope = mem::take(&mut solver.private_impl_scope);
         self.privileged_impl_module = solver.privileged_impl_module;
         self.current_projection_subscript_types
             .cache_materialized_types_from(&solver.current_projection_subscript_types);
@@ -1156,9 +1105,6 @@ pub(crate) struct SymbolicApplication {
     pub(crate) output_tys: Vec<Type>,
     pub(crate) output_effs: Vec<EffType>,
     pub(crate) obligations: Vec<PubTypeConstraint>,
-    /// The module of an implementation from another module, whose private impls its
-    /// obligations may use, as when its dictionary is materialized.
-    pub(crate) private_impl_scope: Option<ModuleId>,
     pub(crate) type_var_base: u32,
     pub(crate) effect_var_base: u32,
 }
@@ -1193,6 +1139,7 @@ pub(crate) struct DerivedImplSnapshot {
     generated_value_key_to_id: Rc<FxHashMap<Vec<Type>, LocalImplId>>,
     application_key_to_id: Rc<ConcreteImpls>,
     generated_sources: Rc<FxHashMap<LocalImplId, GeneratedImplSource>>,
+    uniform_dictionaries: Rc<FxHashMap<UniformDictionaryKey, LocalImplId>>,
     impl_data_len: usize,
     new_function_len: usize,
 }
@@ -1298,9 +1245,7 @@ impl<'a> TraitSolver<'a> {
     }
 
     fn can_use_other_impl(&self, module_id: ModuleId, imp: &TraitImpl) -> bool {
-        imp.public
-            || self.private_impl_scope.last().copied() == Some(module_id)
-            || self.privileged_impl_module == Some(module_id)
+        imp.public || self.privileged_impl_module == Some(module_id)
     }
 
     pub(crate) fn reject_inaccessible_private_repr(
@@ -1506,7 +1451,7 @@ impl<'a> TraitSolver<'a> {
         for (key, id) in self.impls.concrete_key_to_id.iter() {
             if key.trait_id == trait_id {
                 let imp = &self.impls.data[id.as_index()];
-                if !imp.public || !compatible(&key.input_tys) {
+                if (!imp.public && imp.source_span.is_none()) || !compatible(&key.input_tys) {
                     continue;
                 }
                 candidates.push(TraitImprovementCandidate::Concrete {
@@ -2985,6 +2930,7 @@ impl<'a> TraitSolver<'a> {
             generated_value_key_to_id: self.impls.generated_value_key_to_id.clone(),
             application_key_to_id: self.impls.application_key_to_id.clone(),
             generated_sources: self.impls.generated_sources.clone(),
+            uniform_dictionaries: self.impls.uniform_dictionaries.clone(),
             impl_data_len: self.impls.data.len(),
             new_function_len: self.fn_collector.new_elements.len(),
         }
@@ -2996,6 +2942,7 @@ impl<'a> TraitSolver<'a> {
         self.impls.generated_value_key_to_id = snapshot.generated_value_key_to_id;
         self.impls.application_key_to_id = snapshot.application_key_to_id;
         self.impls.generated_sources = snapshot.generated_sources;
+        self.impls.uniform_dictionaries = snapshot.uniform_dictionaries;
         if self.impls.data.len() != snapshot.impl_data_len {
             Rc::make_mut(&mut self.impls.data).truncate(snapshot.impl_data_len);
         }
@@ -4412,8 +4359,8 @@ impl<'a> TraitSolver<'a> {
     /// Walk the visible blanket implementations in order and hand each one whose inputs match the
     /// application to `accept`, which validates it and returns its result, or `None` to go on to
     /// the next candidate. A candidate that does not match but applies by structure is rejected,
-    /// as effects cannot select another implementation. While a candidate from another module is
-    /// matched and accepted, that module is the private impl scope.
+    /// as effects cannot select another implementation. Published requirements are solved in
+    /// the caller's scope; private evidence is constructed by the provider's method bodies.
     #[allow(clippy::too_many_arguments)]
     fn select_blanket_candidate<R>(
         &mut self,
@@ -4481,10 +4428,7 @@ impl<'a> TraitSolver<'a> {
                     input_tys,
                 );
 
-                if let Some(module_id) = module {
-                    self.private_impl_scope.push(module_id);
-                }
-                // A closure, so that the scope is restored on every exit, errors included.
+                // Keep the caller's visibility when solving the published requirements.
                 let accepted = (|| {
                     // Match the blanket implementation and resolve its constraints to a fixed point.
                     let mut ty_inf =
@@ -4573,9 +4517,6 @@ impl<'a> TraitSolver<'a> {
                     };
                     accept(self, candidate, arena)
                 })();
-                if module.is_some() {
-                    self.private_impl_scope.pop();
-                }
                 if let Some(result) = accepted? {
                     if fully_determined {
                         search.succeed();
@@ -5066,7 +5007,6 @@ impl<'a> TraitSolver<'a> {
                 .iter()
                 .map(|constraint| ty_inf.substitute_in_constraint(constraint))
                 .collect(),
-            private_impl_scope: candidate.module,
             type_var_base,
             effect_var_base,
         })
@@ -5102,13 +5042,11 @@ impl<'a> TraitSolver<'a> {
         if !input_tys.iter().all(|ty| ty.is_constant()) {
             return None;
         }
-        let private_impl_module = self.private_impl_scope.last().copied();
         self.unmaterialized_output_cache
             .get(&trait_id)?
             .iter()
             .find(|entry| {
                 entry.input_tys == input_tys
-                    && entry.private_impl_module == private_impl_module
                     && entry.privileged_impl_module == self.privileged_impl_module
             })
     }
@@ -5130,14 +5068,12 @@ impl<'a> TraitSolver<'a> {
         {
             return;
         }
-        let private_impl_module = self.private_impl_scope.last().copied();
         let entries = self
             .unmaterialized_output_cache
             .entry(trait_id)
             .or_default();
         if let Some(entry) = entries.iter().find(|entry| {
             entry.input_tys == input_tys
-                && entry.private_impl_module == private_impl_module
                 && entry.privileged_impl_module == self.privileged_impl_module
         }) {
             debug_assert_eq!(entry.output_tys, output_tys);
@@ -5146,7 +5082,6 @@ impl<'a> TraitSolver<'a> {
         }
         entries.push(TraitOutputCacheEntry {
             input_tys: input_tys.to_vec(),
-            private_impl_module,
             privileged_impl_module: self.privileged_impl_module,
             output_tys: output_tys.to_vec(),
             output_effs: output_effs.to_vec(),

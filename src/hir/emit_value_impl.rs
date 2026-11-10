@@ -1,8 +1,6 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-use std::rc::Rc;
-
 use indexmap::IndexSet;
 use itertools::Itertools;
 use ustr::{Ustr, ustr};
@@ -25,8 +23,7 @@ use crate::{
     module::{
         DictionaryEntryRequirements, LocalFunctionId, Module, ModuleEnv,
         PendingGeneratedStructuralProjectionSubscripts, PendingModuleFunction, QualifiedNameEnv,
-        TraitId, TypeDefId, Visibility, build_capturing_dictionary_value, dictionary_capture_plan,
-        id::Id,
+        TraitId, TypeDefId, Visibility, id::Id,
     },
     std::{
         core_traits_names::VALUE_TRAIT_NAME,
@@ -41,9 +38,12 @@ use crate::{
         coherence::check_trait_impl,
         effects::{EffType, EffectVar, EffectsInstSubst},
         r#trait::{TraitAssociatedConstIndex, TraitMethodIndex},
-        trait_solver::{TraitSolver, alpha_canonicalize_types, trait_solver_from_module},
+        trait_solver::{
+            EvidencePlan, TraitSolver, alpha_canonicalize_types, trait_solver_from_module,
+        },
         r#type::{Type, TypeDef, TypeKind, TypeVar},
         type_constraints::named_type_constraints_in_types,
+        type_inference::unify::UnifiedTypeInference,
         type_like::{TypeLike, instantiate_types_in_place},
         type_mapper::BitmapInstantiationMapper,
         type_scheme::{PubTypeConstraint, TypeScheme, extra_parameters_from_constraints},
@@ -297,13 +297,60 @@ fn has_named_head_for_type_def(ty: Type, type_def: TypeDefId) -> bool {
         .is_some_and(|named| named.def == type_def)
 }
 
+/// Build layout entries in the defining scope, with exactly the impl's supplied evidence.
+/// Symbolic constant reads in the body construct private field dictionaries from those leaves.
+pub(super) fn add_value_layout_getters(
+    output: &mut Module,
+    others: &Modules,
+    input_ty: Type,
+    constraints: &[PubTypeConstraint],
+    evidence_plan: &EvidencePlan,
+    names: &[Ustr],
+    span: Location,
+) -> Result<Vec<LocalFunctionId>, InternalCompilationError> {
+    let kind = input_ty.data().clone();
+    let layout_ty = match kind {
+        TypeKind::Named(named) => ModuleEnv::new(output, others)
+            .type_def(named.def)
+            .instantiated_shape_with_effects(&named.params, &named.effect_params),
+        _ => input_ty,
+    };
+    let quantifiers = TypeScheme::list_ty_vars(&input_ty, constraints.iter())
+        .into_iter()
+        .sorted()
+        .collect::<Vec<_>>();
+    let effects = TypeScheme::list_eff_vars(&input_ty, constraints.iter());
+    let mut pending = PendingModuleFunctions::default();
+    let mut ids = Vec::new();
+    for index in (0..names.len()).map(TraitAssociatedConstIndex::from_index) {
+        let mut solver = trait_solver_from_module!(output, others);
+        let mut getter = generated_value_layout_getter(layout_ty, index, span, &mut solver)?;
+        getter.evidence_plan = evidence_plan.clone();
+        getter.definition.ty_scheme.constraints = constraints.to_vec();
+        getter.definition.ty_scheme.ty_quantifiers = quantifiers.clone();
+        getter.definition.ty_scheme.eff_quantifiers = effects.clone();
+        let generated =
+            solver
+                .finish()
+                .commit(&mut output.functions, &mut output.def_table, &mut pending);
+        elaborate_generated_functions(output, others, &mut pending, generated)?;
+        ids.push(add_pending_function_anonymous(output, &mut pending, getter));
+    }
+    elaborate_generated_functions(output, others, &mut pending, ids.iter().copied())?;
+    for (name, id) in names.iter().copied().zip(ids.iter().copied()) {
+        output.name_function_with_visibility(id, name, Visibility::Module);
+    }
+    Ok(ids)
+}
+
 fn value_impl_for_type_def_already_exists(
     output: &Module,
     value_trait_id: TraitId,
     type_def: TypeDefId,
 ) -> bool {
-    output.impls.concrete().keys().any(|key| {
+    output.impls.concrete().iter().any(|(key, id)| {
         key.trait_id == value_trait_id
+            && output.impls.get_impl_by_local_id(*id).source_span.is_some()
             && key
                 .input_tys
                 .iter()
@@ -313,11 +360,12 @@ fn value_impl_for_type_def_already_exists(
         .blanket()
         .get(&value_trait_id)
         .is_some_and(|impls| {
-            impls.keys().any(|sub_key| {
-                sub_key
-                    .input_tys
-                    .iter()
-                    .any(|&ty| has_named_head_for_type_def(ty, type_def))
+            impls.iter().any(|(sub_key, id)| {
+                output.impls.get_impl_by_local_id(*id).source_span.is_some()
+                    && sub_key
+                        .input_tys
+                        .iter()
+                        .any(|&ty| has_named_head_for_type_def(ty, type_def))
             })
         })
 }
@@ -360,6 +408,11 @@ pub(super) fn emit_auto_value_impls(
             continue;
         }
         let type_def_span = type_def.span;
+        let type_names = type_def
+            .param_names()
+            .enumerate()
+            .map(|(index, name)| (TypeVar::new(index as u32), name))
+            .collect::<Vec<_>>();
         let type_def_param_count = type_def.param_count();
         let type_def_effect_param_count = type_def.effect_param_count();
         let input_ty = Type::named_with_effects(
@@ -372,11 +425,64 @@ pub(super) fn emit_auto_value_impls(
                 .collect::<Vec<_>>(),
         );
         let public = output.is_trait_impl_exportable(value_trait_id, &[input_ty], others);
+        let mut evidence_plan = EvidencePlan::default();
         let mut constraints = {
             let env = ModuleEnv::new(output, others);
             auto_value_constraints(type_def, input_ty, &env)
         };
-        let ty_var_count = TypeScheme::list_ty_vars(&input_ty, constraints.iter()).len() as u32;
+        if public {
+            let mut solver = trait_solver_from_module!(output, others);
+            if constraints.iter().any(|c| !solver.requirement_is_public(c)) {
+                let count = TypeScheme::list_ty_vars(&input_ty, constraints.iter())
+                    .iter()
+                    .map(|var| var.name() + 1)
+                    .max()
+                    .unwrap_or(0);
+                let mut inference = UnifiedTypeInference::new_with_ty_vars(count);
+                let count = TypeScheme::list_eff_vars(&input_ty, constraints.iter())
+                    .iter()
+                    .map(|var| var.name() + 1)
+                    .max()
+                    .unwrap_or(0);
+                for _ in 0..count {
+                    inference.fresh_effect_var();
+                }
+                let reduced = solver
+                    .reduce_public_requirements(
+                        constraints,
+                        &[input_ty],
+                        &mut inference,
+                        solver_arena,
+                    )
+                    .map_err(|error| {
+                        error.with_private_requirement_names(type_names.iter().copied())
+                    })?;
+                constraints = reduced.requirements;
+                evidence_plan = reduced.evidence;
+                inference.finalize_effects()?;
+                evidence_plan.substitute(&mut inference);
+                constraints = constraints
+                    .iter()
+                    .map(|c| inference.substitute_in_constraint(c))
+                    .collect();
+            }
+            let generated = solver.finish().commit(
+                &mut output.functions,
+                &mut output.def_table,
+                &mut pending_functions,
+            );
+            elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
+        }
+        // Reduction may introduce output variables from a selected private impl. Keep the
+        // type's input parameters first and number those new variables contiguously after them.
+        let ty_vars = TypeScheme::list_ty_vars(&input_ty, constraints.iter());
+        let ty_var_count = ty_vars.len() as u32;
+        let ty_subst = ty_vars
+            .into_iter()
+            .sorted()
+            .enumerate()
+            .map(|(index, var)| (var, Type::variable_id(index as u32)))
+            .collect();
         // Effect variables occurring only in the type's where clause are impl variables too, as
         // that clause determines them. They follow the effect parameters, so renumbering them
         // canonically leaves the input type unchanged.
@@ -387,10 +493,25 @@ pub(super) fn emit_auto_value_impls(
             .map(|(index, var)| (var, EffType::single_variable(EffectVar::new(index as u32))))
             .collect();
         let eff_var_count = eff_subst.len() as u32;
-        instantiate_types_in_place(
-            &mut constraints,
-            &mut BitmapInstantiationMapper::new(&(FxHashMap::default(), eff_subst)),
+        let subst = (ty_subst, eff_subst);
+        let mut mapper = BitmapInstantiationMapper::new(&subst);
+        instantiate_types_in_place(&mut constraints, &mut mapper);
+        evidence_plan.instantiate_in_place(&mut mapper);
+        // A generated dictionary supplies its own evidence when an entry runs. Keep that
+        // parameter in entry ABIs, but do not publish a circular prerequisite on the impl.
+        let self_requirement = PubTypeConstraint::new_have_trait(
+            value_trait_id,
+            vec![input_ty],
+            vec![],
+            vec![],
+            type_def_span,
         );
+        let supplies_self = constraints.contains(&self_requirement);
+        constraints.retain(|constraint| constraint != &self_requirement);
+        let mut entry_constraints = constraints.clone();
+        if supplies_self {
+            entry_constraints.push(self_requirement);
+        }
         let associated_const_values = {
             let solver = trait_solver_from_module!(output, others);
             emitted_associated_const_values(
@@ -479,8 +600,8 @@ pub(super) fn emit_auto_value_impls(
             let mut definition = definition;
             definition.ty_scheme.ty_quantifiers = quantifiers.clone();
             definition.ty_scheme.eff_quantifiers = (0..eff_var_count).map(EffectVar::new).collect();
-            definition.ty_scheme.constraints = constraints.clone();
-            if method_index.as_index() >= supplied_count {
+            definition.ty_scheme.constraints = entry_constraints.clone();
+            if method_index.as_index() >= supplied_count && !supplies_self {
                 definition
                     .ty_scheme
                     .constraints
@@ -498,8 +619,9 @@ pub(super) fn emit_auto_value_impls(
             );
 
             let runtime_arg_count = definition.arg_names.len();
-            let function =
+            let mut function =
                 PendingModuleFunction::from_body(definition, body, runtime_arg_count, None, locals);
+            function.evidence_plan = evidence_plan.clone();
             {
                 let generated_projection_subscripts =
                     PendingGeneratedStructuralProjectionSubscripts::new(output);
@@ -543,46 +665,30 @@ pub(super) fn emit_auto_value_impls(
                 eff_var_count,
                 &constraints,
             );
-        let associated_const_getters = if associated_const_values.is_empty()
-            && !associated_const_tys.is_empty()
-        {
-            let getters = {
-                let mut solver = trait_solver_from_module!(output, others);
-                (0..associated_const_tys.len())
-                    .map(TraitAssociatedConstIndex::from_index)
-                    .map(|index| {
-                        generated_value_layout_getter(input_ty, index, type_def_span, &mut solver)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
+        let associated_const_getters =
+            if associated_const_values.is_empty() && !associated_const_tys.is_empty() {
+                add_value_layout_getters(
+                    output,
+                    others,
+                    input_ty,
+                    &entry_constraints,
+                    &evidence_plan,
+                    &associated_const_names,
+                    type_def_span,
+                )?
+            } else {
+                associated_const_names.truncate(associated_const_values.len());
+                add_source_associated_const_getters(
+                    output,
+                    others,
+                    &associated_const_values,
+                    &associated_const_tys,
+                    &associated_const_names,
+                    type_def_span,
+                )?
             };
-            let mut pending = PendingModuleFunctions::default();
-            let ids = getters
-                .into_iter()
-                .map(|getter| add_pending_function_anonymous(output, &mut pending, getter))
-                .collect::<Vec<_>>();
-            elaborate_generated_functions(output, others, &mut pending, ids.iter().copied())?;
-            for (name, id) in associated_const_names
-                .iter()
-                .copied()
-                .zip(ids.iter().copied())
-            {
-                output.name_function_with_visibility(id, name, Visibility::Module);
-            }
-            ids
-        } else {
-            associated_const_names.truncate(associated_const_values.len());
-            add_source_associated_const_getters(
-                output,
-                others,
-                &associated_const_values,
-                &associated_const_tys,
-                &associated_const_names,
-                type_def_span,
-            )?
-        };
         let entry_requirements = function_ids
             .iter()
-            .chain(associated_const_getters.iter())
             .map(|id| {
                 output.functions[id.as_index()]
                     .definition
@@ -592,24 +698,17 @@ pub(super) fn emit_auto_value_impls(
             })
             .map(DictionaryEntryRequirements::from_callable)
             .collect::<Vec<_>>();
-        let (capture_schema, entry_capture_mappings) =
-            dictionary_capture_plan(value_trait_id, &[input_ty], &entry_requirements);
-        let dictionary_value = build_capturing_dictionary_value(
-            &function_ids,
-            &associated_const_getters,
-            capture_schema,
-            entry_capture_mappings,
-        );
-        let impl_id = output.add_emitted_impl(
+        output.add_emitted_impl(
             value_trait_id,
             EmitTraitOutput {
+                evidence_plan,
                 input_tys: vec![input_ty],
                 output_tys: vec![],
                 output_effs: vec![],
                 ty_var_count,
                 eff_var_count,
                 constraints,
-                method_requirements: entry_requirements[..function_ids.len()].to_vec(),
+                method_requirements: entry_requirements,
                 functions: function_ids,
             },
             associated_const_values,
@@ -617,9 +716,8 @@ pub(super) fn emit_auto_value_impls(
             associated_const_tys,
             public,
             Some(type_def_span),
+            others,
         );
-        Rc::make_mut(&mut output.impls.data)[impl_id.as_index()].dictionary_value =
-            dictionary_value;
     }
 
     Ok(())

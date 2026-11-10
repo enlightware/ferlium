@@ -3242,12 +3242,16 @@ fn f<T>(x: T) -> int where T: Apply<! E = (fallible)> {{ apply(x, || 1) }}
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn an_imported_impl_meets_its_prerequisites_with_its_private_impls() {
-    // `Run` and its impl are private to `lib`, which needs them for its public impls.
-    let lib = RUN_PRELUDE.replace("struct Cb", "pub struct Cb")
-        + &named_value_impl("Wrap", "T: Run<! E = ()>").replace("struct Wrap", "pub struct Wrap")
+fn an_imported_impl_builds_private_evidence_from_its_consumers_requirements() {
+    // Private Check evidence is discharged in lib; its public Run requirement is supplied
+    // by the consumer. An arbitrary T: PrivateTrait could not be an exported contract.
+    let lib = RUN_PRELUDE
+        .replace("struct Cb", "pub struct Cb")
+        .replace("trait Run", "pub trait Run")
+        + "trait Check<Self> {}\nimpl<T> Check for [T] where T: Run<! E = ()> {}\n"
+        + &named_value_impl("Wrap", "[T]: Check").replace("struct Wrap", "pub struct Wrap")
         + "pub trait Show<Self> { fn show(x: Self) -> string; }
-impl<T> Show for Wrap<T> where T: Run<! E = ()> { fn show(x: Wrap<T>) -> string { \"shown\" } }
+impl<T> Show for Wrap<T> where [T]: Check { fn show(x: Wrap<T>) -> string { \"shown\" } }
 ";
     for (call, expected) in [
         ("to_string(lib::Wrap(lib::Cb(g)))", "Wrap"),

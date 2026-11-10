@@ -129,22 +129,11 @@ fn resolve_value_method_dispatch(
             EvidenceBindingId::from_index(dict_index),
         ));
     }
-    if ty.is_constant()
-        || is_function_surface_only_value_type(ty)
-        || generated_value_evidence_types(ty, ctx.trait_solver).is_some()
-    {
-        return Ok(ResolvedValueMethodDispatch::Dictionary(
-            trait_dictionary_evidence_binding(arena, value_trait_id, &[ty], &[], &[], span, ctx)?,
-        ));
-    }
-    // The type is still open but its function has no inferred `Value` requirement. This is missing
-    // source evidence, even if a late best-effort derivation could manufacture some concrete
-    // artifact from the partially known shape.
-    Err(internal_compilation_error!(TraitImplNotFound {
-        trait_ref: value_trait_id,
-        input_tys: vec![ty],
-        fn_span: span,
-    }))
+    // A private open application may have been reduced to public evidence parameters.
+    // Build its dictionary from those parameters using the same uniform selection rule.
+    Ok(ResolvedValueMethodDispatch::Dictionary(
+        trait_dictionary_evidence_binding(arena, value_trait_id, &[ty], &[], &[], span, ctx)?,
+    ))
 }
 
 pub(crate) fn resolve_local_clone(
@@ -286,6 +275,7 @@ pub(crate) fn trait_apply_generated_with_locals(
             arguments_unnamed: UnnamedArg::All,
             ty: CallImplType::new(definition.ty_scheme.ty, definition.result_convention),
             input_tys,
+            output_tys: Vec::new(),
             output_effs: Vec::new(),
             inst_data: hir::FnInstData::none(),
         })),
