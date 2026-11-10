@@ -1571,7 +1571,24 @@ impl UnifiedTypeInference {
                 constraint_solve_specificity(constraint),
             )
         });
-        for (constraint_index, constraint) in ordered_constraints {
+        let structural_count = ordered_constraints.partition_point(|(_, constraint)| {
+            constraint_solve_priority(constraint, trait_solver) < 10
+        });
+        let mut deferred_structure = false;
+        let mut retry_structure = false;
+        for (position, &(constraint_index, constraint)) in ordered_constraints.iter().enumerate() {
+            // A structural constraint can be deferred before another one reveals its receiver,
+            // such as a tuple index before the `Repr` of a named type. Retry it before trait
+            // improvement can specialize its still-unrelated output.
+            // The enclosing fixed-point loop resumes us with the remaining constraints.
+            if position == structural_count && retry_structure {
+                new_constraints.extend(
+                    ordered_constraints[position..]
+                        .iter()
+                        .map(|(_, constraint)| (*constraint).clone()),
+                );
+                break;
+            }
             let unified_constraint = self.unify_pub_constraint(
                 constraint,
                 ConstraintAssumptions::excluding(constraints, constraint_index),
@@ -1580,7 +1597,10 @@ impl UnifiedTypeInference {
                 arena,
             )?;
             if let Some(new_constraint) = unified_constraint {
+                deferred_structure |= position < structural_count;
                 new_constraints.push(new_constraint);
+            } else if position < structural_count && deferred_structure {
+                retry_structure = true;
             }
             new_constraints.append(&mut self.obligations);
         }
@@ -2700,19 +2720,18 @@ fn merge_subscript_member_requirement(
 fn constraint_solve_priority(constraint: &PubTypeConstraint, trait_solver: &TraitSolver<'_>) -> u8 {
     match constraint {
         PubTypeConstraint::TupleAtIndexIs { .. } | PubTypeConstraint::TypeHasVariant { .. } => 0,
+        PubTypeConstraint::HaveTrait { trait_id, .. }
+            if *trait_id == trait_solver.std_trait_id(REPR_TRAIT_NAME) =>
+        {
+            1
+        }
         PubTypeConstraint::ProjectionSubscriptIs { .. } => 5,
         PubTypeConstraint::VariantPayloadLayout { .. } => 95,
         PubTypeConstraint::HaveTrait {
-            trait_id,
             output_tys,
             output_effs,
             ..
-        } if *trait_id == trait_solver.std_trait_id(REPR_TRAIT_NAME)
-            || !output_tys.is_empty()
-            || !output_effs.is_empty() =>
-        {
-            10
-        }
+        } if !output_tys.is_empty() || !output_effs.is_empty() => 10,
         PubTypeConstraint::HaveTrait { trait_id, .. }
             if *trait_id == trait_solver.std_trait_id(FROM_ITERATOR_TRAIT_NAME) =>
         {

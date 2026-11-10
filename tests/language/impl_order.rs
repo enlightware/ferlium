@@ -558,6 +558,42 @@ fn generic_impls_requiring_each_other_with_written_outputs_are_inferred() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn projections_preserve_written_generics_before_trait_improvement() {
+    for (shape, projection, value) in [
+        ("T", "x.0", "P(0)"),
+        ("Q<T>", "x.0.0", "P(Q(0))"),
+        ("{ value: Q<T> }", "x.0.value.0", "P({ value: Q(0) })"),
+    ] {
+        let header = format!(
+            "trait Read<Self> {{ fn read(x: Self) -> int; }}
+             trait Hidden<Self> {{ fn hidden(x: Self) -> int; }}
+             trait Use<Self> {{ fn use_it(x: Self) -> int; }}
+             struct Q<T>(T)
+             struct P<T>({shape})"
+        );
+        let use_impl = format!(
+            "impl<T> Use for P<T> where [T]: Hidden {{
+                fn use_it(x: P<T>) -> int {{ hidden([{projection}]) }}
+             }}"
+        );
+        let items = [
+            "impl Read for [int] { fn read(x: [int]) -> int { 7 } }",
+            "impl<T> Hidden for [T] where [T]: Read { fn hidden(x: [T]) -> int { read(x) } }",
+            &use_impl,
+        ];
+        expect_in_every_order(&header, &items, &format!("use_it({value})"), 7);
+        // The impl keeps its requirement; it does not make unsupported instantiations valid.
+        let mut session = TestSession::new();
+        session.fail_compilation(&module(
+            &header,
+            &items,
+            &format!("use_it({})", value.replace('0', "true")),
+        ));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn other_impls_do_not_narrow_a_written_generic() {
     // Whatever the order, `T` stays generic, so `B` applies wherever `A` does.
     expect_in_every_order(

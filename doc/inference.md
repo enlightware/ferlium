@@ -61,6 +61,9 @@ to equal type structure. Every original bound must remain satisfied after these 
 parameters must remain distinct and polymorphic. Ferlium has no top type or general union/intersection
 constructors, so joins such as `int` with `bool` can fail.
 
+Structural constraints made resolvable by a pass are retried before trait improvement. In particular,
+a projection must reveal its connection to a written generic before an impl can narrow its result.
+
 ### Public requirements
 
 Before publishing an exported function or implementation, requirements mentioning private types or

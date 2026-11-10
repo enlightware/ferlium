@@ -2540,6 +2540,50 @@ fn public_leaves_are_conditions_not_specializations_of_the_impl_head() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn written_impl_bounds_publish_the_consumers_requirement_after_projection() {
+    let impls = [
+        "impl Read for [int] { fn read(x: [int]) -> int { 7 } }",
+        "impl<T> Hidden for [T] where [T]: Read { fn hidden(x: [T]) -> int { read(x) } }",
+        "impl<T> Use for P<T> where [T]: Hidden { fn use_it(x: P<T>) -> int { hidden([x.0]) } }",
+    ];
+    for reverse in [false, true] {
+        let mut impls = impls;
+        if reverse {
+            impls.reverse();
+        }
+        let mut session = TestSession::new();
+        compile_module(
+            &mut session,
+            "a",
+            &format!(
+                "pub trait Read<Self> {{ fn read(x: Self) -> int; }}
+                 trait Hidden<Self> {{ fn hidden(x: Self) -> int; }}
+                 pub trait Use<Self> {{ fn use_it(x: Self) -> int; }}
+                 pub struct P<T>(T)
+                 {}
+                 pub fn f<T>(x: P<T>) -> int {{ hidden([x.0]) }}",
+                impls.join("\n"),
+            ),
+        );
+        compile_module(
+            &mut session,
+            "b",
+            "use a::Read;
+             pub fn g<T>(x: T) -> int where [T]: Read {
+                 a::Use::use_it(a::P(x)) + a::f(a::P(x))
+             }",
+        );
+        assert_val_eq!(
+            session.run("a::Use::use_it(a::P(0)) + a::f(a::P(0))"),
+            int(14)
+        );
+        assert_val_eq!(session.run("b::g(0)"), int(14));
+        session.fail_compilation("a::Use::use_it(a::P(true))");
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn private_impls_cannot_choose_an_exported_functions_return_only_quantifier() {
     let int_impl = "impl Def for int { fn def() -> int { 0 } }";
     let bool_impl = "impl Def for bool { fn def() -> bool { false } }";
