@@ -10,9 +10,8 @@ use crate::{
     hir::{
         borrow_checker::BorrowContext,
         dictionary::{
-            DictElaborationCtx, DictionaryReq, EvidenceBindingSource, ExtraParameters,
-            LateFunctionInstData, StaticEvidence, VariantLayoutRelation,
-            find_projection_subscript_dict_index,
+            DictElaborationCtx, DictionaryReq, EvidenceBindingSource, LateFunctionInstData,
+            StaticEvidence, find_projection_subscript_dict_index,
             find_projection_subscript_dict_index_for_receiver_ty, find_trait_impl_dict_index,
             find_variant_payload_indirection_index, instantiate_dictionary_requirements,
         },
@@ -963,16 +962,19 @@ fn extra_arg_kind_from_inst_data(
 
 /// Instantiate requirements that were discovered only after a recursive module call was inferred.
 ///
-/// Recursive type inference can finalize a mutually recursive type world after the call's
-/// preliminary `FnInstData` was recorded, so type identity is reconstructed from the final callee
-/// surface, the call-site type, `Repr` relationships, and constraint payload edges. A preliminary
-/// call may likewise predate final effect quantification: complete positional effect arguments are
-/// used when present, otherwise the function surface reconstructs the missing mapping.
+/// The functions of a recursive group are inferred with one instance of each type, so the caller
+/// and the callee name a type by the same inference variable: the type argument of a callee
+/// quantifier is the caller's quantifier with the same origin. An origin that the caller does not
+/// quantify is a type its body cannot observe, as its unbound variables are: `never`.
+///
+/// Effects are instantiated per call. A preliminary call may predate final effect
+/// quantification: complete positional effect arguments are used when present, otherwise the
+/// function surface reconstructs the missing mapping.
 fn late_module_call_inst_data(
     callee: &LateFunctionInstData,
     call_ty: &FnType,
     call_inst_data: &hir::FnInstData,
-    caller_requirements: &ExtraParameters,
+    caller_ty_origins: &[TypeVar],
     span: Location,
 ) -> Result<hir::FnInstData, InternalCompilationError> {
     let error = |message: String| {
@@ -981,11 +983,18 @@ fn late_module_call_inst_data(
             span,
         })
     };
-    let mut ty_subst = FxHashMap::default();
-    // Preserve the rooted correspondence between non-variable nodes in the final callee's type
-    // graph and the call-site graph. Recursive graphs can be structurally symmetric even though
-    // their nodes have distinct identities; the variable substitution alone loses that orientation.
-    let mut type_correspondence = FxHashMap::default();
+    let ty_subst = callee
+        .ty_origins
+        .iter()
+        .enumerate()
+        .map(|(index, origin)| {
+            let ty = match caller_ty_origins.iter().position(|other| other == origin) {
+                Some(position) => Type::variable(TypeVar::new(position as u32)),
+                None => Type::never(),
+            };
+            (TypeVar::new(index as u32), ty)
+        })
+        .collect::<FxHashMap<_, _>>();
     let mut eff_subst = if call_inst_data.eff_args.len() == callee.effect_quantifiers.len() {
         callee
             .effect_quantifiers
@@ -1005,20 +1014,7 @@ fn late_module_call_inst_data(
             callee.fn_ty.args.len()
         )));
     }
-    let mut active = FxHashSet::default();
     for (pattern, actual) in callee.fn_ty.args.iter().zip(&call_ty.args) {
-        if !bind_call_type_instantiation(
-            pattern.ty,
-            actual.ty,
-            &mut ty_subst,
-            &mut type_correspondence,
-            &mut active,
-        ) {
-            return Err(error(format!(
-                "late-instantiated call argument type {:?} does not match final callee type {:?}",
-                actual.ty, pattern.ty
-            )));
-        }
         if !bind_type_effect_instantiation(
             pattern.ty,
             actual.ty,
@@ -1030,18 +1026,6 @@ fn late_module_call_inst_data(
                 pattern.ty, actual.ty
             )));
         }
-    }
-    if !bind_call_type_instantiation(
-        callee.fn_ty.ret,
-        call_ty.ret,
-        &mut ty_subst,
-        &mut type_correspondence,
-        &mut active,
-    ) {
-        return Err(error(format!(
-            "late-instantiated call result type {:?} does not match final callee type {:?}",
-            call_ty.ret, callee.fn_ty.ret
-        )));
     }
     if !bind_type_effect_instantiation(
         callee.fn_ty.ret,
@@ -1060,22 +1044,6 @@ fn late_module_call_inst_data(
             callee.fn_ty.effects, call_ty.effects
         )));
     }
-    if !bind_representation_type_instantiation(
-        &callee.requirements,
-        caller_requirements,
-        &mut ty_subst,
-    ) {
-        return Err(error(
-            "late call maps one representation variable to two caller types".into(),
-        ));
-    }
-    bind_constraint_only_variant_types_with_correspondence(
-        &callee.requirements,
-        caller_requirements,
-        &mut ty_subst,
-        &mut type_correspondence,
-    )
-    .map_err(error)?;
     // Functions and associated lambdas in one recursive group share the final normalized effect
     // universe. A quantifier absent from both preliminary arguments and the function surface is
     // therefore an unchanged caller quantifier, not an unknown positional argument.
@@ -1093,229 +1061,6 @@ fn late_module_call_inst_data(
         call_inst_data.ty_args.clone(),
         call_inst_data.eff_args.clone(),
     ))
-}
-
-/// Carry the function-surface substitution through `Repr` relationships. Variant constraints are
-/// stated on the representation variable, while a function argument can expose the user-facing
-/// variable; both sides' `repr_map`s connect those identities without consulting a case tag.
-fn bind_representation_type_instantiation(
-    callee: &ExtraParameters,
-    caller: &ExtraParameters,
-    subst: &mut FxHashMap<TypeVar, Type>,
-) -> bool {
-    for (surface_var, repr_var) in &callee.repr_map {
-        let Some(actual) = subst.get(surface_var).copied() else {
-            continue;
-        };
-        let TypeKind::Variable(actual_var) = actual.data().clone() else {
-            continue;
-        };
-        let actual_repr = *caller.repr_map.get(&actual_var).unwrap_or(&actual_var);
-        if let Some(previous) = subst.insert(*repr_var, Type::variable(actual_repr)) {
-            if previous != Type::variable(actual_repr) {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-/// Extend a late recursive-call substitution through variant-storage constraints.
-///
-/// The function surface often maps only one node of a mutually recursive type world. Variant
-/// storage requirements retain both their enclosing type and payload type, so matching the same
-/// case requirement propagates that known mapping to the adjacent node.
-/// A small backtracking search finds the unique globally compatible assignment; choosing
-/// requirements greedily would not be confluent. A shared tag alone is never enough: two unrelated
-/// `.Some` requirements remain ambiguous and cause an internal error rather than exchanging
-/// evidence.
-#[cfg(test)]
-fn bind_constraint_only_variant_types(
-    callee_requirements: &ExtraParameters,
-    caller: &ExtraParameters,
-    subst: &mut FxHashMap<TypeVar, Type>,
-) -> Result<(), String> {
-    bind_constraint_only_variant_types_with_correspondence(
-        callee_requirements,
-        caller,
-        subst,
-        &mut FxHashMap::default(),
-    )
-}
-
-fn bind_constraint_only_variant_types_with_correspondence(
-    callee_requirements: &ExtraParameters,
-    caller: &ExtraParameters,
-    subst: &mut FxHashMap<TypeVar, Type>,
-    correspondence: &mut FxHashMap<Type, Type>,
-) -> Result<(), String> {
-    let requirements = variant_requirements(callee_requirements);
-    let caller_requirements = variant_requirements(caller);
-    let mut remaining = (0..requirements.len()).collect::<Vec<_>>();
-    let mut solutions = Vec::new();
-    search_variant_requirement_substitutions(
-        &requirements,
-        &caller_requirements,
-        &mut remaining,
-        VariantRequirementSubstitution {
-            types: subst.clone(),
-            correspondence: correspondence.clone(),
-            used_caller_requirements: FxHashSet::default(),
-        },
-        &mut solutions,
-    );
-    if solutions.len() != 1 {
-        return Err(format!(
-            "late variant evidence requirements have {} globally compatible caller mappings; expected exactly one ({} callee requirements, {} caller requirements)",
-            solutions.len(),
-            requirements.len(),
-            caller_requirements.len(),
-        ));
-    }
-    let solution = solutions.pop().unwrap();
-    *subst = solution.types;
-    *correspondence = solution.correspondence;
-    Ok(())
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct VariantRequirementSubstitution {
-    types: FxHashMap<TypeVar, Type>,
-    correspondence: FxHashMap<Type, Type>,
-    used_caller_requirements: FxHashSet<usize>,
-}
-
-fn search_variant_requirement_substitutions(
-    requirements: &[VariantLayoutRelation],
-    caller: &[VariantLayoutRelation],
-    remaining: &mut Vec<usize>,
-    subst: VariantRequirementSubstitution,
-    solutions: &mut Vec<VariantRequirementSubstitution>,
-) {
-    if solutions.len() > 1 {
-        return;
-    }
-    if remaining.is_empty() {
-        if !solutions
-            .iter()
-            .any(|solution| solution.types == subst.types)
-        {
-            solutions.push(subst);
-        }
-        return;
-    }
-
-    // Branch first on the most constrained requirement. This does not affect correctness, but
-    // keeps mutually recursive worlds with repeatedly named cases from exploring needless paths.
-    let Some((position, trials)) = remaining
-        .iter()
-        .enumerate()
-        .map(|(position, index)| {
-            (
-                position,
-                compatible_variant_requirement_substitutions(requirements[*index], caller, &subst),
-            )
-        })
-        .min_by_key(|(_, trials)| trials.len())
-    else {
-        return;
-    };
-    if trials.is_empty() {
-        return;
-    }
-    let requirement = remaining.swap_remove(position);
-    for trial in trials {
-        search_variant_requirement_substitutions(requirements, caller, remaining, trial, solutions);
-        if solutions.len() > 1 {
-            break;
-        }
-    }
-    remaining.push(requirement);
-}
-
-fn compatible_variant_requirement_substitutions(
-    requirement: VariantLayoutRelation,
-    caller: &[VariantLayoutRelation],
-    subst: &VariantRequirementSubstitution,
-) -> Vec<VariantRequirementSubstitution> {
-    let VariantLayoutRelation {
-        variant_ty,
-        tag,
-        payload_ty,
-    } = requirement;
-    let trials = caller
-        .iter()
-        .enumerate()
-        .filter_map(|(candidate_index, candidate)| {
-            if subst.used_caller_requirements.contains(&candidate_index) {
-                return None;
-            }
-            let VariantLayoutRelation {
-                variant_ty: candidate_variant_ty,
-                tag: candidate_tag,
-                payload_ty: candidate_payload_ty,
-            } = *candidate;
-            if candidate_tag != tag {
-                return None;
-            }
-            let mut trial = subst.clone();
-            let mut active = FxHashSet::default();
-            if !bind_call_type_instantiation(
-                variant_ty,
-                candidate_variant_ty,
-                &mut trial.types,
-                &mut trial.correspondence,
-                &mut active,
-            ) {
-                return None;
-            }
-            if !bind_call_type_instantiation(
-                payload_ty,
-                candidate_payload_ty,
-                &mut trial.types,
-                &mut trial.correspondence,
-                &mut active,
-            ) {
-                return None;
-            }
-            trial.used_caller_requirements.insert(candidate_index);
-            let exact = variant_ty == candidate_variant_ty && payload_ty == candidate_payload_ty;
-            Some((exact, trial))
-        })
-        .collect::<Vec<_>>();
-
-    // An identical finalized requirement is already in the caller's type universe and is the
-    // canonical match. Do not exchange it for an isomorphic recursive requirement that happens to
-    // use the same case name; doing so would invent a mapping between otherwise independent type
-    // worlds. Structural matching remains available when late finalization genuinely changed the
-    // interned identities.
-    let has_exact = trials.iter().any(|(exact, _)| *exact);
-    trials
-        .into_iter()
-        .filter_map(|(exact, trial)| (!has_exact || exact).then_some(trial))
-        .collect()
-}
-
-fn variant_requirements(parameters: &ExtraParameters) -> Vec<VariantLayoutRelation> {
-    let mut relations = parameters.variant_layouts.clone();
-    for requirement in &parameters.requirements {
-        if let DictionaryReq::VariantPayloadIndirection {
-            variant_ty,
-            tag,
-            payload_ty,
-        } = requirement
-        {
-            let relation = VariantLayoutRelation {
-                variant_ty: *variant_ty,
-                tag: *tag,
-                payload_ty: *payload_ty,
-            };
-            if !relations.contains(&relation) {
-                relations.push(relation);
-            }
-        }
-    }
-    relations
 }
 
 /// Reconstruct effect-variable instantiation while walking corresponding type surfaces.
@@ -2856,7 +2601,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                         requirements,
                         &ty.fn_ty,
                         &inst_data,
-                        self.ctx.dicts,
+                        self.ctx.caller_ty_origins,
                         node_span,
                     )?;
                     self.elaborate_extra_args_from_inst_data(&late_inst_data, node_span)?
@@ -3007,7 +2752,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                             requirements,
                             &call_ty,
                             &get_fn.inst_data,
-                            self.ctx.dicts,
+                            self.ctx.caller_ty_origins,
                             node_span,
                         )?;
                         self.elaborate_extra_args_from_inst_data(&late_inst_data, node_span)?
@@ -3619,6 +3364,7 @@ mod tests {
         containers::b,
         hir::{
             GetTraitAssociatedConst,
+            dictionary::ExtraParameters,
             function::{CallableDefinition, Function},
             value::LiteralValue,
         },
@@ -3640,116 +3386,42 @@ mod tests {
         ExtraParameters {
             requirements,
             repr_map: FxHashMap::default(),
-            variant_layouts: Vec::new(),
         }
     }
 
     #[test]
-    fn late_variant_storage_mapping_uses_the_unique_global_assignment() {
-        let callee_variant = TypeVar::new(0);
-        let callee_payload = TypeVar::new(1);
-        let matching_variant = TypeVar::new(2);
-        let matching_payload = TypeVar::new(3);
-        let decoy_variant = TypeVar::new(4);
-        let decoy_payload = TypeVar::new(5);
-        let callee_requirements = extra_parameters(vec![
+    fn late_call_maps_callee_types_to_the_caller_by_their_origins() {
+        // The callee numbers the two types in the opposite order, and has one of its own.
+        let (first, second, own) = (TypeVar::new(40), TypeVar::new(41), TypeVar::new(42));
+        let requirement = |variant: u32, payload: u32| {
             DictionaryReq::new_variant_payload_indirection(
-                Type::variable(callee_variant),
-                ustr("Shared"),
-                Type::variable(callee_payload),
-            ),
-            DictionaryReq::new_variant_payload_indirection(
-                Type::variable(callee_payload),
-                ustr("Marker"),
-                int_type(),
-            ),
-        ]);
-        let caller = extra_parameters(vec![
-            DictionaryReq::new_variant_payload_indirection(
-                Type::variable(matching_variant),
-                ustr("Shared"),
-                Type::variable(matching_payload),
-            ),
-            DictionaryReq::new_variant_payload_indirection(
-                Type::variable(decoy_variant),
-                ustr("Shared"),
-                Type::variable(decoy_payload),
-            ),
-            DictionaryReq::new_variant_payload_indirection(
-                Type::variable(matching_payload),
-                ustr("Marker"),
-                int_type(),
-            ),
-        ]);
-        let mut subst = FxHashMap::default();
-
-        bind_constraint_only_variant_types(&callee_requirements, &caller, &mut subst).unwrap();
-
-        assert_eq!(
-            subst.get(&callee_variant),
-            Some(&Type::variable(matching_variant))
-        );
-        assert_eq!(
-            subst.get(&callee_payload),
-            Some(&Type::variable(matching_payload))
-        );
-    }
-
-    #[test]
-    fn late_variant_storage_mapping_rejects_same_tag_ambiguity() {
-        let callee_left = TypeVar::new(0);
-        let callee_right = TypeVar::new(1);
-        let caller_left = TypeVar::new(2);
-        let caller_right = TypeVar::new(3);
-        let callee_requirements = extra_parameters(vec![
-            DictionaryReq::new_variant_payload_indirection(
-                Type::variable(callee_left),
+                Type::variable(TypeVar::new(variant)),
                 ustr("Some"),
-                Type::unit(),
-            ),
-            DictionaryReq::new_variant_payload_indirection(
-                Type::variable(callee_right),
-                ustr("Some"),
-                Type::unit(),
-            ),
-        ]);
-        let caller = extra_parameters(vec![
-            DictionaryReq::new_variant_payload_indirection(
-                Type::variable(caller_left),
-                ustr("Some"),
-                Type::unit(),
-            ),
-            DictionaryReq::new_variant_payload_indirection(
-                Type::variable(caller_right),
-                ustr("Some"),
-                Type::unit(),
-            ),
-        ]);
-
-        assert!(
-            bind_constraint_only_variant_types(
-                &callee_requirements,
-                &caller,
-                &mut FxHashMap::default(),
+                Type::variable(TypeVar::new(payload)),
             )
-            .is_err()
-        );
-
+        };
         let callee = LateFunctionInstData {
-            requirements: callee_requirements,
+            requirements: extra_parameters(vec![requirement(0, 1), requirement(2, 2)]),
             fn_ty: FnType::new_by_val(Vec::<Type>::new(), Type::unit(), EffType::empty()),
             effect_quantifiers: Vec::new(),
+            ty_origins: vec![second, first, own],
         };
-        assert!(
-            late_module_call_inst_data(
-                &callee,
-                &callee.fn_ty,
-                &hir::FnInstData::none(),
-                &caller,
-                Location::new_synthesized(),
+        let inst_data = late_module_call_inst_data(
+            &callee,
+            &callee.fn_ty,
+            &hir::FnInstData::none(),
+            &[first, second],
+            Location::new_synthesized(),
+        )
+        .unwrap();
+        assert!(inst_data.dicts_req[0].same_contract(&requirement(1, 0)));
+        assert!(inst_data.dicts_req[1].same_contract(
+            &DictionaryReq::new_variant_payload_indirection(
+                Type::never(),
+                ustr("Some"),
+                Type::never(),
             )
-            .is_err()
-        );
+        ));
     }
 
     #[test]
@@ -3766,22 +3438,18 @@ mod tests {
                 EffType::single_variable(effect),
             ),
             effect_quantifiers: vec![effect],
+            ty_origins: Vec::new(),
         };
         assert!(
-            late_module_call_inst_data(
-                &added,
-                &added.fn_ty,
-                &hir::FnInstData::none(),
-                &no_parameters,
-                span,
-            )
-            .is_ok()
+            late_module_call_inst_data(&added, &added.fn_ty, &hir::FnInstData::none(), &[], span,)
+                .is_ok()
         );
 
         let removed = LateFunctionInstData {
             requirements: no_parameters.clone(),
             fn_ty: FnType::new_by_val(Vec::<Type>::new(), Type::unit(), EffType::empty()),
             effect_quantifiers: Vec::new(),
+            ty_origins: Vec::new(),
         };
         let preliminary = hir::FnInstData::new(
             Vec::new(),
@@ -3789,14 +3457,7 @@ mod tests {
             vec![EffType::single_variable(effect)],
         );
         assert!(
-            late_module_call_inst_data(
-                &removed,
-                &removed.fn_ty,
-                &preliminary,
-                &no_parameters,
-                span,
-            )
-            .is_ok()
+            late_module_call_inst_data(&removed, &removed.fn_ty, &preliminary, &[], span,).is_ok()
         );
     }
 
@@ -3902,7 +3563,6 @@ mod tests {
         let dicts = ExtraParameters {
             requirements: vec![],
             repr_map: FxHashMap::default(),
-            variant_layouts: Vec::new(),
         };
         let generated_projection_subscripts =
             PendingGeneratedStructuralProjectionSubscripts::new(&current_module);
@@ -4011,7 +3671,6 @@ mod tests {
         let dicts = ExtraParameters {
             requirements: vec![],
             repr_map: FxHashMap::default(),
-            variant_layouts: Vec::new(),
         };
         let generated_projection_subscripts =
             PendingGeneratedStructuralProjectionSubscripts::new(&current_module);
@@ -4086,7 +3745,6 @@ mod tests {
                 vec![],
             )],
             repr_map: FxHashMap::default(),
-            variant_layouts: Vec::new(),
         };
         let generated_projection_subscripts =
             PendingGeneratedStructuralProjectionSubscripts::new(&current_module);

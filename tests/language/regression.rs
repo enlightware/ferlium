@@ -1037,3 +1037,81 @@ fn an_inlined_callback_local_may_receive_a_closure_with_fewer_effects() {
         int(3)
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_call_in_a_recursive_group_passes_evidence_for_types_only_requirements_name() {
+    // The type of `a.b` is in no signature, and `r` and `item` do not number it alike: `item`
+    // sees the type of `a.b.c` first.
+    for functions in [
+        [
+            "fn r(a, n) { if n == 0 { a.b.c } else { item(a.b.c, a, n - 1) } }",
+            "fn item(w, a, n) { w + r(a, n) }",
+        ],
+        [
+            "fn r(a, n) { if n == 0 { a.b.c } else { item(a, a.b.c, n - 1) } }",
+            "fn item(a, w, n) { w + r(a, n) }",
+        ],
+    ] {
+        for [first, second] in [functions, [functions[1], functions[0]]] {
+            assert_val_eq!(
+                TestSession::new().run(&format!("{first}\n{second}\nr({{b: {{c: 2}}}}, 3)")),
+                int(8)
+            );
+        }
+    }
+    // The same for the output of a trait: the iterator of `a`.
+    assert_val_eq!(
+        TestSession::new().run(indoc! { "
+            fn r(a, n) {
+                let mut i = iter(a);
+                let x = next(i);
+                if n == 0 {
+                    0
+                } else {
+                    item(x, a, n - 1)
+                }
+            }
+            fn item(w, a, n) {
+                match w {
+                    Some(v) => v + r(a, n),
+                    None => 0,
+                }
+            }
+            r([5, 6], 2)
+        " }),
+        int(10)
+    );
+    // And when one function has a type generic of its own.
+    assert_val_eq!(
+        TestSession::new().run(indoc! { "
+            fn r(a, n) { if n == 0 { a.b.c } else { item(a, n - 1) } }
+            fn item<z>(a, n) { r(a, n) }
+            r({b: {c: 7}}, 2)
+        " }),
+        int(7)
+    );
+    // Two cases with one tag, told apart only by the fields they are reached through.
+    let r = "fn r(a, n) { if n == 0 { 0 } else { item(a, n - 1) } }";
+    let item = indoc! { "
+        fn item<Z>(a, n) {
+            let x = match a.b { Some(v) => v.d, None => 0 };
+            let y = match a.c { Some(v) => v.e, None => 0 };
+            x + y + r(a, n)
+        }
+    " };
+    for [first, second] in [[r, item], [item, r]] {
+        assert_val_eq!(
+            TestSession::new().run(&format!(
+                "{first}\n{second}\nr({{b: Some({{d: 2}}), c: Some({{e: 3}})}}, 2)"
+            )),
+            int(10)
+        );
+    }
+    // Found by fuzzing: this is rejected, and used to panic.
+    TestSession::new().fail_compilation(indoc! { "
+        fn result(mut a) {a.a.a.c() != result and result + 0 == item + 0 + 1 + 0}
+        fn item<z, c, result>(a) {result == result + result + result + item}
+        for Err in match for Err in a() + 0 == 0 {a} {a => 0} {a = a = a}
+    " });
+}

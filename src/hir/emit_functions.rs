@@ -2752,6 +2752,7 @@ where
         }
 
         // Fifth pass, normalize the input types/effects, substitute the types in the functions and input/output types.
+        let ty_origins = quantifiers.clone();
         let subst = (
             normalize_types(&mut quantifiers),
             normalize_effect_vars(&mut effect_quantifiers),
@@ -2839,6 +2840,7 @@ where
                 output,
                 *id,
                 dicts.clone(),
+                &ty_origins,
             );
         }
         for (id, dicts) in local_fns.iter().zip(&method_dicts) {
@@ -3442,11 +3444,13 @@ where
         }
 
         // Fifth pass, normalize the type schemes, substitute the types in the functions.
+        let mut function_ty_origins = Vec::new();
         for ((input, id), written_effects) in ast_functions()
             .zip(local_fns.iter())
             .zip(&function_written_effects)
         {
             let descr = &mut output.functions[id.as_index()];
+            function_ty_origins.push(descr.definition.ty_scheme.ty_quantifiers.clone());
             let subst = descr
                 .definition
                 .ty_scheme
@@ -3526,7 +3530,7 @@ where
 
         // Sixth pass, run the borrow checker and elaborate into the final HIR arena.
         let mut module_inst_data = FxHashMap::default();
-        for id in local_fns.iter() {
+        for (id, ty_origins) in local_fns.iter().zip(&function_ty_origins) {
             let descr = &output.functions[id.as_index()];
             let dicts = descr
                 .definition
@@ -3538,6 +3542,7 @@ where
                 output,
                 *id,
                 dicts,
+                ty_origins,
             );
         }
         for id in local_fns.iter() {

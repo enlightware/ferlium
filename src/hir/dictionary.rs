@@ -36,8 +36,7 @@ pub enum DictionaryReq {
     /// Runtime storage-mode evidence for a specific open variant case.
     ///
     /// The runtime parameter is one boolean determined by `variant_ty` and `tag`.
-    /// `payload_ty` is retained as compile-time identity metadata for late recursive-call
-    /// elaboration.
+    /// `payload_ty` is compile-time identity metadata.
     VariantPayloadIndirection {
         variant_ty: Type,
         tag: Ustr,
@@ -389,14 +388,6 @@ pub struct EvidenceBinding {
     pub source: EvidenceBindingSource,
 }
 
-/// Compile-time relationship used to reconstruct evidence at late recursive calls.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct VariantLayoutRelation {
-    pub variant_ty: Type,
-    pub tag: Ustr,
-    pub payload_ty: Type,
-}
-
 /// Data structure to hold extra parameters for a function.
 #[derive(Clone, Debug)]
 pub struct ExtraParameters {
@@ -406,8 +397,6 @@ pub struct ExtraParameters {
     /// A map from type variables to other type variables containing their representation type.
     /// This is used to resolve type variables when looking up field dict indices.
     pub repr_map: FxHashMap<TypeVar, TypeVar>,
-    /// Case relationships do not occupy runtime parameter slots.
-    pub variant_layouts: Vec<VariantLayoutRelation>,
 }
 
 impl ExtraParameters {
@@ -560,6 +549,10 @@ pub struct LateFunctionInstData {
     /// Final normalized effect quantifiers. Preliminary recursive calls do not always record them,
     /// so late elaboration can reconstruct their instantiation from the function surface.
     pub effect_quantifiers: Vec<EffectVar>,
+    /// The inference variable that each type quantifier was before the scheme was normalized, in
+    /// the order of the quantifiers. The functions of a recursive group are inferred with one
+    /// instance of each type, so two of them name one type by the same inference variable.
+    pub ty_origins: Vec<TypeVar>,
 }
 
 /// Recursive functions in the current module can be called before their final requirements are
@@ -585,6 +578,9 @@ pub struct DictElaborationCtx<'d, 'sr, 'sm> {
     pub(crate) active_dictionary_constructions: Vec<DictionaryReq>,
     /// Effect variables quantified by the callable currently being elaborated.
     pub(crate) retained_effect_vars: FxHashSet<EffectVar>,
+    /// [`LateFunctionInstData::ty_origins`] of the function being elaborated; empty outside a
+    /// module, where no call is instantiated late.
+    pub(crate) caller_ty_origins: &'d [TypeVar],
 }
 
 impl<'d, 'sr, 'sm> DictElaborationCtx<'d, 'sr, 'sm> {
@@ -604,6 +600,7 @@ impl<'d, 'sr, 'sm> DictElaborationCtx<'d, 'sr, 'sm> {
             evidence_bindings: Vec::new(),
             active_dictionary_constructions: Vec::new(),
             retained_effect_vars: FxHashSet::default(),
+            caller_ty_origins: &[],
         };
         this.reset_evidence_bindings();
         this

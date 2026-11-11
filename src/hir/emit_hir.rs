@@ -136,6 +136,7 @@ pub(super) fn insert_inst_data_for_function_and_lambdas(
     module: &Module,
     id: LocalFunctionId,
     dicts: ExtraParameters,
+    ty_origins: &[TypeVar],
 ) {
     for function_id in function_and_associated_lambdas(&id, associated_lambdas) {
         let definition = &module
@@ -155,6 +156,7 @@ pub(super) fn insert_inst_data_for_function_and_lambdas(
                 requirements: dicts.clone(),
                 fn_ty: definition.ty_scheme.ty.clone(),
                 effect_quantifiers,
+                ty_origins: ty_origins.to_vec(),
             },
         );
     }
@@ -628,6 +630,7 @@ pub(super) fn borrow_check_and_elaborate_dict(
         &mut solver,
         generated_projection_subscripts,
     );
+    ctx.caller_ty_origins = &module_inst_data[id].ty_origins;
     for function_id in function_and_associated_lambdas(id, associated_lambdas) {
         let function_slot = &mut output.functions[function_id.as_index()];
         borrow_check_and_elaborate_pending_function(

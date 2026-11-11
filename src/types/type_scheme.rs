@@ -19,10 +19,7 @@ use crate::{
     format::{type_variable_index_to_string_latin, type_variable_subscript},
     hir::{
         FnInstData, NodeArena,
-        dictionary::{
-            DictionaryReq, ExtraParameters, VariantLayoutRelation,
-            instantiate_dictionary_requirements,
-        },
+        dictionary::{DictionaryReq, ExtraParameters, instantiate_dictionary_requirements},
     },
     module::{ModuleEnv, TraitId},
     parser::location::InstantiableLocation,
@@ -1264,30 +1261,7 @@ pub(crate) fn extra_parameters_from_constraints(
     // case-qualified uses of ordinary `Value<B>` evidence, not additional runtime parameters.
     let value_trait_id = env.expect_std_trait_id(VALUE_TRAIT_NAME);
     let mut requirements = Vec::new();
-    let mut variant_layouts = Vec::new();
     for constraint in constraints {
-        if let TypeHasVariant {
-            variant_ty,
-            tag,
-            payload_ty,
-            ..
-        }
-        | VariantPayloadLayout {
-            variant_ty,
-            tag,
-            payload_ty,
-            ..
-        } = constraint
-        {
-            let relation = VariantLayoutRelation {
-                variant_ty: *variant_ty,
-                tag: *tag,
-                payload_ty: *payload_ty,
-            };
-            if !variant_layouts.contains(&relation) {
-                variant_layouts.push(relation);
-            }
-        }
         let requirement = match constraint {
             TupleAtIndexIs { .. } | ProjectionSubscriptIs { .. } | TypeHasVariant { .. } => {
                 constraint.dictionary_requirement_key(value_trait_id)
@@ -1330,6 +1304,5 @@ pub(crate) fn extra_parameters_from_constraints(
     ExtraParameters {
         requirements,
         repr_map,
-        variant_layouts,
     }
 }
