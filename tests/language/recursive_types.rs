@@ -608,3 +608,12 @@ fn generic_function_over_a_recursive_alias_is_specialized() {
         int(1)
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_type_that_is_an_alias_of_itself_is_shown_once() {
+    // `t` is `Option<t>`, and showing it used to recurse without end.
+    TestSession::new()
+        .fail_compilation("fn f<t>(x: t) { let r: Some(t) | None = x; x + 0; }")
+        .expect_trait_impl_not_found("Num", &["Self = Option<Self>"]);
+}

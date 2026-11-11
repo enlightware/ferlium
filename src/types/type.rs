@@ -1500,11 +1500,14 @@ where
     Env: TypeFormatEnv,
     TypeKind: FormatWith<Env>,
 {
-    if env.fmt_type_alias_name(*ty, f)? {
-        return Ok(());
-    }
     ty.with_cycle_detection(
-        |ty, (f, env)| ty.data().fmt_with(f, env),
+        |ty, (f, env)| {
+            // An argument of an alias can be the type itself, as in `T = Option<T>`.
+            if env.fmt_type_alias_name(*ty, f)? {
+                return Ok(());
+            }
+            ty.data().fmt_with(f, env)
+        },
         |_, (f, _)| write!(f, "Self"),
         (f, env),
     )
