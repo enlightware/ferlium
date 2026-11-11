@@ -253,7 +253,7 @@ impl StorageState {
     }
 
     fn shape_mismatch(&self, other: &Self, path: &mut Vec<usize>) -> Option<(Type, Type)> {
-        if self.ty != other.ty || self.fields.len() != other.fields.len() {
+        if !same_storage_type(self.ty, other.ty) || self.fields.len() != other.fields.len() {
             return Some((self.ty, other.ty));
         }
         for (index, (field, other)) in self.fields.iter().zip(&other.fields).enumerate() {
@@ -267,7 +267,7 @@ impl StorageState {
     }
 
     fn join(&mut self, other: &Self) -> bool {
-        debug_assert_eq!(self.ty, other.ty);
+        debug_assert!(same_storage_type(self.ty, other.ty));
         debug_assert_eq!(self.fields.len(), other.fields.len());
         let joined = self.state.join(other.state);
         let mut changed = joined != self.state;
@@ -338,15 +338,18 @@ impl StorageState {
         let Some(target) = self.at_path_mut(path) else {
             return false;
         };
-        // A place may hold a callable whose effects are included in those of its type.
-        debug_assert_eq!(
-            target.ty.map(&mut EffectErasingMapper),
-            replacement.ty.map(&mut EffectErasingMapper)
-        );
+        debug_assert!(same_storage_type(target.ty, replacement.ty));
         *target = replacement.clone();
         self.recompute();
         true
     }
+}
+
+/// Whether two types are those of one storage. A place may hold a callable whose effects are
+/// included in those of its type, so a replaced place can carry the type of its new content on
+/// one path only.
+fn same_storage_type(left: Type, right: Type) -> bool {
+    left == right || left.map(&mut EffectErasingMapper) == right.map(&mut EffectErasingMapper)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

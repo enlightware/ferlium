@@ -976,3 +976,64 @@ fn a_failing_derived_serializer_member_leaves_the_result_droppable() {
         );
     }
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn merged_calls_make_their_comparison_foldable() {
+    // Comparing a value with itself through a custom `eq` merges its two calls, whose results
+    // then compare as one value: normalization must fold that too. Found by fuzzing.
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    assert_val_eq!(
+        session.run(indoc! { "
+            trait Tr<Self> { fn m(s: Self, x: int, f: (int) -> int) -> int; }
+            struct S { v: int }
+            impl Tr for S {
+                fn m(s, x, f) { f(x) + s.v }
+            }
+            struct V<T>(T)
+            impl<T> Value for V<T> where T: Value, T: Tr {
+                fn eq(x: V<T>, y: V<T>) -> bool { m(x.0, 0, |z| z + 1) == m(y.0, 0, |z| z + 1) }
+                fn to_string(x: V<T>) -> string { to_string(m(x.0, 0, |z| z + 1)) }
+                fn hash(x: V<T>, state: &mut hasher) { hash(m(x.0, 0, |z| z + 1), state) }
+                fn clone(x: V<T>) -> V<T> { V(x.0) }
+                fn drop(x: &mut V<T>) {}
+            }
+            fn same(a, b) {
+                if a == b {
+                    1
+                } else {
+                    0
+                }
+            }
+            let v = V(S { v: 0 });
+            same(v, v)
+        " }),
+        int(1)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_inlined_callback_local_may_receive_a_closure_with_fewer_effects() {
+    // After inlining `k`, the place of `h` holds a closure typed with fewer effects on one
+    // path only: the same storage. Found while unrolling recursive groups by hand.
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { "
+            fn k(g, n: int) -> int {
+                let a = [1];
+                let mut h = g;
+                if n > 3 {
+                    h = || a[0]
+                };
+                h()
+            }
+            fn f(g, n: int) -> int {
+                k(g, n)
+            }
+            f(|| 2, 2) + f(|| 2, 4)
+        " }),
+        int(3)
+    );
+}

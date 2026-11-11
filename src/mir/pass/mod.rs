@@ -429,7 +429,8 @@ fn normalize_semantic(
             normalize::Pass {
                 id: NormalizingPass::CommonCalls,
                 run: &common_calls,
-                enables: &[],
+                // Two results that become one value make their comparison constant.
+                enables: &[NormalizingPass::Fold],
             },
             normalize::Pass {
                 id: NormalizingPass::RedundantStorage,
