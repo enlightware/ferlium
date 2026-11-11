@@ -1,7 +1,7 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{borrow::Cow, iter::once, slice};
+use std::{borrow::Cow, cell::Cell, iter::once, slice};
 
 use indexmap::IndexMap;
 use itertools::Itertools;
@@ -67,7 +67,7 @@ use crate::{
             unify::UnifiedTypeInference,
         },
         type_like::{TypeLike, instantiate_types_in_place},
-        type_mapper::{BitmapInstantiationMapper, TypeMapper},
+        type_mapper::{BitmapInstantiationMapper, EffectErasingMapper, TypeMapper},
         type_scheme::{
             PubTypeConstraint, TypeScheme, extra_parameters_from_constraints, normalize_types,
         },
@@ -585,14 +585,85 @@ pub(super) struct GroupContract {
     written_types: Vec<TypeVar>,
 }
 
+impl GroupContract {
+    /// The contract of a function that calls nothing, from its shape: an effect that it
+    /// receives is any effect, and one that it only produces is none, as when a scheme is
+    /// published.
+    fn bottom(shape: &Self) -> Self {
+        let mut retained = FxHashSet::default();
+        for constraint in &shape.scheme.constraints {
+            constraint.fill_with_inner_effect_vars(&mut retained);
+        }
+        let subst = (
+            FxHashMap::default(),
+            shape
+                .scheme
+                .ty
+                .positive_only_effect_vars()
+                .into_iter()
+                .filter(|var| !retained.contains(var))
+                .map(|var| (var, EffType::empty()))
+                .collect(),
+        );
+        let ty = shape
+            .scheme
+            .ty
+            .map(&mut BitmapInstantiationMapper::new(&subst));
+        Self {
+            scheme: TypeScheme {
+                ty_quantifiers: shape.scheme.ty_quantifiers.clone(),
+                eff_quantifiers: TypeScheme::<FnType>::list_eff_vars(
+                    &ty,
+                    shape.scheme.constraints.iter(),
+                ),
+                ty,
+                constraints: shape.scheme.constraints.clone(),
+            },
+            written_count: shape.written_count,
+            written_types: shape.written_types.clone(),
+        }
+    }
+
+    /// Whether two contracts of one function, numbered alike, say the same.
+    fn is_same_as(&self, other: &Self) -> bool {
+        let (this, other) = (&self.scheme, &other.scheme);
+        this.ty == other.ty
+            && this.constraints.len() == other.constraints.len()
+            && this
+                .constraints
+                .iter()
+                .all(|constraint| other.constraints.contains(constraint))
+    }
+}
+
 /// What [`emit_functions`] produced.
 enum Emitted {
     /// The functions of a group, in the module.
     Functions,
     /// The methods of a trait implementation, in the module, and what its impl is made of.
     TraitImpl(Box<EmitTraitOutput>),
-    /// The contracts of the functions of a group; what the module got is to be undone.
-    Contracts(Vec<GroupContract>),
+    /// The contracts of the functions of a group, as their joint inference gives them, and
+    /// their shapes; what the module got is to be undone.
+    Contracts {
+        discovered: Vec<GroupContract>,
+        shapes: Vec<GroupContract>,
+    },
+    /// The contract that a body gets against the current contracts of its group, if it has the
+    /// types of its shape, and the functions of the group that it uses; what the module got is
+    /// to be undone.
+    Refined {
+        contract: Option<GroupContract>,
+        uses: Vec<LocalFunctionId>,
+    },
+}
+
+/// The functions of a recursive group as a body sees them, in the order of the group.
+#[derive(Clone, Copy)]
+pub(super) struct GroupCallees<'a> {
+    /// The contract of each function.
+    contracts: &'a [GroupContract],
+    /// The slot reserved for each function.
+    slots: &'a [LocalFunctionId],
 }
 
 /// How [`emit_functions`] treats a group.
@@ -600,25 +671,28 @@ pub(super) enum GroupMode<'a> {
     Normal,
     /// Infer jointly with flexible written effect generics, and only produce contracts.
     Discover,
+    /// Infer the body at `index` alone, with the types of its shape and its unwritten effects
+    /// to infer, against the current contracts of its group, and only produce its next contract.
+    Refine {
+        /// The shape of each function of the group.
+        shapes: &'a [GroupContract],
+        callees: GroupCallees<'a>,
+        index: usize,
+    },
     /// Check the body at `index` against its fixed contract, in the slot reserved for it.
     Validate {
-        /// The contracts of the whole group, in the order of its functions.
-        contracts: &'a [GroupContract],
-        /// The slot reserved for each function of the group.
-        slots: &'a [LocalFunctionId],
+        callees: GroupCallees<'a>,
         index: usize,
     },
 }
 
 impl GroupMode<'_> {
-    /// In validation, the contract of the body being checked and its slot.
-    fn validated(&self) -> Option<(&GroupContract, LocalFunctionId)> {
+    /// For a body inferred alone, the contract through which it is called, and its slot.
+    fn contract_and_slot(&self) -> Option<(&GroupContract, LocalFunctionId)> {
         match self {
-            Self::Validate {
-                contracts,
-                slots,
-                index,
-            } => Some((&contracts[*index], slots[*index])),
+            Self::Refine { callees, index, .. } | Self::Validate { callees, index } => {
+                Some((&callees.contracts[*index], callees.slots[*index]))
+            }
             _ => None,
         }
     }
@@ -626,23 +700,38 @@ impl GroupMode<'_> {
     fn is_validation(&self) -> bool {
         matches!(self, Self::Validate { .. })
     }
+
+    /// Whether the types of the signatures are known before the bodies are inferred.
+    fn has_fixed_types(&self) -> bool {
+        matches!(self, Self::Refine { .. } | Self::Validate { .. })
+    }
 }
 
-/// The instance of its contract that a body of a recursive group is checked against: the
-/// contract with its quantifiers rigid, the written ones being the generics of the body.
+/// What the effect quantifiers of a contract are in a body, besides its written generics.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ContractEffects {
+    /// Fixed: the body is checked against the contract.
+    Rigid,
+    /// To infer: the contract only gives the places of the effects.
+    Inferred,
+}
+
+/// The instance of a contract that a body of a recursive group takes as its signature: the
+/// type quantifiers are rigid, the written generics are those of the body, and the other effect
+/// quantifiers are as `effects` says.
 /// Calls of the body to the functions of the group take this instance of the types.
-/// The body is the one at `index` in the group; `explicit_root_tys` and `written_effects` are
-/// its written type and effect generics, in the order of their declaration.
+/// `explicit_root_tys` and `written_effects` are the written type and effect generics of the
+/// body, in the order of their declaration. The type quantifiers of the result are in the
+/// order of those of `contract`.
 fn contract_instance_for_body(
-    contracts: &[GroupContract],
-    slots: &[LocalFunctionId],
-    index: usize,
+    contract: &GroupContract,
+    effects: ContractEffects,
+    callees: GroupCallees<'_>,
     explicit_root_tys: &[Type],
     written_effects: &[EffectVar],
     module_id: ModuleId,
     ty_inf: &mut TypeInference,
 ) -> TypeScheme<FnType> {
-    let contract = &contracts[index];
     let mut ty_subst = TypeInstSubst::default();
     for (root, var) in explicit_root_tys.iter().zip(&contract.written_types) {
         ty_subst.insert(*var, *root);
@@ -655,9 +744,10 @@ fn contract_instance_for_body(
     // Contracts share the variables of joint inference, which has one type instance per
     // group: calls in this body take the same instance, whichever function they call.
     let mut instance_of = ty_subst.clone();
-    let instances = contracts
+    let instances = callees
+        .contracts
         .iter()
-        .zip(slots.iter())
+        .zip(callees.slots.iter())
         .map(|(callee, callee_id)| {
             let tys = callee
                 .scheme
@@ -680,9 +770,10 @@ fn contract_instance_for_body(
         .map(|(param, var)| (EffectVar::new(param as u32), EffType::single_variable(*var)))
         .collect::<EffectsInstSubst>();
     for var in contract.scheme.eff_quantifiers.iter().sorted() {
-        eff_subst
-            .entry(*var)
-            .or_insert_with(|| ty_inf.fresh_rigid_effect_var_ty(None));
+        eff_subst.entry(*var).or_insert_with(|| match effects {
+            ContractEffects::Rigid => ty_inf.fresh_rigid_effect_var_ty(None),
+            ContractEffects::Inferred => ty_inf.fresh_effect_var_ty(),
+        });
     }
     let ty_quantifiers = contract
         .scheme
@@ -905,6 +996,203 @@ fn read_signature_rows(
     }
 }
 
+/// A written row of a signature, in the variables of its contract.
+fn written_row(declaration: &GroupFunctionDeclaration, row: &EffType) -> EffType {
+    let subst = declaration
+        .written_vars
+        .iter()
+        .map(|(var, param)| {
+            (
+                *var,
+                EffType::single_variable(EffectVar::new(*param as u32)),
+            )
+        })
+        .collect();
+    row.instantiate(&subst)
+}
+
+/// The shape of a function of a group: the types of its signature and of its requirements,
+/// with the written rows as written, and every other row a variable of its own, which marks
+/// the place of an effect to infer. The effect it performs is left out.
+fn shape_scheme(
+    fn_ty: &FnType,
+    constraints: &[PubTypeConstraint],
+    written_types: &[TypeVar],
+    declaration: &GroupFunctionDeclaration,
+    ty_inf: &mut UnifiedTypeInference,
+) -> TypeScheme<FnType> {
+    let written = &declaration.written_vars;
+    let next = Cell::new(declaration.written_markers.len() as u32);
+    let fresh = || {
+        next.set(next.get() + 1);
+        EffType::single_variable(EffectVar::new(next.get() - 1))
+    };
+    let signature_row = |row: &EffType, is_written: bool| {
+        if is_written {
+            written_row(declaration, row)
+        } else {
+            fresh()
+        }
+    };
+    let args = fn_ty
+        .args
+        .iter()
+        .map(|arg| {
+            walk_signature(
+                &FnType::new(vec![*arg], Type::unit(), EffType::empty()),
+                ty_inf,
+                written,
+                |_, row, is_written| signature_row(row, is_written),
+            )
+            .args[0]
+        })
+        .collect::<Vec<_>>();
+    let ret = walk_signature(
+        &FnType::new(vec![], fn_ty.ret, EffType::empty()),
+        ty_inf,
+        written,
+        |_, row, is_written| signature_row(row, is_written),
+    )
+    .ret;
+    // One requirement per application: the joint inference can hold several that differ by
+    // their effects only.
+    let mut shapes = Vec::new();
+    let constraints = constraints
+        .iter()
+        .filter_map(|constraint| {
+            let mapped = constraint.map(&mut RowWalker {
+                ty_inf,
+                written_vars: written,
+                in_solved: true,
+                visit: |_: &mut UnifiedTypeInference, _: &EffType, _: bool| fresh(),
+            });
+            let shape = mapped.map(&mut EffectErasingMapper);
+            (!shapes.contains(&shape)).then(|| {
+                shapes.push(shape);
+                mapped
+            })
+        })
+        .collect::<Vec<_>>();
+    let ty = FnType::new(args, ret, EffType::empty());
+    let ty_quantifiers = written_types
+        .iter()
+        .copied()
+        .chain(TypeScheme::list_ty_vars(&ty, constraints.iter()))
+        .unique()
+        .collect();
+    let eff_quantifiers = TypeScheme::<FnType>::list_eff_vars(&ty, constraints.iter());
+    TypeScheme {
+        ty_quantifiers,
+        eff_quantifiers,
+        ty,
+        constraints,
+    }
+}
+
+/// Rewrites what a body published in the variables of its contract.
+struct ContractVariables<'a> {
+    /// The contract's type variable for each type variable of the body's instance.
+    types: &'a FxHashMap<TypeVar, TypeVar>,
+    /// The contract's effect variable for each one met so far: the written generics, then the
+    /// others as they are met, so that the next one is numbered by the size of the map.
+    effects: FxHashMap<EffectVar, EffectVar>,
+    /// Whether a type variable was met that is not of the instance.
+    met_other_type: bool,
+}
+
+impl TypeMapper for ContractVariables<'_> {
+    fn map_type(&mut self, ty: Type) -> Type {
+        let var = { ty.data().as_variable().copied() };
+        match var.map(|var| self.types.get(&var)) {
+            Some(Some(contract_var)) => Type::variable(*contract_var),
+            Some(None) => {
+                self.met_other_type = true;
+                ty
+            }
+            None => ty,
+        }
+    }
+
+    fn map_mut_type(&mut self, mut_ty: MutType) -> MutType {
+        mut_ty
+    }
+
+    fn map_effect_type(&mut self, eff_ty: &EffType) -> EffType {
+        let mut result = EffType::empty();
+        for effect in eff_ty.iter() {
+            let Effect::Variable(var) = effect else {
+                result.insert(effect);
+                continue;
+            };
+            let next = EffectVar::new(self.effects.len() as u32);
+            let contract_var = *self.effects.entry(var).or_insert(next);
+            result.insert(Effect::Variable(contract_var));
+        }
+        result
+    }
+}
+
+/// The next contract of a function, from the scheme that its body published when inferred
+/// against the current contracts: the types of its shape, with the effects of that scheme.
+/// `instance_tys` are the type variables that the body had for the type quantifiers of
+/// `shape`, and `written_effects` its written effect generics.
+/// There is none if the scheme does not have the types of the shape.
+fn refined_contract(
+    shape: &GroupContract,
+    published: &TypeScheme<FnType>,
+    instance_tys: &[TypeVar],
+    written_effects: &[EffectVar],
+    ty_inf: &mut UnifiedTypeInference,
+) -> Option<GroupContract> {
+    let mut types = FxHashMap::default();
+    for (shape_var, instance_var) in shape.scheme.ty_quantifiers.iter().zip(instance_tys) {
+        let resolved = ty_inf.substitute_in_type(Type::variable(*instance_var));
+        let var = *resolved.data().as_variable()?;
+        if types.insert(var, *shape_var).is_some() {
+            return None;
+        }
+    }
+    let mut variables = ContractVariables {
+        types: &types,
+        effects: written_effects
+            .iter()
+            .enumerate()
+            .map(|(param, var)| (*var, EffectVar::new(param as u32)))
+            .collect(),
+        met_other_type: false,
+    };
+    let ty = published.ty.map(&mut variables);
+    let constraints = published
+        .constraints
+        .iter()
+        .map(|constraint| constraint.map(&mut variables))
+        .unique()
+        .collect::<Vec<_>>();
+    if variables.met_other_type
+        || ty.map(&mut EffectErasingMapper) != shape.scheme.ty.map(&mut EffectErasingMapper)
+    {
+        return None;
+    }
+    let ty_quantifiers = shape
+        .written_types
+        .iter()
+        .copied()
+        .chain(TypeScheme::list_ty_vars(&ty, constraints.iter()))
+        .unique()
+        .collect();
+    let eff_quantifiers = TypeScheme::<FnType>::list_eff_vars(&ty, constraints.iter());
+    Some(GroupContract {
+        scheme: TypeScheme {
+            ty_quantifiers,
+            eff_quantifiers,
+            ty,
+            constraints,
+        },
+        written_count: shape.written_count,
+        written_types: shape.written_types.clone(),
+    })
+}
+
 /// The one mapping from markers to the variables of a contract, used for all of its rows.
 struct ContractTranslation<'a> {
     /// Markers sharing a row, with the variable that stands for them. A marker in none of them is
@@ -987,18 +1275,7 @@ impl<'a> ContractTranslation<'a> {
         if !is_written {
             return self.inferred_row(ty_inf, row);
         }
-        let subst = self
-            .declaration
-            .written_vars
-            .iter()
-            .map(|(var, param)| {
-                (
-                    *var,
-                    EffType::single_variable(EffectVar::new(*param as u32)),
-                )
-            })
-            .collect();
-        row.instantiate(&subst)
+        written_row(self.declaration, row)
     }
 
     /// Translate a signature and its constraints into a type scheme.
@@ -1140,7 +1417,7 @@ fn distinct_written_type_vars(
     Ok(vars)
 }
 
-/// Build the contracts of a group from the solution of its joint inference.
+/// Build the contracts of a group from the solution of its joint inference, and its shapes.
 ///
 /// Written rows are kept. Any other row is read from the markers that reach it: a function's own
 /// generics stay, and other markers become a quantifier, merged per row because a row holds at
@@ -1150,7 +1427,7 @@ fn build_group_contracts(
     declarations: &[GroupFunctionDeclaration],
     written_type_roots: &[Vec<Type>],
     ty_inf: &mut UnifiedTypeInference,
-) -> Result<Vec<GroupContract>, InternalCompilationError> {
+) -> Result<(Vec<GroupContract>, Vec<GroupContract>), InternalCompilationError> {
     ty_inf.normalize_remaining_constraints();
     let constraints = ty_inf.remaining_constraints().to_vec();
     for constraint in &constraints {
@@ -1177,6 +1454,7 @@ fn build_group_contracts(
     }
 
     let mut contracts = Vec::new();
+    let mut shapes = Vec::new();
     for ((fn_ty, declaration), roots) in fn_tys.iter().zip(declarations).zip(written_type_roots) {
         let resolved_roots = roots
             .iter()
@@ -1202,17 +1480,29 @@ fn build_group_contracts(
         let rows = read_signature_rows(fn_ty, declaration, &related_constraints, ty_inf);
         let translation = ContractTranslation::new(&rows, declaration)?;
         let scheme = translation.scheme(fn_ty, &related_constraints, &written_types, ty_inf);
+        let shape = shape_scheme(
+            fn_ty,
+            &related_constraints,
+            &written_types,
+            declaration,
+            ty_inf,
+        );
+        shapes.push(GroupContract {
+            scheme: shape,
+            written_count: declaration.written_markers.len(),
+            written_types: written_types.clone(),
+        });
         contracts.push(GroupContract {
             scheme,
             written_count: declaration.written_markers.len(),
             written_types,
         });
     }
-    Ok(contracts)
+    Ok((contracts, shapes))
 }
 
 /// The exit of discovery: the contracts of the functions of a group, read from their joint
-/// inference.
+/// inference, and their shapes.
 #[allow(clippy::too_many_arguments)]
 fn discovered_contracts<'func>(
     output: &Module,
@@ -1223,7 +1513,7 @@ fn discovered_contracts<'func>(
     recursive_function_ids: &FxHashSet<FunctionId>,
     pending_functions: &PendingModuleFunctions,
     group_declarations: &[GroupFunctionDeclaration],
-) -> Result<Vec<GroupContract>, InternalCompilationError> {
+) -> Result<(Vec<GroupContract>, Vec<GroupContract>), InternalCompilationError> {
     // A return that only diverges becomes `never` here, where the whole group is seen:
     // validation checks one body, and must keep its contract as it is.
     for (id, ret_var) in unconstrained_diverging_returns(
@@ -1376,7 +1666,7 @@ where
     }
     let checkpoint = output.checkpoint(&[]);
     let warning_count = warnings.len();
-    let Emitted::Contracts(contracts) = emit_functions(
+    let Emitted::Contracts { discovered, shapes } = emit_functions(
         output,
         solver_arena,
         &ast_functions,
@@ -1394,9 +1684,10 @@ where
     output.restore(checkpoint);
     warnings.truncate(warning_count);
 
-    // Every function is visible through its contract before any body is checked.
+    // Every function is visible through its contract before any body is inferred alone.
     let mut ids = Vec::new();
-    for (input, contract) in ast_functions().zip(&contracts) {
+    let bottoms = shapes.iter().map(GroupContract::bottom).collect::<Vec<_>>();
+    for (input, contract) in ast_functions().zip(&bottoms) {
         let function = input.function;
         let definition = CallableDefinition::new_with_generic_params_and_attributes(
             contract.scheme.clone(),
@@ -1409,6 +1700,26 @@ where
         .with_result_convention(input.kind.return_convention());
         let descr = ModuleFunction::placeholder(definition, Some(function_spans(function)));
         ids.push(output.add_function_with_visibility(function.name.0, descr, function.visibility));
+    }
+    // A group behaves as its unrolling: each body is inferred against the contracts of the
+    // others, starting from those of functions that call nothing, until no contract changes.
+    // What the joint inference found stands in if a body cannot be inferred this way.
+    let contracts = refine_group_contracts(
+        output,
+        solver_arena,
+        &ast_functions,
+        desugared_arena,
+        others,
+        recursive_function_names,
+        capabilities,
+        warnings,
+        &shapes,
+        bottoms,
+        &ids,
+    )
+    .unwrap_or(discovered);
+    for (id, contract) in ids.iter().zip(&contracts) {
+        output.functions[id.as_index()].definition.ty_scheme = contract.scheme.clone();
     }
     // Each body has its own inference: what one assumes about a trait application says nothing
     // about another, whose generics are different.
@@ -1425,8 +1736,10 @@ where
             capabilities,
             warnings,
             GroupMode::Validate {
-                contracts: &contracts,
-                slots: &ids,
+                callees: GroupCallees {
+                    contracts: &contracts,
+                    slots: &ids,
+                },
                 index,
             },
         )
@@ -1441,6 +1754,120 @@ where
         })?;
     }
     Ok(())
+}
+
+/// The contracts of a group as a fixed point. In each round, every body is inferred alone
+/// against the contracts of the round before, with the types of its shape, which gives its next
+/// contract; the first round reads `bottoms`, and the last one changes nothing. The contracts
+/// after `n` rounds are those of the group unrolled `n` times, whatever the order of its
+/// functions. A body is not inferred again if no contract that it uses changed.
+///
+/// There is no result if a body cannot be inferred so, or does not keep the types of its shape.
+#[allow(clippy::too_many_arguments)]
+fn refine_group_contracts<'a, F, I>(
+    output: &mut Module,
+    solver_arena: &mut NodeArena,
+    ast_functions: &F,
+    desugared_arena: &DExprArena,
+    others: &Modules,
+    recursive_function_names: &FxHashSet<Ustr>,
+    capabilities: CompilationCapabilities,
+    warnings: &mut Vec<CompilationWarning>,
+    shapes: &[GroupContract],
+    bottoms: Vec<GroupContract>,
+    slots: &[LocalFunctionId],
+) -> Option<Vec<GroupContract>>
+where
+    I: Iterator<Item = EmitFunctionInput<'a>>,
+    F: Fn() -> I,
+{
+    let mut contracts = bottoms;
+    // The functions of the group that each body uses, once it was inferred.
+    let mut uses: Vec<Option<Vec<usize>>> = vec![None; contracts.len()];
+    // Whether each contract changed in the round before.
+    let mut changed = vec![false; contracts.len()];
+    for _ in 0..max_refinement_rounds(shapes) {
+        let mut next = Vec::new();
+        for index in 0..contracts.len() {
+            if let Some(uses) = &uses[index]
+                && !uses.iter().any(|used| changed[*used])
+            {
+                continue;
+            }
+            let checkpoint = output.checkpoint(slots);
+            let warning_count = warnings.len();
+            let single = || ast_functions().skip(index).take(1);
+            let emitted = emit_functions(
+                output,
+                solver_arena,
+                &single,
+                desugared_arena,
+                others,
+                None,
+                recursive_function_names,
+                capabilities,
+                warnings,
+                GroupMode::Refine {
+                    shapes,
+                    callees: GroupCallees {
+                        contracts: &contracts,
+                        slots,
+                    },
+                    index,
+                },
+            );
+            output.restore(checkpoint);
+            warnings.truncate(warning_count);
+            let Ok(Emitted::Refined {
+                contract: Some(contract),
+                uses: used,
+            }) = emitted
+            else {
+                return None;
+            };
+            uses[index] = Some(
+                used.iter()
+                    .filter_map(|used| slots.iter().position(|slot| slot == used))
+                    .collect(),
+            );
+            if !contract.is_same_as(&contracts[index]) {
+                next.push((index, contract));
+            }
+        }
+        if next.is_empty() {
+            return Some(contracts);
+        }
+        changed.fill(false);
+        for (index, contract) in next {
+            output.functions[slots[index].as_index()]
+                .definition
+                .ty_scheme = contract.scheme.clone();
+            contracts[index] = contract;
+            changed[index] = true;
+        }
+    }
+    None
+}
+
+/// A bound on the rounds that the contracts of a group take to settle.
+///
+/// A round that is not the last changes a contract, and a contract only changes by getting
+/// weaker. A row of a contract, which is the effect at one place of its types or requirements,
+/// or the effect that the function performs, gets weaker in few ways: it gains one of the
+/// primitive effects, its variable is merged with that of another row, or it is bounded by a
+/// restriction. So the contracts change at most as many times as they have rows, times these
+/// ways, and one more round finds nothing to change.
+///
+/// The bound is not reached unless a contract fails to get weaker, which would be a defect.
+fn max_refinement_rounds(shapes: &[GroupContract]) -> usize {
+    const PRIMITIVE_EFFECTS: usize = 3;
+    const WAYS_TO_WEAKEN_A_ROW: usize = PRIMITIVE_EFFECTS + 2;
+    let rows = shapes
+        .iter()
+        // A shape has a variable for each row of its types and requirements.
+        .map(|shape| shape.scheme.eff_quantifiers.len() + 1)
+        .sum::<usize>();
+    1 + rows * WAYS_TO_WEAKEN_A_ROW
 }
 
 /// Whether a function of a group lets the group infer the type of a parameter, or part of it.
@@ -1565,6 +1992,8 @@ where
     let mut ty_inf = TypeInference::default();
     let mut group_declarations = Vec::new();
     let mut body_tys: Vec<FnType> = Vec::new();
+    // In refinement, the type variables that the body has for the type quantifiers of its shape.
+    let mut refined_instance_tys = Vec::new();
     let mut impl_annotation_subst = None;
     let mut outer_annotation_var_count = 0;
     let mut outer_annotation_eff_var_count = 0;
@@ -1984,26 +2413,45 @@ where
                     .expect("a written effect generic maps to a variable")
             })
             .collect();
-        let contract_instance = if let GroupMode::Validate {
-            contracts,
-            slots,
-            index,
-        } = &mode
-        {
-            let instance = contract_instance_for_body(
-                contracts,
-                slots,
-                *index,
-                &explicit_root_tys,
-                &written_effects,
-                output.module_id(),
-                &mut ty_inf,
-            );
-            fn_type = instance.ty.clone();
-            body_tys.push(fn_type.clone());
-            Some(instance)
-        } else {
-            None
+        let contract_instance = match &mode {
+            GroupMode::Validate { callees, index } => {
+                let instance = contract_instance_for_body(
+                    &callees.contracts[*index],
+                    ContractEffects::Rigid,
+                    *callees,
+                    &explicit_root_tys,
+                    &written_effects,
+                    output.module_id(),
+                    &mut ty_inf,
+                );
+                fn_type = instance.ty.clone();
+                body_tys.push(fn_type.clone());
+                Some(instance)
+            }
+            GroupMode::Refine {
+                shapes,
+                callees,
+                index,
+            } => {
+                // The shape gives the types, and the places of the effects to infer.
+                let instance = contract_instance_for_body(
+                    &shapes[*index],
+                    ContractEffects::Inferred,
+                    *callees,
+                    &explicit_root_tys,
+                    &written_effects,
+                    output.module_id(),
+                    &mut ty_inf,
+                );
+                fn_type = FnType::new(instance.ty.args, instance.ty.ret, effects.clone());
+                body_tys.push(fn_type.clone());
+                for constraint in instance.constraints {
+                    ty_inf.add_pub_constraint(constraint);
+                }
+                refined_instance_tys = instance.ty_quantifiers;
+                None
+            }
+            GroupMode::Normal | GroupMode::Discover => None,
         };
 
         let declared_signature = contract_instance
@@ -2076,7 +2524,7 @@ where
 
         let spans = function_spans(input.function);
         // Other bodies see the contract, and instantiate it at each call.
-        let ty_scheme = if let Some((contract, _)) = mode.validated() {
+        let ty_scheme = if let Some((contract, _)) = mode.contract_and_slot() {
             contract.scheme.clone()
         } else {
             TypeScheme::new_just_type(fn_type)
@@ -2091,7 +2539,7 @@ where
         )
         .with_result_convention(return_convention);
         let descr = ModuleFunction::placeholder(definition, Some(spans));
-        let id = if let Some((_, id)) = mode.validated() {
+        let id = if let Some((_, id)) = mode.contract_and_slot() {
             output.functions[id.as_index()] = descr;
             id
         } else if let Some(placeholder_ids) = trait_ctx
@@ -2366,13 +2814,18 @@ where
             pending = pending.with_subscript_member_name(subscript_name);
         }
         set_pending_function(output, &mut pending_functions, *id, pending);
-        if let Some((contract, _)) = mode.validated() {
+        if let Some((contract, _)) = mode.contract_and_slot() {
             // Calls in this body, to itself, still instantiate the contract.
             output.functions[id.as_index()].definition.ty_scheme = contract.scheme.clone();
         }
         output.deps.extend(new_deps);
         ty_inf.own_constraints_since(constraint_scope, *id);
     }
+    let used_group_functions = ty_inf
+        .used_group_functions()
+        .iter()
+        .map(|function| function.function)
+        .collect::<Vec<_>>();
     // From here on, each function is its body's rigid instance, as in ordinary emission.
     for (id, ty) in local_fns.iter().zip(&body_tys) {
         output.functions[id.as_index()].definition.ty_scheme =
@@ -3125,7 +3578,7 @@ where
         }
 
         if matches!(mode, GroupMode::Discover) {
-            return Ok(Emitted::Contracts(discovered_contracts(
+            let (discovered, shapes) = discovered_contracts(
                 output,
                 &mut ty_inf,
                 ast_functions(),
@@ -3134,7 +3587,8 @@ where
                 &recursive_function_ids,
                 &pending_functions,
                 &group_declarations,
-            )?));
+            )?;
+            return Ok(Emitted::Contracts { discovered, shapes });
         }
 
         // A type variable of the bodies that nothing determines defaults to `never`; the
@@ -3170,7 +3624,7 @@ where
         // Recursive-return defaulting inspects the final constraints. A contract already says
         // what its function returns.
         ty_inf.normalize_remaining_constraints();
-        if !mode.is_validation() {
+        if !mode.has_fixed_types() {
             default_unconstrained_diverging_returns_to_never(
                 output,
                 &mut ty_inf,
@@ -3371,6 +3825,23 @@ where
             &local_fns,
             &FxHashSet::default(),
         );
+
+        if let GroupMode::Refine { shapes, index, .. } = &mode {
+            let published = &output.functions[local_fns[0].as_index()]
+                .definition
+                .ty_scheme;
+            let contract = refined_contract(
+                &shapes[*index],
+                published,
+                &refined_instance_tys,
+                &function_written_effects[0],
+                &mut ty_inf,
+            );
+            return Ok(Emitted::Refined {
+                contract,
+                uses: used_group_functions,
+            });
+        }
 
         // Safety check: make sure that there are no unused constraints.
         let module_env = ModuleEnv::new(output, others);

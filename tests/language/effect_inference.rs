@@ -1466,7 +1466,7 @@ fn unannotated_helper_keeps_its_own_generic_between_written_ones() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn concrete_effect_through_an_unannotated_helper_pins_the_helper() {
+fn concrete_effect_through_an_unannotated_helper_leaves_the_helper_generic() {
     let f = "fn f<! E>(g: () -> int ! E, n: int) -> int {
         let a = [1];
         if n > 0 {
@@ -1488,10 +1488,12 @@ fn concrete_effect_through_an_unannotated_helper_pins_the_helper() {
         "f",
         "fn f<! E>(g: () -> int ! E, n: int) -> int ! (fallible, E)",
     );
+    // `k` gets `|| a[0]` from `f` once, but its own callback can be any: it behaves as if
+    // `f` were written out in it.
     assert_signature_in_both_orders(
         [f, k],
         "k",
-        "fn k(g: () -> int ! fallible, n: int) -> int ! fallible",
+        "fn k<! e₀>(g: () -> int ! e₀, n: int) -> int ! (fallible, e₀)",
     );
 }
 
@@ -1841,7 +1843,46 @@ fn calls_in_a_group_share_its_types() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn conflict_with_an_inferred_signature_names_the_function_to_write() {
+fn an_effect_travels_around_a_long_cycle_in_any_order() {
+    // The failure of `f8` reaches `f0` after one round for each function between them.
+    let mut functions = vec![
+        "fn f0<! E>(g: () -> int ! E, n: int) -> int { if n == 0 { g() } else { f1(g, n - 1) } }"
+            .to_string(),
+    ];
+    for index in 1..8 {
+        functions.push(format!(
+            "fn f{index}(g, n: int) -> int {{ if n == 0 {{ g() }} else {{ f{}(g, n - 1) }} }}",
+            index + 1
+        ));
+    }
+    functions.push(
+        "fn f8(g, n: int) -> int { if n == 0 { idiv(4, 2) } else { f0(g, n - 1) } }".to_string(),
+    );
+    let reversed = functions.iter().rev().cloned().collect::<Vec<_>>();
+    for functions in [functions, reversed] {
+        let src = functions.join("\n");
+        assert_val_eq!(
+            TestSession::new().run(&format!("{src}\nf0(|| 1, 0) + f0(|| 1, 8)")),
+            int(3)
+        );
+        assert_eq!(
+            signature(&mut TestSession::new(), &src, "f0"),
+            "fn f0<! E>(g: () -> int ! E, n: int) -> int ! (fallible, E)"
+        );
+        for name in ["f1", "f4", "f8"] {
+            assert_eq!(
+                signature(&mut TestSession::new(), &src, name),
+                format!("fn {name}<! e₀>(g: () -> int ! e₀, n: int) -> int ! (fallible, e₀)")
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_inferred_function_of_a_group_takes_each_use_of_it_apart() {
+    // `s` calls `r` with a callback that can fail and with its own `f1`: two instances of the
+    // effect of `r`'s second parameter.
     let r = "fn r(f0, f1, n: int) -> int {
         if n > 0 {
             s(f1, f1, n - 1)
@@ -1856,15 +1897,17 @@ fn conflict_with_an_inferred_signature_names_the_function_to_write() {
             f1(n)
         }
     }";
-    for [first, second] in [[r, s], [s, r]] {
-        let error = TestSession::new().fail_compilation(&format!("{first}\n{second}"));
-        match &*error {
-            CompilationErrorImpl::EffectConflictWithInferredSignature { function, .. } => {
-                assert_eq!(*function, ustr("r"));
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-    }
+    assert_in_both_orders("", [r, s], "s(|x| x, |x| x + 1, 2)", 1);
+    assert_signature_in_both_orders(
+        [r, s],
+        "r",
+        "fn r<! e₀, e₁>(f0: (int) -> int ! e₀, f1: (int) -> int ! e₁, n: int) -> int ! (fallible, e₁)",
+    );
+    assert_signature_in_both_orders(
+        [r, s],
+        "s",
+        "fn s<! E0, E1>(f0: (int) -> int ! E0, f1: (int) -> int ! E1, n: int) -> int ! (fallible, E1)",
+    );
 }
 
 #[test]

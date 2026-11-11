@@ -245,12 +245,17 @@ joins the effects of `h` only if its body performs it. The signature of a trait 
 also when the method has a default body: an effect left unwritten there is the empty one, as it
 is in a type definition.
 
-A recursive group with declared effect variables is inferred in two steps. Joint inference of the
-group proposes a contract for each function, keeping its written effects as written. Each body is
-then checked alone against these fixed contracts, with its declared variables rigid, and each call
-in the group instantiates its callee's contract. The result is sound whatever the first step
-proposed, but a contract may be coarser than the least one. Only effects are instantiated per call
-in this way; types keep one instance per group.
+A recursive group with declared effect variables behaves, for effects, as its unrolling: each
+function calling copies of the others, down to functions that call nothing. It is inferred in three
+steps. Joint inference of the group gives the types of each signature, and the places of the
+effects left to infer. From the contracts of functions that call nothing, each body is then
+inferred alone against the current contracts of the group, by ordinary inference, which gives its
+next contract, until none changes; a contract only gets weaker, so this ends. Each body is finally
+checked alone against these fixed contracts, with its declared variables rigid, which makes the
+result sound whatever the previous steps proposed. In the last two steps each call in the group
+instantiates its callee's contract. Only effects are instantiated per call in this way; types keep
+one instance per group. The joint inference still solves effects with one instance per function,
+and rejects a group that it cannot solve so.
 
 ### Solving
 

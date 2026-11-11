@@ -147,6 +147,8 @@ pub struct TypeInference {
     /// For each function of a recursive group checked against contracts, the types its type
     /// quantifiers take in this body: the group keeps one type instance, only effects vary.
     group_type_instances: FxHashMap<FunctionId, Vec<Type>>,
+    /// The functions of that group that this body uses.
+    used_group_functions: FxHashSet<FunctionId>,
     pub(super) evidence_uses: EvidenceUses,
     pub(super) ty_unification_table: InPlaceUnificationTable<TyVarKey>,
     pub(super) ty_constraints: Vec<TypeConstraint>,
@@ -539,6 +541,11 @@ impl TypeInference {
         self.group_type_instances = instances;
     }
 
+    /// The functions of the recursive group that the bodies inferred so far use.
+    pub(crate) fn used_group_functions(&self) -> &FxHashSet<FunctionId> {
+        &self.used_group_functions
+    }
+
     /// A call to a function of the group takes the body's instance of its types.
     fn share_group_type_instance(
         &mut self,
@@ -550,6 +557,7 @@ impl TypeInference {
         let Some(instance) = self.group_type_instances.get(&function) else {
             return;
         };
+        self.used_group_functions.insert(function);
         for (var, expected) in ty_quantifiers.iter().zip(instance.clone()) {
             self.ty_constraints.push(TypeConstraint::SameType {
                 current: subst.0[var],
