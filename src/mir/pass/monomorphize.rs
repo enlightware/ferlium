@@ -2277,40 +2277,57 @@ fn lifecycle_instantiation(
 /// Binds the type variables of `pattern` so that it becomes the concrete `ty`, if it can.
 /// Conservative: a variable under a function or subscript type is not matched.
 fn bind_type_variables(pattern: Type, ty: Type, bindings: &mut FxHashMap<TypeVar, Type>) -> bool {
-    if pattern == ty {
+    bind_type_variables_from(pattern, ty, bindings, &mut FxHashSet::default())
+}
+
+/// `visited` holds the pairs already entered: a recursive type leads back to them, and they
+/// bind nothing more the second time.
+fn bind_type_variables_from(
+    pattern: Type,
+    ty: Type,
+    bindings: &mut FxHashMap<TypeVar, Type>,
+    visited: &mut FxHashSet<(Type, Type)>,
+) -> bool {
+    if pattern == ty || !visited.insert((pattern, ty)) {
         return true;
     }
-    let all = |patterns: &[Type], tys: &[Type], bindings: &mut FxHashMap<TypeVar, Type>| {
+    let all = |patterns: &[Type],
+               tys: &[Type],
+               bindings: &mut FxHashMap<TypeVar, Type>,
+               visited: &mut FxHashSet<(Type, Type)>| {
         patterns.len() == tys.len()
             && patterns
                 .iter()
                 .zip(tys)
-                .all(|(pattern, ty)| bind_type_variables(*pattern, *ty, bindings))
+                .all(|(pattern, ty)| bind_type_variables_from(*pattern, *ty, bindings, visited))
     };
     let fields = |patterns: &[(Ustr, Type)],
                   tys: &[(Ustr, Type)],
-                  bindings: &mut FxHashMap<TypeVar, Type>| {
+                  bindings: &mut FxHashMap<TypeVar, Type>,
+                  visited: &mut FxHashSet<(Type, Type)>| {
         patterns.len() == tys.len()
             && patterns
                 .iter()
                 .zip(tys)
                 .all(|((name, pattern), (other, ty))| {
-                    name == other && bind_type_variables(*pattern, *ty, bindings)
+                    name == other && bind_type_variables_from(*pattern, *ty, bindings, visited)
                 })
     };
     match (&*pattern.data(), &*ty.data()) {
         (TypeKind::Variable(variable), _) => *bindings.entry(*variable).or_insert(ty) == ty,
         (TypeKind::Native(pattern), TypeKind::Native(native)) => {
             pattern.bare_ty == native.bare_ty
-                && all(&pattern.arguments, &native.arguments, bindings)
+                && all(&pattern.arguments, &native.arguments, bindings, visited)
         }
-        (TypeKind::Tuple(patterns), TypeKind::Tuple(tys)) => all(patterns, tys, bindings),
+        (TypeKind::Tuple(patterns), TypeKind::Tuple(tys)) => all(patterns, tys, bindings, visited),
         (TypeKind::Record(patterns), TypeKind::Record(tys))
-        | (TypeKind::Variant(patterns), TypeKind::Variant(tys)) => fields(patterns, tys, bindings),
+        | (TypeKind::Variant(patterns), TypeKind::Variant(tys)) => {
+            fields(patterns, tys, bindings, visited)
+        }
         (TypeKind::Named(pattern), TypeKind::Named(named)) => {
             pattern.def == named.def
                 && pattern.effect_params == named.effect_params
-                && all(&pattern.params, &named.params, bindings)
+                && all(&pattern.params, &named.params, bindings, visited)
         }
         _ => false,
     }

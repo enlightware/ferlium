@@ -592,3 +592,19 @@ fn recursive_alias_equivalent_sharing_finds_trait_impl() {
         int(42)
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_function_over_a_recursive_alias_is_specialized() {
+    // Matching the parameter against the argument type leads back to the same two types.
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            type List<T> = Nil | Cons(T, List<T>);
+            fn f<T>(x: List<T>) { x }
+            f(Cons(1, Nil));
+            1
+        "# }),
+        int(1)
+    );
+}
