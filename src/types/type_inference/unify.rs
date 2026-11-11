@@ -334,14 +334,6 @@ impl UnifiedTypeInference {
         })
     }
 
-    pub(crate) fn seed_effect_marker(&mut self, var: EffectVar) -> EffectVar {
-        self.effects.seed_marker(var, None)
-    }
-
-    pub(crate) fn effect_provenance(&mut self, row: &EffType) -> EffType {
-        self.effects.provenance(row)
-    }
-
     pub(crate) fn fresh_rigid_effect_var(&mut self) -> EffectVar {
         self.effects.fresh_rigid_var(None)
     }

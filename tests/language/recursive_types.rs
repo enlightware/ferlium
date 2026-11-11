@@ -200,6 +200,43 @@ fn inferred_recursive_type_is_generic_over_payloads() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn match_infers_recursive_variant_with_an_effect_generic() {
+    // The payload of `Leaf` is named by no signature, only by what the function requires of
+    // `t`: it is a type of the function all the same.
+    assert_val_eq!(
+        TestSession::new().run(indoc! { r#"
+            fn size<! E>(t, g: () -> int ! E) -> int {
+                match t {
+                    Leaf(x) => g(),
+                    Node(l, r) => size(l, g) + size(r, g),
+                }
+            }
+            size(Node(Leaf(1), Leaf(2)), || 1) + size(Leaf("hello"), || 1)
+        "# }),
+        int(3)
+    );
+    assert_val_eq!(
+        TestSession::new().run(indoc! { r#"
+            fn is_even_len<! E>(l, g: () -> bool ! E) {
+                match l {
+                    Nil => g(),
+                    Cons(h, t) => is_odd_len(t, g),
+                }
+            }
+            fn is_odd_len(l, g) {
+                match l {
+                    Nil => false,
+                    Cons(h, t) => is_even_len(t, g),
+                }
+            }
+            is_even_len(Cons(1, Cons(2, Nil)), || true)
+        "# }),
+        bool(true)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn inferred_recursive_type_unifies_with_declared_alias() {
     let mut session = TestSession::new();
 
@@ -337,6 +374,38 @@ fn constructors_infer_mutually_recursive_variants() {
                 BBack(build_a(n - 1))
             }
             build_a(2)
+        "# }),
+        variant_t1(
+            "ANext",
+            variant_t1(
+                "BBack",
+                variant_t1("ANext", variant_t1("BBack", variant_0("ADone")))
+            )
+        )
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn constructors_infer_mutually_recursive_variants_with_an_effect_generic() {
+    // The functions are inferred one by one against the signatures of the group: the type
+    // that they build together is still one type, not a copy at each call.
+    let mut session = TestSession::new();
+
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            fn build_a<! E>(n, g: () -> int ! E) {
+                if n == 0 {
+                    g();
+                    ADone
+                } else {
+                    ANext(build_b(n, g))
+                }
+            }
+            fn build_b(n, g) {
+                BBack(build_a(n - 1, g))
+            }
+            build_a(2, || 1)
         "# }),
         variant_t1(
             "ANext",

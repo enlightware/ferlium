@@ -716,6 +716,11 @@ pub struct TraitImpls {
     /// Same-module impls not emitted yet, empty once the module is complete.
     #[new(default)]
     pub(crate) pending: Rc<PendingImpls>,
+    /// Whether every application is decided by structure, with effects ignored: set while an
+    /// inference seeks types alone, which effects do not decide. Only meaningful while this
+    /// module is compiled, so not part of its snapshot.
+    #[new(default)]
+    pub(crate) ignores_effects: bool,
 }
 
 impl TraitImpls {

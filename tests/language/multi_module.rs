@@ -2264,6 +2264,88 @@ fn exported_functions_reduce_private_requirements() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn exported_recursive_groups_with_an_effect_generic_reduce_private_requirements() {
+    // The functions are inferred one by one against the contracts of the group, which are in
+    // the public form for all of them: the calls of the group pass the evidence of that form.
+    for g in [
+        "fn g<T, ! E>(x: T, n: int, k: () -> int ! E) -> string { f(x, n, k) }",
+        "fn g(x, n, k) { f(x, n, k) }",
+    ] {
+        let functions = [
+            "pub fn f<T, ! E>(x: T, n: int, k: () -> int ! E) -> string { if n == 0 { k(); hidden([x]) } else { g(x, n - 1, k) } }",
+            g,
+        ];
+        for reverse in [false, true] {
+            let mut functions = functions;
+            if reverse {
+                functions.reverse();
+            }
+            let mut session = TestSession::new();
+            compile_module(
+                &mut session,
+                "a",
+                &format!(
+                    r#"
+                trait Hidden<Self> {{ fn hidden(x: Self) -> string ! fallible; }}
+                impl<T> Hidden for [T] where T: Inspect {{
+                    fn hidden(x: [T]) -> string {{ inspect(x[0]) }}
+                }}
+                {}
+            "#,
+                    functions.join("\n")
+                ),
+            );
+            assert_val_eq!(
+                session.run("a::f(7, 2, || 1)"),
+                string("7"),
+                "{g}, reversed: {reverse}"
+            );
+        }
+    }
+    // A requirement that reduces to nothing.
+    assert_val_eq!(
+        TestSession::new().run(indoc! { "
+            trait Hidden<Self> { fn hidden(x: Self) -> int; }
+            impl<T> Hidden for [T] {
+                fn hidden(x: [T]) -> int { len(x) }
+            }
+            pub fn f<T, ! E>(x: T, n: int, g: () -> int ! E) -> int {
+                if n == 0 {
+                    g();
+                    hidden([x])
+                } else {
+                    f(x, n - 1, g)
+                }
+            }
+            f(true, 1, || 2) + 1
+        " }),
+        int(2)
+    );
+    // A private impl for every type determines the output, and so the type of the result.
+    assert_val_eq!(
+        TestSession::new().run(indoc! { "
+            trait Hidden<Self |-> Out> {
+                fn hidden(x: Self) -> Out;
+            }
+            impl<T> Hidden for <Self = T |-> Out = int> {
+                fn hidden(x: T) -> int { 7 }
+            }
+            pub fn f<T, ! E>(x: T, n: int, g: () -> int ! E) {
+                if n == 0 {
+                    g();
+                    hidden(x)
+                } else {
+                    f(x, n - 1, g)
+                }
+            }
+            f(true, 1, || 2) + 1
+        " }),
+        int(8)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn exported_recursive_groups_reduce_private_requirements() {
     let functions = [
         "pub fn f<T>(x: T, n: int) -> string { if n == 0 { hidden([x]) } else { g(x, n - 1) } }",

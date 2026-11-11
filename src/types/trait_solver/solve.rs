@@ -228,6 +228,24 @@ impl<'a> TraitSolver<'a> {
             input_tys.iter().all(|ty| ty.is_trait_input_resolved()),
             "Getting trait implementation for unresolved input type shapes"
         );
+        if self.impls.ignores_effects && !self.selecting_by_structure {
+            // Only types are sought: the application is decided by structure, as are the
+            // requests it makes in turn.
+            let input_tys = instantiate_types(input_tys, &mut EffectErasingMapper);
+            let requested_output_tys =
+                requested_output_tys.map(|tys| instantiate_types(tys, &mut EffectErasingMapper));
+            self.selecting_by_structure = true;
+            let result = self.solve_impl_application(
+                trait_id,
+                &input_tys,
+                requested_output_tys.as_deref(),
+                None,
+                fn_span,
+                arena,
+            );
+            self.selecting_by_structure = false;
+            return result;
+        }
         // The quantified variables name the top-level request's variables only; nested requests
         // made while materializing are in the implementation's variables.
         let quantified_effect_vars = mem::take(&mut self.quantified_request_effect_vars);
@@ -609,7 +627,8 @@ impl<'a> TraitSolver<'a> {
         // `Value` is selected by structure, as inference does: a nested prerequisite need only
         // hold by structure, its effects become obligations through the instantiated head. Other
         // traits are selected as `solve_impl_actual` does.
-        let by_structure = trait_id == self.std_trait_id(VALUE_TRAIT_NAME);
+        let by_structure =
+            trait_id == self.std_trait_id(VALUE_TRAIT_NAME) || self.impls.ignores_effects;
         let (selection_input_tys, mode) = if by_structure {
             (
                 instantiate_types(input_tys, &mut EffectErasingMapper),

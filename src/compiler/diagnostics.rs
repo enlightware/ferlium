@@ -206,18 +206,7 @@ pub(crate) fn diagnostics_from_error(
         | Internal { span, .. }
         | EffectNotFound { span, .. }
         | EffectVariablesCombined { span, .. }
-        | AmbiguousEffectInRecursiveGroup { span, .. }
         | RecursiveGroupBodyDoesNotFit { span, .. } => vec![*span],
-        EffectGenericConflictInRecursiveGroup {
-            source_span,
-            target_span,
-            ..
-        }
-        | EffectConflictWithInferredSignature {
-            source_span,
-            target_span,
-            ..
-        } => vec![*source_span, *target_span],
         WrongNumberOfEffectArguments {
             expected_span,
             got_span,

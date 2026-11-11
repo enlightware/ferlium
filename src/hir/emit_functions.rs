@@ -1,7 +1,7 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{borrow::Cow, cell::Cell, iter::once, slice};
+use std::{borrow::Cow, cell::Cell, slice};
 
 use indexmap::IndexMap;
 use itertools::Itertools;
@@ -16,10 +16,10 @@ use crate::{
         CompilationCapabilities,
         diagnostics::CompilationWarning,
         error::{
-            AttributeTarget, CompilationErrorImpl, GenericParamsOwner, InternalCompilationError,
-            InvalidAttributeKind, InvalidDefaultMethodKind, InvalidGenericParamsKind,
-            InvalidSubscriptDefinitionKind, InvalidTraitDefinitionKind, MissingRequirement,
-            SubscriptDefinitionSubject, UnsafeFeature, UnsupportedSubscriptFeatureKind,
+            AttributeTarget, GenericParamsOwner, InternalCompilationError, InvalidAttributeKind,
+            InvalidDefaultMethodKind, InvalidGenericParamsKind, InvalidSubscriptDefinitionKind,
+            InvalidTraitDefinitionKind, MissingRequirement, SubscriptDefinitionSubject,
+            UnsafeFeature, UnsupportedSubscriptFeatureKind,
         },
         lints::report_needless_returns_in_tail,
     },
@@ -50,6 +50,7 @@ use crate::{
     },
     std::core_traits_names::VALUE_TRAIT_NAME,
     types::{
+        effect_polarity::trait_output_effect_polarities,
         effects::{EffType, Effect, EffectVar, EffectsInstSubst},
         mutability::MutType,
         r#trait::{Trait, TraitDefaultMethod, TraitMethodIndex},
@@ -67,7 +68,7 @@ use crate::{
             unify::UnifiedTypeInference,
         },
         type_like::{TypeLike, instantiate_types_in_place},
-        type_mapper::{BitmapInstantiationMapper, EffectErasingMapper, TypeMapper},
+        type_mapper::{BitmapInstantiationMapper, TypeMapper},
         type_scheme::{
             PubTypeConstraint, TypeScheme, extra_parameters_from_constraints, normalize_types,
         },
@@ -583,6 +584,10 @@ pub(super) struct GroupContract {
     written_count: usize,
     /// The contract's variable for each written type generic.
     written_types: Vec<TypeVar>,
+    /// How many of the scheme's type quantifiers, the first ones, are variables of the joint
+    /// inference of the group: a body has one instance of each, whichever function it calls.
+    /// The others belong to this contract alone, as those that only its requirements name.
+    shared_types: usize,
 }
 
 impl GroupContract {
@@ -590,10 +595,6 @@ impl GroupContract {
     /// receives is any effect, and one that it only produces is none, as when a scheme is
     /// published.
     fn bottom(shape: &Self) -> Self {
-        let mut retained = FxHashSet::default();
-        for constraint in &shape.scheme.constraints {
-            constraint.fill_with_inner_effect_vars(&mut retained);
-        }
         let subst = (
             FxHashMap::default(),
             shape
@@ -601,7 +602,6 @@ impl GroupContract {
                 .ty
                 .positive_only_effect_vars()
                 .into_iter()
-                .filter(|var| !retained.contains(var))
                 .map(|var| (var, EffType::empty()))
                 .collect(),
         );
@@ -612,15 +612,13 @@ impl GroupContract {
         Self {
             scheme: TypeScheme {
                 ty_quantifiers: shape.scheme.ty_quantifiers.clone(),
-                eff_quantifiers: TypeScheme::<FnType>::list_eff_vars(
-                    &ty,
-                    shape.scheme.constraints.iter(),
-                ),
+                eff_quantifiers: ty.inner_effect_vars(),
                 ty,
-                constraints: shape.scheme.constraints.clone(),
+                constraints: Vec::new(),
             },
             written_count: shape.written_count,
             written_types: shape.written_types.clone(),
+            shared_types: shape.shared_types,
         }
     }
 
@@ -642,17 +640,12 @@ enum Emitted {
     Functions,
     /// The methods of a trait implementation, in the module, and what its impl is made of.
     TraitImpl(Box<EmitTraitOutput>),
-    /// The contracts of the functions of a group, as their joint inference gives them, and
-    /// their shapes; what the module got is to be undone.
-    Contracts {
-        discovered: Vec<GroupContract>,
-        shapes: Vec<GroupContract>,
-    },
-    /// The contract that a body gets against the current contracts of its group, if it has the
-    /// types of its shape, and the functions of the group that it uses; what the module got is
-    /// to be undone.
+    /// The shapes of the functions of a group; what the module got is to be undone.
+    Shapes(Vec<GroupContract>),
+    /// The contract that a body gets against the current contracts of its group, and the
+    /// functions of the group that it uses; what the module got is to be undone.
     Refined {
-        contract: Option<GroupContract>,
+        contract: GroupContract,
         uses: Vec<LocalFunctionId>,
     },
 }
@@ -664,12 +657,15 @@ pub(super) struct GroupCallees<'a> {
     contracts: &'a [GroupContract],
     /// The slot reserved for each function.
     slots: &'a [LocalFunctionId],
+    /// Whether a function of the group is public: the requirements of all of them are then
+    /// published in their public form.
+    exported: bool,
 }
 
 /// How [`emit_functions`] treats a group.
 pub(super) enum GroupMode<'a> {
     Normal,
-    /// Infer jointly with flexible written effect generics, and only produce contracts.
+    /// Infer jointly for types alone, effects being ignored, and only produce the shapes.
     Discover,
     /// Infer the body at `index` alone, with the types of its shape and its unwritten effects
     /// to infer, against the current contracts of its group, and only produce its next contract.
@@ -723,6 +719,9 @@ enum ContractEffects {
 /// `explicit_root_tys` and `written_effects` are the written type and effect generics of the
 /// body, in the order of their declaration. The type quantifiers of the result are in the
 /// order of those of `contract`.
+///
+/// Also returns the instance of each type variable of the group that the body can name: those
+/// of `contract` first, then those of the contracts of the functions it can call.
 fn contract_instance_for_body(
     contract: &GroupContract,
     effects: ContractEffects,
@@ -731,7 +730,7 @@ fn contract_instance_for_body(
     written_effects: &[EffectVar],
     module_id: ModuleId,
     ty_inf: &mut TypeInference,
-) -> TypeScheme<FnType> {
+) -> (TypeScheme<FnType>, Vec<(TypeVar, Type)>) {
     let mut ty_subst = TypeInstSubst::default();
     for (root, var) in explicit_root_tys.iter().zip(&contract.written_types) {
         ty_subst.insert(*var, *root);
@@ -742,21 +741,28 @@ fn contract_instance_for_body(
             .or_insert_with(|| ty_inf.fresh_type_var_ty());
     }
     // Contracts share the variables of joint inference, which has one type instance per
-    // group: calls in this body take the same instance, whichever function they call.
+    // group: calls in this body take the same instance, whichever function they call. The
+    // other type quantifiers of a contract are instantiated at each call, as any quantifier.
     let mut instance_of = ty_subst.clone();
+    let mut group_instances = contract
+        .scheme
+        .ty_quantifiers
+        .iter()
+        .map(|var| (*var, ty_subst[var]))
+        .collect::<Vec<_>>();
     let instances = callees
         .contracts
         .iter()
         .zip(callees.slots.iter())
         .map(|(callee, callee_id)| {
-            let tys = callee
-                .scheme
-                .ty_quantifiers
+            let tys = callee.scheme.ty_quantifiers[..callee.shared_types]
                 .iter()
                 .map(|var| {
-                    *instance_of
-                        .entry(*var)
-                        .or_insert_with(|| ty_inf.fresh_type_var_ty())
+                    *instance_of.entry(*var).or_insert_with(|| {
+                        let instance = ty_inf.fresh_type_var_ty();
+                        group_instances.push((*var, instance));
+                        instance
+                    })
                 })
                 .collect();
             (FunctionId::new(module_id, *callee_id), tys)
@@ -790,7 +796,7 @@ fn contract_instance_for_body(
     ty_inf.add_declared_generics(ty_quantifiers.iter().map(|var| Type::variable(*var)));
     let subst = (ty_subst, eff_subst);
     let mut mapper = BitmapInstantiationMapper::new(&subst);
-    TypeScheme {
+    let scheme = TypeScheme {
         ty_quantifiers,
         eff_quantifiers,
         ty: contract.scheme.ty.map(&mut mapper),
@@ -800,21 +806,17 @@ fn contract_instance_for_body(
             .iter()
             .map(|constraint| constraint.map(&mut mapper))
             .collect(),
-    }
+    };
+    (scheme, group_instances)
 }
 
 /// What joint inference of a group remembers about the declaration of one of its functions.
 struct GroupFunctionDeclaration {
-    /// The function's name, with its span.
-    name: ast::UstrSpan,
+    /// The function's name.
+    name: Ustr,
     type_params: Vec<ast::UstrSpan>,
-    effect_names: Vec<Ustr>,
-    /// The parameters' names, with their spans.
-    args: Vec<ast::UstrSpan>,
     /// The parameter index of the variable standing for each written effect generic.
     written_vars: FxHashMap<EffectVar, usize>,
-    /// The parameter index of the marker tracking each written effect generic.
-    written_markers: FxHashMap<EffectVar, usize>,
 }
 
 /// Whether a row of a signature is one the source wrote: it has no variables at all, or a
@@ -880,122 +882,6 @@ fn walk_signature<V: FnMut(&mut UnifiedTypeInference, &EffType, bool) -> EffType
     })
 }
 
-/// Calls `visit(row, written)` for every effect row of a signature, without changing it.
-fn visit_signature(
-    fn_ty: &FnType,
-    ty_inf: &mut UnifiedTypeInference,
-    written_vars: &FxHashMap<EffectVar, usize>,
-    mut visit: impl FnMut(&mut UnifiedTypeInference, &EffType, bool),
-) {
-    walk_signature(fn_ty, ty_inf, written_vars, |ty_inf, row, is_written| {
-        visit(ty_inf, row, is_written);
-        row.clone()
-    });
-}
-
-/// The inferred effect rows of a function's signature, each as the markers reaching it.
-struct SignatureRows {
-    /// The rows of arguments, result and constraints: variables here belong to the contract's type.
-    in_type: Vec<FxHashSet<EffectVar>>,
-    /// The parameter, with its span, that each leading row of `in_type` belongs to.
-    params: Vec<ast::UstrSpan>,
-    /// The function's performed effect, without the markers confined to it.
-    performed: FxHashSet<EffectVar>,
-}
-
-fn marker_set(ty_inf: &mut UnifiedTypeInference, row: &EffType) -> FxHashSet<EffectVar> {
-    ty_inf
-        .effect_provenance(row)
-        .inner_vars()
-        .into_iter()
-        .collect()
-}
-
-fn read_signature_rows(
-    fn_ty: &FnType,
-    declaration: &GroupFunctionDeclaration,
-    constraints: &[PubTypeConstraint],
-    ty_inf: &mut UnifiedTypeInference,
-) -> SignatureRows {
-    let written = &declaration.written_vars;
-    let mut in_type = Vec::new();
-    let mut params = Vec::new();
-    for (arg, arg_name) in fn_ty.args.iter().zip(&declaration.args) {
-        visit_signature(
-            &FnType::new(vec![*arg], Type::unit(), EffType::empty()),
-            ty_inf,
-            written,
-            |ty_inf, row, is_written| {
-                if !is_written {
-                    in_type.push(marker_set(ty_inf, row));
-                    params.push(*arg_name);
-                }
-            },
-        );
-    }
-    visit_signature(
-        &FnType::new(vec![], fn_ty.ret, EffType::empty()),
-        ty_inf,
-        written,
-        |ty_inf, row, is_written| {
-            if !is_written {
-                in_type.push(marker_set(ty_inf, row));
-            }
-        },
-    );
-    for constraint in constraints {
-        let _ = constraint.map(&mut RowWalker {
-            ty_inf,
-            written_vars: written,
-            in_solved: true,
-            visit: |ty_inf: &mut UnifiedTypeInference, row: &EffType, _: bool| {
-                in_type.push(marker_set(ty_inf, row));
-                row.clone()
-            },
-        });
-    }
-    // Equal trait applications are one application, so their output effects are equal.
-    for (index, constraint) in constraints.iter().enumerate() {
-        let PubTypeConstraint::HaveTrait {
-            trait_id,
-            input_tys,
-            output_effs,
-            ..
-        } = constraint
-        else {
-            continue;
-        };
-        for other in &constraints[index + 1..] {
-            let PubTypeConstraint::HaveTrait {
-                trait_id: other_trait_id,
-                input_tys: other_input_tys,
-                output_effs: other_output_effs,
-                ..
-            } = other
-            else {
-                continue;
-            };
-            if trait_id == other_trait_id && input_tys == other_input_tys {
-                for (first, second) in output_effs.iter().zip(other_output_effs) {
-                    let mut row = marker_set(ty_inf, first);
-                    row.extend(marker_set(ty_inf, second));
-                    in_type.push(row);
-                }
-            }
-        }
-    }
-    let mut performed = marker_set(ty_inf, &fn_ty.effects);
-    performed.retain(|marker| {
-        declaration.written_markers.contains_key(marker)
-            || in_type.iter().any(|row| row.contains(marker))
-    });
-    SignatureRows {
-        in_type,
-        params,
-        performed,
-    }
-}
-
 /// A written row of a signature, in the variables of its contract.
 fn written_row(declaration: &GroupFunctionDeclaration, row: &EffType) -> EffType {
     let subst = declaration
@@ -1011,27 +897,24 @@ fn written_row(declaration: &GroupFunctionDeclaration, row: &EffType) -> EffType
     row.instantiate(&subst)
 }
 
-/// The shape of a function of a group: the types of its signature and of its requirements,
-/// with the written rows as written, and every other row a variable of its own, which marks
-/// the place of an effect to infer. The effect it performs is left out.
+/// The shape of a function of a group: the types of its signature as the joint inference found
+/// them, with the written rows as written, and every other row a variable of its own, which
+/// marks the place of an effect to infer. The effect it performs and its requirements are left
+/// out: each body finds them when it is inferred alone.
 fn shape_scheme(
     fn_ty: &FnType,
-    constraints: &[PubTypeConstraint],
     written_types: &[TypeVar],
     declaration: &GroupFunctionDeclaration,
     ty_inf: &mut UnifiedTypeInference,
 ) -> TypeScheme<FnType> {
     let written = &declaration.written_vars;
-    let next = Cell::new(declaration.written_markers.len() as u32);
-    let fresh = || {
-        next.set(next.get() + 1);
-        EffType::single_variable(EffectVar::new(next.get() - 1))
-    };
+    let next = Cell::new(declaration.written_vars.len() as u32);
     let signature_row = |row: &EffType, is_written: bool| {
         if is_written {
             written_row(declaration, row)
         } else {
-            fresh()
+            next.set(next.get() + 1);
+            EffType::single_variable(EffectVar::new(next.get() - 1))
         }
     };
     let args = fn_ty
@@ -1054,63 +937,45 @@ fn shape_scheme(
         |_, row, is_written| signature_row(row, is_written),
     )
     .ret;
-    // One requirement per application: the joint inference can hold several that differ by
-    // their effects only.
-    let mut shapes = Vec::new();
-    let constraints = constraints
-        .iter()
-        .filter_map(|constraint| {
-            let mapped = constraint.map(&mut RowWalker {
-                ty_inf,
-                written_vars: written,
-                in_solved: true,
-                visit: |_: &mut UnifiedTypeInference, _: &EffType, _: bool| fresh(),
-            });
-            let shape = mapped.map(&mut EffectErasingMapper);
-            (!shapes.contains(&shape)).then(|| {
-                shapes.push(shape);
-                mapped
-            })
-        })
-        .collect::<Vec<_>>();
     let ty = FnType::new(args, ret, EffType::empty());
+    let no_constraints: [PubTypeConstraint; 0] = [];
     let ty_quantifiers = written_types
         .iter()
         .copied()
-        .chain(TypeScheme::list_ty_vars(&ty, constraints.iter()))
+        .chain(TypeScheme::list_ty_vars(&ty, no_constraints.iter()))
         .unique()
         .collect();
-    let eff_quantifiers = TypeScheme::<FnType>::list_eff_vars(&ty, constraints.iter());
     TypeScheme {
         ty_quantifiers,
-        eff_quantifiers,
+        eff_quantifiers: ty.inner_effect_vars(),
         ty,
-        constraints,
+        constraints: Vec::new(),
     }
 }
 
 /// Rewrites what a body published in the variables of its contract.
-struct ContractVariables<'a> {
-    /// The contract's type variable for each type variable of the body's instance.
-    types: &'a FxHashMap<TypeVar, TypeVar>,
+struct ContractVariables {
+    /// The contract's type variable for each type variable met so far: those of the body's
+    /// instance of its shape, then the others as they are met.
+    types: FxHashMap<TypeVar, TypeVar>,
+    /// The number of the next type variable that is not of the shape.
+    next_type: u32,
     /// The contract's effect variable for each one met so far: the written generics, then the
     /// others as they are met, so that the next one is numbered by the size of the map.
     effects: FxHashMap<EffectVar, EffectVar>,
-    /// Whether a type variable was met that is not of the instance.
-    met_other_type: bool,
 }
 
-impl TypeMapper for ContractVariables<'_> {
+impl TypeMapper for ContractVariables {
     fn map_type(&mut self, ty: Type) -> Type {
         let var = { ty.data().as_variable().copied() };
-        match var.map(|var| self.types.get(&var)) {
-            Some(Some(contract_var)) => Type::variable(*contract_var),
-            Some(None) => {
-                self.met_other_type = true;
-                ty
-            }
-            None => ty,
-        }
+        let Some(var) = var else {
+            return ty;
+        };
+        let contract_var = *self.types.entry(var).or_insert_with(|| {
+            self.next_type += 1;
+            TypeVar::new(self.next_type - 1)
+        });
+        Type::variable(contract_var)
     }
 
     fn map_mut_type(&mut self, mut_ty: MutType) -> MutType {
@@ -1132,34 +997,40 @@ impl TypeMapper for ContractVariables<'_> {
     }
 }
 
-/// The next contract of a function, from the scheme that its body published when inferred
-/// against the current contracts: the types of its shape, with the effects of that scheme.
-/// `instance_tys` are the type variables that the body had for the type quantifiers of
-/// `shape`, and `written_effects` its written effect generics.
-/// There is none if the scheme does not have the types of the shape.
+/// The next contract of a function: the scheme that its body published when inferred against
+/// the current contracts, in the variables of the group.
+///
+/// `instance_tys` are the types that the body had for the type variables of the group, those of
+/// its shape first, and `written_effects` its written effect generics. A type variable of the
+/// scheme that is one of the instance is the group's, also when it is of the shape of another
+/// function and only a requirement names it here: a group has one instance of its types, so
+/// that a type built across its functions is one type and not a copy at each call. If the body
+/// made several of them one, which effects can do by making two applications of a trait the
+/// same, it is the first of them. Any other type variable is the contract's own, numbered from
+/// `own_types_base`, above the variables of all the shapes of the group.
 fn refined_contract(
     shape: &GroupContract,
     published: &TypeScheme<FnType>,
-    instance_tys: &[TypeVar],
+    instance_tys: &[(TypeVar, Type)],
     written_effects: &[EffectVar],
+    own_types_base: u32,
     ty_inf: &mut UnifiedTypeInference,
-) -> Option<GroupContract> {
+) -> GroupContract {
     let mut types = FxHashMap::default();
-    for (shape_var, instance_var) in shape.scheme.ty_quantifiers.iter().zip(instance_tys) {
-        let resolved = ty_inf.substitute_in_type(Type::variable(*instance_var));
-        let var = *resolved.data().as_variable()?;
-        if types.insert(var, *shape_var).is_some() {
-            return None;
+    for (group_var, instance) in instance_tys {
+        let resolved = ty_inf.substitute_in_type(*instance);
+        if let Some(var) = resolved.data().as_variable() {
+            types.entry(*var).or_insert(*group_var);
         }
     }
     let mut variables = ContractVariables {
-        types: &types,
+        types,
+        next_type: own_types_base,
         effects: written_effects
             .iter()
             .enumerate()
             .map(|(param, var)| (*var, EffectVar::new(param as u32)))
             .collect(),
-        met_other_type: false,
     };
     let ty = published.ty.map(&mut variables);
     let constraints = published
@@ -1168,229 +1039,28 @@ fn refined_contract(
         .map(|constraint| constraint.map(&mut variables))
         .unique()
         .collect::<Vec<_>>();
-    if variables.met_other_type
-        || ty.map(&mut EffectErasingMapper) != shape.scheme.ty.map(&mut EffectErasingMapper)
-    {
-        return None;
-    }
-    let ty_quantifiers = shape
+    let (own, shared): (Vec<_>, Vec<_>) = TypeScheme::list_ty_vars(&ty, constraints.iter())
+        .into_iter()
+        .partition(|var| var.name() >= own_types_base);
+    let shared = shape
         .written_types
         .iter()
         .copied()
-        .chain(TypeScheme::list_ty_vars(&ty, constraints.iter()))
+        .chain(shared)
         .unique()
-        .collect();
+        .collect::<Vec<_>>();
+    let shared_types = shared.len();
     let eff_quantifiers = TypeScheme::<FnType>::list_eff_vars(&ty, constraints.iter());
-    Some(GroupContract {
+    GroupContract {
         scheme: TypeScheme {
-            ty_quantifiers,
+            ty_quantifiers: shared.into_iter().chain(own).collect(),
             eff_quantifiers,
             ty,
             constraints,
         },
         written_count: shape.written_count,
         written_types: shape.written_types.clone(),
-    })
-}
-
-/// The one mapping from markers to the variables of a contract, used for all of its rows.
-struct ContractTranslation<'a> {
-    /// Markers sharing a row, with the variable that stands for them. A marker in none of them is
-    /// confined to the function's performed effect, and is dropped.
-    classes: Vec<(FxHashSet<EffectVar>, EffectVar)>,
-    declaration: &'a GroupFunctionDeclaration,
-}
-
-impl<'a> ContractTranslation<'a> {
-    /// Merge the markers that share a row, as a row holds one variable, and give each class its
-    /// variable: the written generic in it, or else a fresh quantifier. A class cannot hold two.
-    fn new(
-        rows: &SignatureRows,
-        declaration: &'a GroupFunctionDeclaration,
-    ) -> Result<Self, InternalCompilationError> {
-        let own = &declaration.written_markers;
-        let mut classes: Vec<FxHashSet<EffectVar>> = Vec::new();
-        for row in rows.in_type.iter().chain(once(&rows.performed)) {
-            let mut merged = row.clone();
-            let mut index = 0;
-            while index < classes.len() {
-                if classes[index].is_disjoint(&merged) {
-                    index += 1;
-                } else {
-                    merged.extend(classes.swap_remove(index));
-                }
-            }
-            if !merged.is_empty() {
-                classes.push(merged);
-            }
-        }
-        let mut next = own.len() as u32;
-        let mut assigned = Vec::new();
-        for class in classes {
-            let mut own_params = class
-                .iter()
-                .filter_map(|marker| own.get(marker).copied())
-                .sorted();
-            let var = match (own_params.next(), own_params.next()) {
-                (Some(first), Some(second)) => {
-                    return Err(combined_generics_error(rows, declaration, first, second));
-                }
-                (Some(param), None) => EffectVar::new(param as u32),
-                _ => {
-                    next += 1;
-                    EffectVar::new(next - 1)
-                }
-            };
-            assigned.push((class, var));
-        }
-        Ok(Self {
-            classes: assigned,
-            declaration,
-        })
-    }
-
-    /// Translate an inferred row.
-    fn inferred_row(&self, ty_inf: &mut UnifiedTypeInference, row: &EffType) -> EffType {
-        let atoms = ty_inf.effect_provenance(row);
-        let mut result = atoms.primitive_effects();
-        for marker in atoms.inner_vars() {
-            if let Some((_, var)) = self
-                .classes
-                .iter()
-                .find(|(class, _)| class.contains(&marker))
-            {
-                result.extend(&EffType::single_variable(*var));
-            }
-        }
-        result
-    }
-
-    /// Translate a row of the signature, keeping a written one.
-    fn signature_row(
-        &self,
-        ty_inf: &mut UnifiedTypeInference,
-        row: &EffType,
-        is_written: bool,
-    ) -> EffType {
-        if !is_written {
-            return self.inferred_row(ty_inf, row);
-        }
-        written_row(self.declaration, row)
-    }
-
-    /// Translate a signature and its constraints into a type scheme.
-    fn scheme(
-        &self,
-        fn_ty: &FnType,
-        constraints: &[PubTypeConstraint],
-        written_types: &[TypeVar],
-        ty_inf: &mut UnifiedTypeInference,
-    ) -> TypeScheme<FnType> {
-        let written = &self.declaration.written_vars;
-        let args = fn_ty
-            .args
-            .iter()
-            .map(|arg| {
-                walk_signature(
-                    &FnType::new(vec![*arg], Type::unit(), EffType::empty()),
-                    ty_inf,
-                    written,
-                    |ty_inf, row, is_written| self.signature_row(ty_inf, row, is_written),
-                )
-                .args[0]
-            })
-            .collect::<Vec<_>>();
-        let ret = walk_signature(
-            &FnType::new(vec![], fn_ty.ret, EffType::empty()),
-            ty_inf,
-            written,
-            |ty_inf, row, is_written| self.signature_row(ty_inf, row, is_written),
-        )
-        .ret;
-        let effects = self.inferred_row(ty_inf, &fn_ty.effects);
-        let constraints = constraints
-            .iter()
-            .map(|constraint| {
-                constraint.map(&mut RowWalker {
-                    ty_inf,
-                    written_vars: written,
-                    in_solved: true,
-                    visit: |ty_inf: &mut UnifiedTypeInference, row: &EffType, _: bool| {
-                        self.inferred_row(ty_inf, row)
-                    },
-                })
-            })
-            .unique()
-            .collect::<Vec<_>>();
-        let mut ty = FnType::new(args, ret, effects);
-        // As in publication, a variable only in the function's own effect stands for nothing.
-        let mut retained = ty.input_effect_vars();
-        constraints.fill_with_inner_effect_vars(&mut retained);
-        let output_only = ty
-            .effects
-            .inner_vars()
-            .into_iter()
-            .filter(|var| !retained.contains(var))
-            .collect::<Vec<_>>();
-        ty.effects = ty
-            .effects
-            .difference(&EffType::multiple_variable(&output_only));
-        // Quantifiers follow the order publication will give them, as calls record them by position.
-        let ty_quantifiers = written_types
-            .iter()
-            .copied()
-            .chain(TypeScheme::list_ty_vars(&ty, constraints.iter()))
-            .unique()
-            .collect();
-        let eff_quantifiers = TypeScheme::<FnType>::list_eff_vars(&ty, constraints.iter());
-        TypeScheme {
-            ty_quantifiers,
-            eff_quantifiers,
-            ty,
-            constraints,
-        }
-    }
-}
-
-/// The error for two written generics of a function meeting in one class.
-fn combined_generics_error(
-    rows: &SignatureRows,
-    declaration: &GroupFunctionDeclaration,
-    first: usize,
-    second: usize,
-) -> InternalCompilationError {
-    let marker_of = |wanted: usize| {
-        declaration
-            .written_markers
-            .iter()
-            .find(|(_, param)| **param == wanted)
-            .unwrap()
-            .0
-    };
-    let (first_marker, second_marker) = (marker_of(first), marker_of(second));
-    let first = declaration.effect_names[first];
-    let second = declaration.effect_names[second];
-    let shared_row = rows
-        .in_type
-        .iter()
-        .position(|row| row.contains(first_marker) && row.contains(second_marker));
-    let (function, function_span) = declaration.name;
-    match shared_row {
-        Some(row) => {
-            let parameter = rows.params.get(row).copied();
-            internal_compilation_error!(AmbiguousEffectInRecursiveGroup {
-                function,
-                parameter: parameter.map(|(name, _)| name),
-                first,
-                second,
-                span: parameter.map_or(function_span, |(_, span)| span),
-            })
-        }
-        None => internal_compilation_error!(EffectVariablesCombined {
-            first,
-            second,
-            span: function_span,
-        }),
+        shared_types,
     }
 }
 
@@ -1417,43 +1087,13 @@ fn distinct_written_type_vars(
     Ok(vars)
 }
 
-/// Build the contracts of a group from the solution of its joint inference, and its shapes.
-///
-/// Written rows are kept. Any other row is read from the markers that reach it: a function's own
-/// generics stay, and other markers become a quantifier, merged per row because a row holds at
-/// most one variable. Markers confined to the function's performed effect are dropped.
-fn build_group_contracts(
+/// The shapes of the functions of a group, from the types that its joint inference found.
+fn group_shapes(
     fn_tys: &[FnType],
     declarations: &[GroupFunctionDeclaration],
     written_type_roots: &[Vec<Type>],
     ty_inf: &mut UnifiedTypeInference,
-) -> Result<(Vec<GroupContract>, Vec<GroupContract>), InternalCompilationError> {
-    ty_inf.normalize_remaining_constraints();
-    let constraints = ty_inf.remaining_constraints().to_vec();
-    for constraint in &constraints {
-        for var in constraint.inner_effect_vars().into_iter().sorted() {
-            ty_inf.seed_effect_marker(var);
-        }
-    }
-    // Seed a marker for each inferred row of an argument or result, in every function first.
-    for (fn_ty, declaration) in fn_tys.iter().zip(declarations) {
-        let mut vars = Vec::new();
-        visit_signature(
-            &FnType::new(fn_ty.args.clone(), fn_ty.ret, EffType::empty()),
-            ty_inf,
-            &declaration.written_vars,
-            |_, row, is_written| {
-                if !is_written {
-                    vars.extend(row.inner_vars());
-                }
-            },
-        );
-        for var in vars.into_iter().unique() {
-            ty_inf.seed_effect_marker(var);
-        }
-    }
-
-    let mut contracts = Vec::new();
+) -> Result<Vec<GroupContract>, InternalCompilationError> {
     let mut shapes = Vec::new();
     for ((fn_ty, declaration), roots) in fn_tys.iter().zip(declarations).zip(written_type_roots) {
         let resolved_roots = roots
@@ -1463,48 +1103,24 @@ fn build_group_contracts(
         let written_types =
             distinct_written_type_vars(&declaration.type_params, resolved_roots, || {
                 GenericParamsOwner::Function {
-                    name: declaration.name.0,
+                    name: declaration.name,
                 }
             })?;
-        // The requirements on this function's type variables are part of its contract.
-        let mut seed_ty_vars = ty_inf.substitute_in_fn_type(fn_ty).inner_ty_vars();
-        seed_ty_vars.extend(written_types.iter().copied());
-        let boundary = ConstraintBoundary::from_seed_ty_vars(seed_ty_vars);
-        let related_constraints = boundary
-            .accessible_constraints(&constraints)
-            .into_iter()
-            .filter(|constraint| !constraint.inner_ty_vars().is_empty())
-            .cloned()
-            .collect::<Vec<_>>();
-
-        let rows = read_signature_rows(fn_ty, declaration, &related_constraints, ty_inf);
-        let translation = ContractTranslation::new(&rows, declaration)?;
-        let scheme = translation.scheme(fn_ty, &related_constraints, &written_types, ty_inf);
-        let shape = shape_scheme(
-            fn_ty,
-            &related_constraints,
-            &written_types,
-            declaration,
-            ty_inf,
-        );
+        let scheme = shape_scheme(fn_ty, &written_types, declaration, ty_inf);
+        let shared_types = scheme.ty_quantifiers.len();
         shapes.push(GroupContract {
-            scheme: shape,
-            written_count: declaration.written_markers.len(),
-            written_types: written_types.clone(),
-        });
-        contracts.push(GroupContract {
             scheme,
-            written_count: declaration.written_markers.len(),
+            written_count: declaration.written_vars.len(),
             written_types,
+            shared_types,
         });
     }
-    Ok((contracts, shapes))
+    Ok(shapes)
 }
 
-/// The exit of discovery: the contracts of the functions of a group, read from their joint
-/// inference, and their shapes.
+/// The exit of discovery: the shapes of the functions of a group, from their joint inference.
 #[allow(clippy::too_many_arguments)]
-fn discovered_contracts<'func>(
+fn discovered_shapes<'func>(
     output: &Module,
     ty_inf: &mut UnifiedTypeInference,
     ast_functions: impl Iterator<Item = EmitFunctionInput<'func>>,
@@ -1513,9 +1129,9 @@ fn discovered_contracts<'func>(
     recursive_function_ids: &FxHashSet<FunctionId>,
     pending_functions: &PendingModuleFunctions,
     group_declarations: &[GroupFunctionDeclaration],
-) -> Result<(Vec<GroupContract>, Vec<GroupContract>), InternalCompilationError> {
-    // A return that only diverges becomes `never` here, where the whole group is seen:
-    // validation checks one body, and must keep its contract as it is.
+) -> Result<Vec<GroupContract>, InternalCompilationError> {
+    // A return that only diverges becomes `never` here, where the whole group is seen: a body
+    // inferred alone must keep the types of its shape.
     for (id, ret_var) in unconstrained_diverging_returns(
         output,
         ty_inf,
@@ -1541,7 +1157,7 @@ fn discovered_contracts<'func>(
                 .clone()
         })
         .collect::<Vec<_>>();
-    build_group_contracts(
+    group_shapes(
         &fn_tys,
         group_declarations,
         function_explicit_root_tys,
@@ -1633,6 +1249,63 @@ fn group_needs_contracts<'a, I: Iterator<Item = EmitFunctionInput<'a>>>(inputs: 
     any
 }
 
+/// The public form of the requirements `constraints` of function `id`: those that name
+/// something private are replaced by the public ones that give their evidence, and the body
+/// records how. `None` if all are public already. `rigid` are the types that the requirements
+/// must not determine, and `written_roots` the written type generics of the function.
+#[allow(clippy::too_many_arguments)]
+fn public_requirements(
+    constraints: &[PubTypeConstraint],
+    rigid: &[Type],
+    function: &ast::DModuleFunction,
+    written_roots: &[Type],
+    id: LocalFunctionId,
+    output: &mut Module,
+    others: &Modules,
+    pending_functions: &mut PendingModuleFunctions,
+    associated_lambdas: &FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
+    ty_inf: &mut UnifiedTypeInference,
+    solver_arena: &mut NodeArena,
+) -> Result<Option<Vec<PubTypeConstraint>>, InternalCompilationError> {
+    let mut solver = trait_solver_from_module!(output, others);
+    if constraints.iter().all(|c| solver.requirement_is_public(c)) {
+        return Ok(None);
+    }
+    let reduced = solver
+        .reduce_public_requirements(constraints.to_vec(), rigid, ty_inf, solver_arena)
+        .map_err(|error| {
+            error.with_private_requirement_names(
+                function
+                    .generic_params
+                    .type_params()
+                    .iter()
+                    .zip(written_roots)
+                    .filter_map(|(name, root)| {
+                        let root = ty_inf.substitute_in_type(*root);
+                        Some((*root.data().as_variable()?, name.0))
+                    }),
+            )
+        })?;
+    let generated = solver.finish().commit(
+        &mut output.functions,
+        &mut output.def_table,
+        pending_functions,
+    );
+    elaborate_generated_functions(output, others, pending_functions, generated)?;
+    for function_id in function_and_associated_lambdas(&id, associated_lambdas) {
+        pending_functions
+            .get_mut(&function_id)
+            .expect("pending function body")
+            .evidence_plan = reduced.evidence.clone();
+    }
+    Ok(Some(reduced.requirements))
+}
+
+/// Whether a group publishes requirements: one of its functions is public.
+fn group_is_exported<'a, I: Iterator<Item = EmitFunctionInput<'a>>>(mut inputs: I) -> bool {
+    inputs.any(|input| input.function.visibility.is_public() && input.trait_default.is_none())
+}
+
 /// Emit the functions of one group of the module's call graph.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_function_group<'a, F, I>(
@@ -1666,7 +1339,7 @@ where
     }
     let checkpoint = output.checkpoint(&[]);
     let warning_count = warnings.len();
-    let Emitted::Contracts { discovered, shapes } = emit_functions(
+    let discovered = emit_functions(
         output,
         solver_arena,
         &ast_functions,
@@ -1677,12 +1350,13 @@ where
         capabilities,
         warnings,
         GroupMode::Discover,
-    )?
-    else {
-        unreachable!("discovery produces contracts");
-    };
+    );
+    // Also when discovery fails: it leaves the module deciding traits by structure.
     output.restore(checkpoint);
     warnings.truncate(warning_count);
+    let Emitted::Shapes(shapes) = discovered? else {
+        unreachable!("discovery produces shapes");
+    };
 
     // Every function is visible through its contract before any body is inferred alone.
     let mut ids = Vec::new();
@@ -1703,7 +1377,6 @@ where
     }
     // A group behaves as its unrolling: each body is inferred against the contracts of the
     // others, starting from those of functions that call nothing, until no contract changes.
-    // What the joint inference found stands in if a body cannot be inferred this way.
     let contracts = refine_group_contracts(
         output,
         solver_arena,
@@ -1716,13 +1389,13 @@ where
         &shapes,
         bottoms,
         &ids,
-    )
-    .unwrap_or(discovered);
+    )?;
     for (id, contract) in ids.iter().zip(&contracts) {
         output.functions[id.as_index()].definition.ty_scheme = contract.scheme.clone();
     }
     // Each body has its own inference: what one assumes about a trait application says nothing
     // about another, whose generics are different.
+    let exported = group_is_exported(ast_functions());
     for index in 0..contracts.len() {
         let single = || ast_functions().skip(index).take(1);
         emit_functions(
@@ -1739,19 +1412,11 @@ where
                 callees: GroupCallees {
                     contracts: &contracts,
                     slots: &ids,
+                    exported,
                 },
                 index,
             },
-        )
-        .map_err(|error| {
-            let helper = ast_functions().find_map(|input| {
-                has_inferred_parameter(input.function).then_some(input.function.name.0)
-            });
-            let name_spans = ast_functions()
-                .map(|input| (input.function.span, input.function.name.1))
-                .collect::<Vec<_>>();
-            explain_conflict_with_inferred_signature(error, helper, &name_spans)
-        })?;
+        )?;
     }
     Ok(())
 }
@@ -1762,7 +1427,10 @@ where
 /// after `n` rounds are those of the group unrolled `n` times, whatever the order of its
 /// functions. A body is not inferred again if no contract that it uses changed.
 ///
-/// There is no result if a body cannot be inferred so, or does not keep the types of its shape.
+/// A body can fail in a round only because a contract that it uses does not say enough yet, so
+/// its error counts once the contracts have settled: it is then the error of the group. Until
+/// then the body keeps its contract. If the rounds reach their bound, the contracts are
+/// returned as they are, for validation to judge.
 #[allow(clippy::too_many_arguments)]
 fn refine_group_contracts<'a, F, I>(
     output: &mut Module,
@@ -1776,22 +1444,27 @@ fn refine_group_contracts<'a, F, I>(
     shapes: &[GroupContract],
     bottoms: Vec<GroupContract>,
     slots: &[LocalFunctionId],
-) -> Option<Vec<GroupContract>>
+) -> Result<Vec<GroupContract>, InternalCompilationError>
 where
     I: Iterator<Item = EmitFunctionInput<'a>>,
     F: Fn() -> I,
 {
     let mut contracts = bottoms;
-    // The functions of the group that each body uses, once it was inferred.
+    let exported = group_is_exported(ast_functions());
+    // The functions of the group that each body uses, once it was inferred without error.
     let mut uses: Vec<Option<Vec<usize>>> = vec![None; contracts.len()];
-    // Whether each contract changed in the round before.
-    let mut changed = vec![false; contracts.len()];
+    // The error of each body the last time it was inferred, if it had one.
+    let mut errors: Vec<Option<InternalCompilationError>> = vec![None; contracts.len()];
+    // Whether each contract changed in the round before; every body is inferred in the first.
+    let mut changed = vec![true; contracts.len()];
     for _ in 0..max_refinement_rounds(shapes) {
         let mut next = Vec::new();
         for index in 0..contracts.len() {
-            if let Some(uses) = &uses[index]
-                && !uses.iter().any(|used| changed[*used])
-            {
+            let stale = match &uses[index] {
+                Some(uses) => uses.iter().any(|used| changed[*used]),
+                None => changed.contains(&true),
+            };
+            if !stale {
                 continue;
             }
             let checkpoint = output.checkpoint(slots);
@@ -1812,32 +1485,40 @@ where
                     callees: GroupCallees {
                         contracts: &contracts,
                         slots,
+                        exported,
                     },
                     index,
                 },
             );
             output.restore(checkpoint);
             warnings.truncate(warning_count);
-            let Ok(Emitted::Refined {
-                contract: Some(contract),
-                uses: used,
-            }) = emitted
-            else {
-                return None;
-            };
-            uses[index] = Some(
-                used.iter()
-                    .filter_map(|used| slots.iter().position(|slot| slot == used))
-                    .collect(),
-            );
-            if !contract.is_same_as(&contracts[index]) {
-                next.push((index, contract));
+            match emitted {
+                Ok(Emitted::Refined {
+                    contract,
+                    uses: used,
+                }) => {
+                    uses[index] = Some(
+                        used.iter()
+                            .filter_map(|used| slots.iter().position(|slot| slot == used))
+                            .collect(),
+                    );
+                    errors[index] = None;
+                    if !contract.is_same_as(&contracts[index]) {
+                        next.push((index, contract));
+                    }
+                }
+                Ok(_) => unreachable!("refinement produces a contract"),
+                Err(error) => {
+                    // The body keeps its contract, and is inferred again when one changes.
+                    uses[index] = None;
+                    errors[index] = Some(error);
+                }
             }
         }
-        if next.is_empty() {
-            return Some(contracts);
-        }
         changed.fill(false);
+        if next.is_empty() {
+            break;
+        }
         for (index, contract) in next {
             output.functions[slots[index].as_index()]
                 .definition
@@ -1846,78 +1527,36 @@ where
             changed[index] = true;
         }
     }
-    None
+    match errors.into_iter().flatten().next() {
+        Some(error) => Err(error),
+        None => Ok(contracts),
+    }
 }
 
 /// A bound on the rounds that the contracts of a group take to settle.
 ///
 /// A round that is not the last changes a contract, and a contract only changes by getting
-/// weaker. A row of a contract, which is the effect at one place of its types or requirements,
-/// or the effect that the function performs, gets weaker in few ways: it gains one of the
-/// primitive effects, its variable is merged with that of another row, or it is bounded by a
-/// restriction. So the contracts change at most as many times as they have rows, times these
-/// ways, and one more round finds nothing to change.
+/// weaker. A row of a contract, which is the effect at one place of its types, or the effect
+/// that the function performs, gets weaker in few ways: it gains one of the primitive effects,
+/// its variable is merged with that of another row, or it is bounded by a restriction. Besides,
+/// a type variable of the shape can become the same as another, and a requirement comes with
+/// a row of the types or with a type variable. So the contracts change at most as many times
+/// as their shapes have rows, times these ways, plus their type variables, and one more round
+/// finds nothing to change.
 ///
 /// The bound is not reached unless a contract fails to get weaker, which would be a defect.
 fn max_refinement_rounds(shapes: &[GroupContract]) -> usize {
     const PRIMITIVE_EFFECTS: usize = 3;
     const WAYS_TO_WEAKEN_A_ROW: usize = PRIMITIVE_EFFECTS + 2;
-    let rows = shapes
+    let changes = shapes
         .iter()
-        // A shape has a variable for each row of its types and requirements.
-        .map(|shape| shape.scheme.eff_quantifiers.len() + 1)
-        .sum::<usize>();
-    1 + rows * WAYS_TO_WEAKEN_A_ROW
-}
-
-/// Whether a function of a group lets the group infer the type of a parameter, or part of it.
-/// An annotation that is not concrete can be written generics, unless the function has none.
-fn has_inferred_parameter(function: &ast::DModuleFunction) -> bool {
-    let has_written_generics = !function.generic_params.effect_params().is_empty();
-    function
-        .args
-        .iter()
-        .any(|arg| match arg.locations_and_ty_concreteness().1 {
-            None => true,
-            Some((_, concrete)) => !concrete && !has_written_generics,
+        .map(|shape| {
+            // A shape has a variable for each row of its types.
+            let rows = shape.scheme.eff_quantifiers.len() + 1;
+            rows * WAYS_TO_WEAKEN_A_ROW + shape.scheme.ty_quantifiers.len()
         })
-}
-
-/// An effect conflict while checking a body against the contracts can come from the coarse
-/// contract of a function whose signature was inferred: say that it can be written instead.
-/// A span covering a whole function of the group stands for its signature, so it becomes the
-/// span of its name, as given by `name_spans`.
-fn explain_conflict_with_inferred_signature(
-    error: InternalCompilationError,
-    helper: Option<Ustr>,
-    name_spans: &[(Location, Location)],
-) -> InternalCompilationError {
-    let name_span = |span: Location| {
-        name_spans
-            .iter()
-            .find_map(|(whole, name)| (*whole == span).then_some(*name))
-            .unwrap_or(span)
-    };
-    match (error.into_inner(), helper) {
-        (
-            CompilationErrorImpl::InvalidEffectInclusion {
-                source,
-                source_span,
-                target,
-                target_span,
-                names,
-            },
-            Some(function),
-        ) => internal_compilation_error!(EffectConflictWithInferredSignature {
-            function,
-            source,
-            source_span: name_span(source_span),
-            target,
-            target_span: name_span(target_span),
-            names,
-        }),
-        (error, _) => InternalCompilationError::new(error),
-    }
+        .sum::<usize>();
+    1 + changes
 }
 
 fn function_spans(function: &ast::DModuleFunction) -> ModuleFunctionSpans {
@@ -1990,6 +1629,13 @@ where
 {
     // First pass, populate the function table and allocate fresh mono type variables.
     let mut ty_inf = TypeInference::default();
+    if matches!(mode, GroupMode::Discover) {
+        // The shapes are types, which effects do not decide: an effect that does not fit is
+        // found when the bodies are inferred alone. The caller undoes this with the rest of
+        // what this pass does to the module.
+        ty_inf.ignore_effects();
+        output.impls.ignores_effects = true;
+    }
     let mut group_declarations = Vec::new();
     let mut body_tys: Vec<FnType> = Vec::new();
     // In refinement, the type variables that the body has for the type quantifiers of its shape.
@@ -2225,6 +1871,10 @@ where
     let mut function_annotation_substs = Vec::new();
     let mut declared_signatures = Vec::new();
     let mut function_explicit_root_tys = Vec::new();
+    // The types that the declaration of each function binds: its written generics and, when a
+    // body is checked against its contract, the types of the contract. They are not the body's
+    // to default, to close or to leave undetermined.
+    let mut function_declared_root_tys = Vec::new();
     // The variable of each written effect generic of each function.
     let mut function_written_effects: Vec<Vec<EffectVar>> = Vec::new();
     let mut function_attrs = Vec::new();
@@ -2301,30 +1951,16 @@ where
                 })
                 .collect::<Vec<_>>();
             let mut written_vars = FxHashMap::default();
-            let mut written_markers = FxHashMap::default();
             for (index, (name, _)) in generic_params.effect_params().iter().enumerate() {
                 let source_var = EffectVar::new((outer_annotation_eff_var_count + index) as u32);
-                let eff = if matches!(mode, GroupMode::Discover) {
-                    let (eff, marker) = ty_inf.fresh_provisional_effect_var_ty(*name);
-                    written_vars.insert(eff.to_single_variable().unwrap(), index);
-                    written_markers.insert(marker, index);
-                    eff
-                } else {
-                    ty_inf.fresh_rigid_effect_var_ty(Some(*name))
-                };
+                let eff = ty_inf.fresh_rigid_effect_var_ty(Some(*name));
+                written_vars.insert(eff.to_single_variable().unwrap(), index);
                 annotation_subst.1.insert(source_var, eff);
             }
             group_declarations.push(GroupFunctionDeclaration {
-                name: *name,
+                name: name.0,
                 type_params: generic_params.type_params().to_vec(),
-                effect_names: generic_params
-                    .effect_params()
-                    .iter()
-                    .map(|(name, _)| *name)
-                    .collect(),
-                args: args.iter().map(|arg| arg.name).collect(),
                 written_vars,
-                written_markers,
             });
             explicit_root_tys
         };
@@ -2413,9 +2049,10 @@ where
                     .expect("a written effect generic maps to a variable")
             })
             .collect();
+        let mut contract_root_tys: Vec<Type> = Vec::new();
         let contract_instance = match &mode {
             GroupMode::Validate { callees, index } => {
-                let instance = contract_instance_for_body(
+                let (instance, _) = contract_instance_for_body(
                     &callees.contracts[*index],
                     ContractEffects::Rigid,
                     *callees,
@@ -2426,6 +2063,13 @@ where
                 );
                 fn_type = instance.ty.clone();
                 body_tys.push(fn_type.clone());
+                // The contract binds all its types, also those that only its requirements
+                // name.
+                contract_root_tys = instance
+                    .ty_quantifiers
+                    .iter()
+                    .map(|var| Type::variable(*var))
+                    .collect();
                 Some(instance)
             }
             GroupMode::Refine {
@@ -2434,7 +2078,7 @@ where
                 index,
             } => {
                 // The shape gives the types, and the places of the effects to infer.
-                let instance = contract_instance_for_body(
+                let (instance, group_instances) = contract_instance_for_body(
                     &shapes[*index],
                     ContractEffects::Inferred,
                     *callees,
@@ -2445,10 +2089,7 @@ where
                 );
                 fn_type = FnType::new(instance.ty.args, instance.ty.ret, effects.clone());
                 body_tys.push(fn_type.clone());
-                for constraint in instance.constraints {
-                    ty_inf.add_pub_constraint(constraint);
-                }
-                refined_instance_tys = instance.ty_quantifiers;
+                refined_instance_tys = group_instances;
                 None
             }
             GroupMode::Normal | GroupMode::Discover => None,
@@ -2565,6 +2206,14 @@ where
         local_fns.push(id);
         function_annotation_substs.push(annotation_subst);
         ty_inf.add_declared_generics(explicit_root_tys.iter().copied());
+        function_declared_root_tys.push(
+            explicit_root_tys
+                .iter()
+                .copied()
+                .chain(contract_root_tys)
+                .unique()
+                .collect::<Vec<_>>(),
+        );
         function_explicit_root_tys.push(explicit_root_tys);
         function_written_effects.push(written_effects);
         function_attrs.push(attrs);
@@ -3468,7 +3117,7 @@ where
         // We are emitting normal module functions.
 
         // Default orphan constraints for each function into the unification tables.
-        for (id, explicit_root_tys) in local_fns.iter().zip(function_explicit_root_tys.iter()) {
+        for (id, explicit_root_tys) in local_fns.iter().zip(function_declared_root_tys.iter()) {
             let scope = function_defaulting_scope(
                 &mut ty_inf,
                 &output.functions[id.as_index()].definition.ty_scheme.ty,
@@ -3518,7 +3167,7 @@ where
             // Publication can identify a pending output with its own input,
             // making an already-local numeric or unit default eligible. Retry
             // using current signature boundaries, then validate the choices.
-            for (id, explicit_root_tys) in local_fns.iter().zip(&function_explicit_root_tys) {
+            for (id, explicit_root_tys) in local_fns.iter().zip(&function_declared_root_tys) {
                 let scope = function_defaulting_scope(
                     &mut ty_inf,
                     &output.functions[id.as_index()].definition.ty_scheme.ty,
@@ -3537,7 +3186,7 @@ where
             );
             elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
         }
-        for (id, explicit_root_tys) in local_fns.iter().zip(function_explicit_root_tys.iter()) {
+        for (id, explicit_root_tys) in local_fns.iter().zip(function_declared_root_tys.iter()) {
             let descr = &output.functions[id.as_index()];
             let fn_ty = ty_inf.substitute_in_fn_type(&descr.definition.ty_scheme.ty);
             let mut sig_ty_vars = fn_ty.inner_ty_vars();
@@ -3557,7 +3206,9 @@ where
                 .filter(|c| !c.is_type_has_variant())
                 .filter(|c| !is_compiler_provided_value_constraint(c, module_env))
                 .collect();
-            if !remaining_orphans.is_empty() {
+            // In refinement a requirement on a type that nothing determines yet is left aside
+            // with that type, see below.
+            if !remaining_orphans.is_empty() && !matches!(mode, GroupMode::Refine { .. }) {
                 if let Some((ty_var, ty, span)) =
                     first_unbound_type_in_constraints(remaining_orphans.iter().copied())
                 {
@@ -3578,7 +3229,7 @@ where
         }
 
         if matches!(mode, GroupMode::Discover) {
-            let (discovered, shapes) = discovered_contracts(
+            let shapes = discovered_shapes(
                 output,
                 &mut ty_inf,
                 ast_functions(),
@@ -3588,13 +3239,13 @@ where
                 &pending_functions,
                 &group_declarations,
             )?;
-            return Ok(Emitted::Contracts { discovered, shapes });
+            return Ok(Emitted::Shapes(shapes));
         }
 
         // A type variable of the bodies that nothing determines defaults to `never`; the
         // signatures of all functions of the group are protected.
         let mut protected = Vec::new();
-        for (id, explicit_root_tys) in local_fns.iter().zip(&function_explicit_root_tys) {
+        for (id, explicit_root_tys) in local_fns.iter().zip(&function_declared_root_tys) {
             let fn_ty = &output.functions[id.as_index()].definition.ty_scheme.ty;
             protected.extend(ty_inf.substitute_in_fn_type(fn_ty).inner_ty_vars());
             for ty in explicit_root_tys {
@@ -3608,8 +3259,36 @@ where
             ModuleEnv::new(output, others),
         )?;
 
+        // A requirement that a body needs and one that its declaration gives are one when they
+        // are about the same thing, as the same field of a type: what they say of it is then the
+        // same too. Effects still to infer must learn this before they are settled, or the one
+        // of a field read through a call of the group would be settled apart from the declared
+        // one.
+        let coalesce_with_declarations = |ty_inf: &mut UnifiedTypeInference,
+                                          output: &Module|
+         -> Result<(), InternalCompilationError> {
+            let env = ModuleEnv::new(output, others);
+            ty_inf.normalize_remaining_constraints();
+            let mut applications = declared_signatures
+                .iter()
+                .flatten()
+                .flat_map(|declared| declared.constraints.iter())
+                .map(|constraint| ty_inf.substitute_in_constraint(constraint))
+                .collect::<Vec<_>>();
+            applications.extend(ty_inf.remaining_constraints().iter().cloned());
+            ty_inf.coalesce_constraint_outputs(&mut applications, &|id| {
+                trait_output_effect_polarities(id, &|id| env.trait_def(id))
+            })
+        };
+        coalesce_with_declarations(&mut ty_inf, output)?;
+
         minimize_body_effects(output, &local_fns, FxHashSet::default(), &mut ty_inf)?;
         ty_inf.finalize_effects()?;
+
+        // Effects are final: two applications of a trait that differed by an effect still to
+        // infer, as the one a callback gets when it is passed on, may now be the same, and
+        // then so are their outputs.
+        coalesce_with_declarations(&mut ty_inf, output)?;
 
         // Substitute everything using ty_inf (single pass, includes all defaults).
         substitute_and_canonicalize_functions(
@@ -3641,11 +3320,26 @@ where
         // Take final substituted constraints.
         let all_constraints = ty_inf.take_constraints();
 
+        // Check body contracts before reducing their exported representation. Every member of
+        // an exported recursive group needs the public leaves: a private member cannot recover
+        // them backwards from a dictionary for the unreduced private requirement.
+        // A body inferred alone is of an exported group if any function of its group is public:
+        // its contract is then in the public form too, and the calls of the group pass the
+        // evidence of that form.
+        let exports_group = match &mode {
+            GroupMode::Refine { callees, .. } | GroupMode::Validate { callees, .. } => {
+                callees.exported
+            }
+            GroupMode::Normal | GroupMode::Discover => group_is_exported(ast_functions()),
+        };
+        let mut published_requirements_changed = false;
+
         // For each function: filter constraints, check unbounds, finalize type scheme.
         let mut used_constraints: FxHashSet<PubTypeConstraintPtr> = FxHashSet::default();
-        for (((input, id), explicit_root_tys), declared) in ast_functions()
+        for ((((input, id), explicit_root_tys), declared_root_tys), declared) in ast_functions()
             .zip(local_fns.iter())
             .zip(function_explicit_root_tys.iter())
+            .zip(function_declared_root_tys.iter())
             .zip(&declared_signatures)
         {
             let function = input.function;
@@ -3665,7 +3359,7 @@ where
             }
             // Find constraints related to this function's signature.
             let mut sig_ty_vars = descr.definition.ty_scheme.ty.inner_ty_vars();
-            let explicit_ty_vars = explicit_root_tys
+            let explicit_ty_vars = declared_root_tys
                 .iter()
                 .flat_map(|ty| ty_inf.substitute_in_type(*ty).inner_ty_vars().into_iter())
                 .collect::<Vec<_>>();
@@ -3696,7 +3390,18 @@ where
                 &pending_functions,
             ));
             let env = ModuleEnv::new(output, others);
-            let uninstantiated_unbound = check_unbounds(unbound, &quantifiers, &env)?;
+            let uninstantiated_unbound = if matches!(mode, GroupMode::Refine { .. }) {
+                // A contract of the group may not say yet what determines one of its types, as
+                // the result of a function whose requirements are not known. The body cannot
+                // observe a value of a type that nothing determines, so it is `never` for now;
+                // validation requires every type to be determined.
+                unbound
+                    .into_keys()
+                    .filter(|ty_var| !quantifiers.contains(ty_var))
+                    .collect()
+            } else {
+                check_unbounds(unbound, &quantifiers, &env)?
+            };
 
             // Apply unbound→Never fixup if needed.
             if !uninstantiated_unbound.is_empty() {
@@ -3737,6 +3442,31 @@ where
             elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
 
             let mut constraints = constraints;
+            if mode.is_validation() && exports_group {
+                // The contract is in the public form: so must be what the body requires, to be
+                // compared with it.
+                let rigid = declared
+                    .iter()
+                    .flat_map(|declared| declared.ty.args.iter().map(|arg| arg.ty))
+                    .chain(explicit_root_tys.iter().copied())
+                    .collect::<Vec<_>>();
+                if let Some(public) = public_requirements(
+                    &constraints,
+                    &rigid,
+                    function,
+                    explicit_root_tys,
+                    *id,
+                    output,
+                    others,
+                    &mut pending_functions,
+                    &associated_lambdas,
+                    &mut ty_inf,
+                    solver_arena,
+                )? {
+                    constraints = public;
+                    published_requirements_changed = true;
+                }
+            }
             if let Some(declared) = declared {
                 constraints = fit_declared_signature(
                     declared,
@@ -3826,23 +3556,6 @@ where
             &FxHashSet::default(),
         );
 
-        if let GroupMode::Refine { shapes, index, .. } = &mode {
-            let published = &output.functions[local_fns[0].as_index()]
-                .definition
-                .ty_scheme;
-            let contract = refined_contract(
-                &shapes[*index],
-                published,
-                &refined_instance_tys,
-                &function_written_effects[0],
-                &mut ty_inf,
-            );
-            return Ok(Emitted::Refined {
-                contract,
-                uses: used_group_functions,
-            });
-        }
-
         // Safety check: make sure that there are no unused constraints.
         let module_env = ModuleEnv::new(output, others);
         let unused_constraints = all_constraints
@@ -3853,7 +3566,8 @@ where
                     && !is_compiler_provided_value_constraint(c, module_env)
             })
             .collect::<Vec<_>>();
-        if !unused_constraints.is_empty() {
+        // In refinement a requirement on a type that nothing determines yet was left aside.
+        if !unused_constraints.is_empty() && !matches!(mode, GroupMode::Refine { .. }) {
             let module_env = ModuleEnv::new(output, others);
             let constraints = unused_constraints
                 .iter()
@@ -3865,12 +3579,6 @@ where
             }));
         }
 
-        // Check body contracts before reducing their exported representation. Every member of
-        // an exported recursive group needs the public leaves: a private member cannot recover
-        // them backwards from a dictionary for the unreduced private requirement.
-        let exports_group = ast_functions()
-            .any(|input| input.function.visibility.is_public() && input.trait_default.is_none());
-        let mut published_requirements_changed = false;
         for ((input, id), explicit_roots) in ast_functions()
             .zip(&local_fns)
             .zip(&function_explicit_root_tys)
@@ -3886,44 +3594,24 @@ where
                 .map(|arg| arg.ty)
                 .chain(explicit_roots.iter().copied())
                 .collect::<Vec<_>>();
-            let mut solver = trait_solver_from_module!(output, others);
-            if scheme
-                .constraints
-                .iter()
-                .all(|c| solver.requirement_is_public(c))
-            {
-                continue;
-            }
-            published_requirements_changed = true;
-            let constraints = solver
-                .reduce_public_requirements(scheme.constraints, &rigid, &mut ty_inf, solver_arena)
-                .map_err(|error| {
-                    error.with_private_requirement_names(
-                        input
-                            .function
-                            .generic_params
-                            .type_params()
-                            .iter()
-                            .zip(explicit_roots)
-                            .filter_map(|(name, root)| {
-                                let root = ty_inf.substitute_in_type(*root);
-                                Some((*root.data().as_variable()?, name.0))
-                            }),
-                    )
-                })?;
-            let generated = solver.finish().commit(
-                &mut output.functions,
-                &mut output.def_table,
+            let Some(constraints) = public_requirements(
+                &scheme.constraints,
+                &rigid,
+                input.function,
+                explicit_roots,
+                *id,
+                output,
+                others,
                 &mut pending_functions,
-            );
-            elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
-            let evidence_plan = constraints.evidence;
-            let constraints = constraints.requirements;
+                &associated_lambdas,
+                &mut ty_inf,
+                solver_arena,
+            )?
+            else {
+                continue;
+            };
+            published_requirements_changed = true;
             for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
-                pending_functions
-                    .get_mut(&function_id)
-                    .expect("pending function body")
-                    .evidence_plan = evidence_plan.clone();
                 output.functions[function_id.as_index()]
                     .definition
                     .ty_scheme
@@ -3976,6 +3664,31 @@ where
                         .ty_quantifiers = quantifiers.clone();
                 }
             }
+        }
+
+        if let GroupMode::Refine { shapes, index, .. } = &mode {
+            let published = &output.functions[local_fns[0].as_index()]
+                .definition
+                .ty_scheme;
+            // The contract's own type variables are apart from those of every shape.
+            let own_types_base = shapes
+                .iter()
+                .flat_map(|shape| &shape.scheme.ty_quantifiers)
+                .map(|var| var.name() + 1)
+                .max()
+                .unwrap_or(0);
+            let contract = refined_contract(
+                &shapes[*index],
+                published,
+                &refined_instance_tys,
+                &function_written_effects[0],
+                own_types_base,
+                &mut ty_inf,
+            );
+            return Ok(Emitted::Refined {
+                contract,
+                uses: used_group_functions,
+            });
         }
 
         // Fifth pass, normalize the type schemes, substitute the types in the functions.
@@ -4204,18 +3917,19 @@ fn check_declared_effects_not_combined(
     ty_inf: &mut UnifiedTypeInference,
 ) -> Result<(), InternalCompilationError> {
     for id in local_fns {
+        // The function is shown by its name, a lambda as a whole.
         let span = output.functions[id.as_index()]
             .spans
             .as_ref()
-            .map(|spans| spans.span);
+            .map(|spans| spans.name);
         for function_id in function_and_associated_lambdas(id, associated_lambdas) {
             let descr = &output.functions[function_id.as_index()];
-            let span = descr
-                .spans
-                .as_ref()
-                .map(|spans| spans.span)
-                .or(span)
-                .unwrap_or_else(Location::new_synthesized);
+            let span = if function_id == *id {
+                span
+            } else {
+                descr.spans.as_ref().map(|spans| spans.span).or(span)
+            }
+            .unwrap_or_else(Location::new_synthesized);
             ty_inf.check_declared_effects_not_combined(&descr.definition.ty_scheme.ty, span)?;
         }
     }

@@ -230,7 +230,9 @@ needs no runtime adapter (see [abi.md](abi.md)).
   fallible one is allowed. An effect the methods receive through callbacks is negative and
   included the other way. An effect in both positions, or in an invariant one, is equal.
   Equal applications of a trait in one scope denote one implementation, so they share the output
-  effects still being inferred. Fixed ones, such as those written in `where` clauses, are bounds
+  effects still being inferred. Two applications can become equal only when effects are final,
+  as when a callback is passed on and the effect that its receiver has for it is found to be its
+  own: their output types are made equal then. Fixed ones, such as those written in `where` clauses, are bounds
   that this implementation must all fit: performed bounds intersect, received ones unite, and the
   shared effect takes the result.
 
@@ -247,15 +249,16 @@ is in a type definition.
 
 A recursive group with declared effect variables behaves, for effects, as its unrolling: each
 function calling copies of the others, down to functions that call nothing. It is inferred in three
-steps. Joint inference of the group gives the types of each signature, and the places of the
-effects left to infer. From the contracts of functions that call nothing, each body is then
-inferred alone against the current contracts of the group, by ordinary inference, which gives its
-next contract, until none changes; a contract only gets weaker, so this ends. Each body is finally
-checked alone against these fixed contracts, with its declared variables rigid, which makes the
-result sound whatever the previous steps proposed. In the last two steps each call in the group
-instantiates its callee's contract. Only effects are instantiated per call in this way; types keep
-one instance per group. The joint inference still solves effects with one instance per function,
-and rejects a group that it cannot solve so.
+steps. Joint inference of the group, in which effects are not related at all, gives the types of
+each signature and the places of the effects left to infer; effects do not decide types, so
+nothing is lost. From the contracts of functions that call nothing, each body is then inferred
+alone against the contracts of the group, by ordinary inference, which gives its next contract,
+until none changes; a contract only gets weaker, so this ends. A body can fail while a contract
+that it uses does not say enough yet, so its error is that of the group only once the contracts
+have settled. Each body is finally checked alone against these fixed contracts, with its declared
+variables rigid, which makes the result sound whatever the previous steps proposed. In the last
+two steps each call in the group instantiates its callee's contract. Only effects are instantiated
+per call in this way; types keep one instance per group.
 
 ### Solving
 

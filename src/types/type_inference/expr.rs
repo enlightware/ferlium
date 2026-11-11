@@ -505,11 +505,9 @@ impl TypeInference {
         EffType::single_variable(self.effects.fresh_rigid_var(name))
     }
 
-    /// A flexible effect variable for a written generic, with the marker that tracks it.
-    pub(crate) fn fresh_provisional_effect_var_ty(&mut self, name: Ustr) -> (EffType, EffectVar) {
-        let var = self.effects.fresh_var();
-        let marker = self.effects.seed_marker(var, Some(name));
-        (EffType::single_variable(var), marker)
+    /// Stop relating effects, for an inference that only seeks types.
+    pub(crate) fn ignore_effects(&mut self) {
+        self.effects.ignore_effects();
     }
 
     pub fn fresh_fn_arg(&mut self) -> FnArgType {

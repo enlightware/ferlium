@@ -1046,39 +1046,11 @@ pub enum CompilationErrorImpl<S: Scope> {
         second: Ustr,
         span: Location,
     },
-    /// An inferred position of a function in a recursive group could take either of two of its
-    /// written effect generics.
-    AmbiguousEffectInRecursiveGroup {
-        function: Ustr,
-        parameter: Option<Ustr>,
-        first: Ustr,
-        second: Ustr,
-        span: Location,
-    },
     /// A body of a recursive group does not fit the signature inferred for it.
     RecursiveGroupBodyDoesNotFit {
         function: Ustr,
         reason: InvalidDefaultMethodKind,
         span: Location,
-    },
-    /// While a recursive group is inferred jointly, a written effect generic has one instance,
-    /// and two of its uses disagree.
-    EffectGenericConflictInRecursiveGroup {
-        generic: Ustr,
-        source: EffType,
-        source_span: Location,
-        target: EffType,
-        target_span: Location,
-        names: EffectNames,
-    },
-    /// A body cannot use a function of its recursive group through its inferred signature.
-    EffectConflictWithInferredSignature {
-        function: Ustr,
-        source: EffType,
-        source_span: Location,
-        target: EffType,
-        target_span: Location,
-        names: EffectNames,
     },
     TraitNotFound(Location),
     InvalidGenericParams {
@@ -1700,28 +1672,6 @@ impl FormatWith<SourceTable> for CompilationError {
                     fmt_span(span)
                 )
             }
-            AmbiguousEffectInRecursiveGroup {
-                function,
-                parameter,
-                first,
-                second,
-                span,
-            } => {
-                let (position, fix) = match parameter {
-                    Some(_) => (
-                        format!("parameter {} of `{function}`", fmt_span(span)),
-                        "write its type",
-                    ),
-                    None => (
-                        format!("a requirement of {}", fmt_span(span)),
-                        "write this requirement in a `where` clause",
-                    ),
-                };
-                write!(
-                    f,
-                    "Cannot infer the effect of {position}, as it could be `{first}` or `{second}`: {fix}"
-                )
-            }
             RecursiveGroupBodyDoesNotFit {
                 function: _,
                 reason,
@@ -1732,40 +1682,6 @@ impl FormatWith<SourceTable> for CompilationError {
                     "Function {} does not fit the signature inferred for its recursive group, as {}: write its signature",
                     fmt_span(span),
                     reason.message()
-                )
-            }
-            EffectConflictWithInferredSignature {
-                function,
-                source,
-                source_span,
-                target,
-                target_span,
-                names,
-            } => {
-                write!(
-                    f,
-                    "Effect `{}` due to {} is incompatible with `{}` due to {}, because the signature of `{function}` was inferred for its recursive group: write the parameter types of `{function}`, with their effects",
-                    NamedEffectRow(source, names),
-                    fmt_span(source_span),
-                    NamedEffectRow(target, names),
-                    fmt_span(target_span),
-                )
-            }
-            EffectGenericConflictInRecursiveGroup {
-                generic,
-                source,
-                source_span,
-                target,
-                target_span,
-                names,
-            } => {
-                write!(
-                    f,
-                    "Cannot infer this recursive group: effect generic `{generic}` has one instance while the group is inferred, but it is used with `{}` due to {} and must fit `{}` due to {}. Change one of these uses so they agree",
-                    NamedEffectRow(source, names),
-                    fmt_span(source_span),
-                    NamedEffectRow(target, names),
-                    fmt_span(target_span),
                 )
             }
             TraitNotFound(span) => {
@@ -2718,19 +2634,6 @@ impl CompilationError {
                 second,
                 span
             }),
-            AmbiguousEffectInRecursiveGroup {
-                function,
-                parameter,
-                first,
-                second,
-                span,
-            } => compilation_error!(AmbiguousEffectInRecursiveGroup {
-                function,
-                parameter,
-                first,
-                second,
-                span,
-            }),
             RecursiveGroupBodyDoesNotFit {
                 function,
                 reason,
@@ -2739,36 +2642,6 @@ impl CompilationError {
                 function,
                 reason,
                 span,
-            }),
-            EffectConflictWithInferredSignature {
-                function,
-                source,
-                source_span,
-                target,
-                target_span,
-                names,
-            } => compilation_error!(EffectConflictWithInferredSignature {
-                function,
-                source,
-                source_span,
-                target,
-                target_span,
-                names,
-            }),
-            EffectGenericConflictInRecursiveGroup {
-                generic,
-                source,
-                source_span,
-                target,
-                target_span,
-                names,
-            } => compilation_error!(EffectGenericConflictInRecursiveGroup {
-                generic,
-                source,
-                source_span,
-                target,
-                target_span,
-                names,
             }),
             TraitNotFound(span) => compilation_error!(TraitNotFound(span)),
             AmbiguousTraitMethod {

@@ -1113,30 +1113,28 @@ fn body_cannot_pin_its_own_effect_generic_through_recursion() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn conflicting_uses_of_an_effect_generic_in_joint_inference_are_rejected() {
-    let mut session = TestSession::new();
-    let error = session.fail_compilation(indoc! { r#"
-        fn h<! F>(g: () -> int ! F, n: int) {
-            if n > 0 {
-                f(n - 1);
-                g
-            } else {
-                g
-            }
+fn an_effect_generic_takes_a_failing_and_a_pure_callback_in_its_group() {
+    // Each call of `h` in `f` has its own instance of `F`.
+    let h = "fn h<! F>(g: () -> int ! F, n: int) {
+        if n > 0 {
+            f(n - 1);
+            g
+        } else {
+            g
         }
-        fn p(k: () -> int ! ()) -> int {
-            k()
-        }
-        fn f(n: int) -> int {
-            let a = [1];
-            let failing = h(|| a[0], n);
-            p(h(|| 1, n)) + failing()
-        }
-    "# });
-    assert!(matches!(
-        &*error,
-        CompilationErrorImpl::EffectGenericConflictInRecursiveGroup { .. }
-    ));
+    }";
+    let f = "fn f(n: int) -> int {
+        let a = [1];
+        let failing = h(|| a[0], n);
+        p(h(|| 1, n)) + failing()
+    }";
+    let p = "fn p(k: () -> int ! ()) -> int { k() }";
+    assert_in_both_orders(p, [h, f], "f(1)", 2);
+    assert_signature_in_both_orders(
+        [h, &format!("{p}\n{f}")],
+        "h",
+        "fn h<! F>(g: () -> int ! F, n: int) -> () -> int ! F ! fallible",
+    );
 }
 
 #[test]
@@ -1164,10 +1162,11 @@ fn unwritten_position_with_two_generics_of_one_function_is_rejected() {
             }
         }
     "# });
+    // The effect of `x` would be both `E` and `F`, as it would without the recursion.
     assert!(matches!(
         &*error,
-        CompilationErrorImpl::AmbiguousEffectInRecursiveGroup { parameter: Some(parameter), .. }
-            if *parameter == ustr("x")
+        CompilationErrorImpl::EffectVariablesCombined { first, second, .. }
+            if *first == ustr("E") && *second == ustr("F")
     ));
 }
 
@@ -1839,6 +1838,205 @@ fn calls_in_a_group_share_its_types() {
         }
     }";
     assert_in_both_orders("", [f, h], "f(|| 1, 7, 3)", 7);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_written_effect_in_a_requirement_of_a_group_stays_that_generic() {
+    // `E` is inside an input of the requirement, which the body needs as written.
+    let src = indoc! { "
+        struct Pair<T, F>(T, F)
+        trait Check<Self> { fn check(x: Self) -> int; }
+        impl<! E> Check for Pair<int, (() -> int ! E)> {
+            fn check(x: Pair<int, (() -> int ! E)>) -> int { 7 }
+        }
+        fn f<T, ! E>(x: T, g: () -> int ! E, n: int) -> int
+        where Pair<T, (() -> int ! E)>: Check {
+            if n > 0 { f(x, g, n - 1) }
+            else { check(Pair(x, g)) }
+        }
+    " };
+    assert_val_eq!(
+        TestSession::new().run(&format!("{src}f(1, || 2, 3)")),
+        int(7)
+    );
+    assert_eq!(
+        signature(&mut TestSession::new(), src, "f"),
+        "fn f<T ! E>(x: T, g: () -> int ! E, n: int) -> int where T: Value, Pair<T, () -> int ! E>: Check"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn the_shapes_of_a_group_do_not_depend_on_the_effects_of_its_types() {
+    // The types of the group have one instance, so `h` gets both `Cb<! fallible>` and a pure
+    // `Cb`, and `pick` only takes the pure one: seeking the types must not check this.
+    let prelude = indoc! { "
+        struct Cb<! E>(() -> int ! E)
+        trait Run<Self |-> ! E> { fn run(x: Self) -> int ! E; }
+        impl<! E> Run for <Self = Cb<! E> |-> ! E = E> {
+            fn run(x: Cb<! E>) -> int { x.0() }
+        }
+        trait Pick<Self> { fn pick(x: Self) -> int; }
+        impl<T> Pick for T where T: Run<! E = ()> {
+            fn pick(x: T) -> int { 7 }
+        }
+        fn make() -> Cb<! fallible> { Cb(|| idiv(4, 2)) }
+    " };
+    let h = "fn h(g, n: int) { if n > 0 { f(|| 1, n - 1); g } else { g } }";
+    let f = "fn f<! E>(unused: () -> int ! E, n: int) -> int {
+        let failing = h(make(), n);
+        pick(h(Cb(|| 1), n)) + run(failing)
+    }";
+    assert_in_both_orders(prelude, [h, f], "f(|| 1, 1)", 9);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn effects_can_make_two_types_of_a_group_one() {
+    // The closure has the effect of `g`, so both calls of `read` are one application of
+    // `Read`, with one output: this is only known once effects are inferred.
+    let src = indoc! { "
+        struct Pair<T, F>(T, F)
+        trait Read<Self |-> Out> { fn read(x: Self) -> Out; }
+        impl<! E> Read for <Self = Pair<int, (() -> int ! E)> |-> Out = int> {
+            fn read(x: Pair<int, (() -> int ! E)>) -> int { x.0 }
+        }
+        fn f<T, ! E>(x: T, g: () -> int ! E, n: int) {
+            let a = read(Pair(x, g));
+            let b = read(Pair(x, || g()));
+            if n > 0 { f(x, g, n - 1); };
+            (a, b)
+        }
+    " };
+    assert_val_eq!(
+        TestSession::new().run(&format!("{src}let r = f(3, || 2, 1); r.0 + r.1")),
+        int(6)
+    );
+    assert_eq!(
+        signature(&mut TestSession::new(), src, "f"),
+        "fn f<T, B ! E>(x: T, g: () -> int ! E, n: int) -> (B, B) where T: Value, B: Value, Pair<T, () -> int ! E>: Read <Out = B>"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_type_that_a_requirement_gives_is_found_across_a_group() {
+    // Each function gets its result type from `Read`, and calls the other without using the
+    // result: in the first round the other's contract does not say yet what gives that type.
+    let prelude = indoc! { "
+        struct Pair<T, F>(T, F)
+        trait Read<Self |-> Out> { fn read(x: Self) -> Out; }
+        impl<! E> Read for <Self = Pair<int, (() -> int ! E)> |-> Out = int> {
+            fn read(x: Pair<int, (() -> int ! E)>) -> int { x.0 }
+        }
+    " };
+    let f = "fn f<T, ! E>(x: T, g: () -> int ! E, n: int) {
+        if n > 0 { h(x, g, n - 1); };
+        read(Pair(x, g))
+    }";
+    let h = "fn h<U, ! F>(x: U, g: () -> int ! F, n: int) {
+        if n > 0 { f(x, g, n - 1); };
+        read(Pair(x, g))
+    }";
+    assert_in_both_orders(prelude, [f, h], "f(3, || 2, 3)", 3);
+    // The application that `f` makes and the one that calling `h` needs are one.
+    for [first, second] in [[f, h], [h, f]] {
+        assert_eq!(
+            signature(
+                &mut TestSession::new(),
+                &format!("{prelude}{first}\n{second}\n"),
+                "f"
+            ),
+            "fn f<T, B ! E>(x: T, g: () -> int ! E, n: int) -> B where T: Value, B: Value, Pair<T, () -> int ! E>: Read <Out = B>"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_application_through_a_called_function_is_the_one_of_the_caller() {
+    // Outside a group too: the effect of `g` in the requirement of `h` is that of `f` only
+    // once effects are inferred.
+    let src = indoc! { "
+        struct Pair<T, F>(T, F)
+        trait Read<Self |-> Out> { fn read(x: Self) -> Out; }
+        impl<! E> Read for <Self = Pair<int, (() -> int ! E)> |-> Out = int> {
+            fn read(x: Pair<int, (() -> int ! E)>) -> int { x.0 }
+        }
+        fn h<U, ! F>(x: U, g: () -> int ! F) { read(Pair(x, g)) }
+        fn f<T, ! E>(x: T, g: () -> int ! E) { h(x, g); read(Pair(x, g)) }
+    " };
+    assert_val_eq!(TestSession::new().run(&format!("{src}f(3, || 2)")), int(3));
+    assert_eq!(
+        signature(&mut TestSession::new(), src, "f"),
+        "fn f<T, B ! E>(x: T, g: () -> int ! E) -> B where T: Value, B: Value, Pair<T, () -> int ! E>: Read <Out = B>"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_field_read_through_a_call_of_a_group_has_the_effect_of_its_declaration() {
+    // The recursive call needs the field `kind` with an effect of its own, which is the one of
+    // the body's own read, not all that the call performs.
+    let src = indoc! { "
+        fn f<! E>(tok, a: [int], g: () -> int ! E, n: int) -> int {
+            if n == 0 {
+                tok.kind + a[0] + g()
+            } else {
+                f(tok, a, g, n - 1)
+            }
+        }
+    " };
+    assert_val_eq!(
+        TestSession::new().run(&format!("{src}f({{ kind: 1 }}, [2], || 3, 2)")),
+        int(6)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_type_that_only_requirements_of_a_group_name_is_not_the_body_to_choose() {
+    // The types of the payloads of `Some` are in no signature: the function is generic over
+    // them, and its body does not default them or close the variants.
+    let src = indoc! { "
+        fn inspect<! E>(n, left, right, g: () -> bool ! E) {
+            if n == 0 {
+                match left {
+                    Some(number) => match right {
+                        Some(flag) => number == 1 and flag and g(),
+                        _ => false,
+                    },
+                    _ => false,
+                }
+            } else {
+                inspect(n - 1, left, right, g)
+            }
+        }
+        if inspect(1, Some(1), Some(true), || true) {
+            1
+        } else {
+            0
+        }
+    " };
+    assert_val_eq!(TestSession::new().run(src), int(1));
+    // The same for the outputs of a trait: the iterator of `a` and its items.
+    let src = indoc! { "
+        fn r<! E>(a, n, g: () -> int ! E) {
+            let mut i = iter(a);
+            let x = next(i);
+            if n == 0 {
+                g()
+            } else {
+                item(x, a, n - 1, g)
+            }
+        }
+        fn item(x, a, n, g) {
+            r(a, n, g)
+        }
+        r([1, 2], 2, || 5)
+    " };
+    assert_val_eq!(TestSession::new().run(src), int(5));
 }
 
 #[test]
