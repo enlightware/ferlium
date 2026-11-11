@@ -2052,7 +2052,7 @@ impl Module {
             captures,
             mappings,
         );
-        let imp = TraitImpl::new(
+        let mut imp = TraitImpl::new(
             trait_id,
             emit_output.output_tys,
             emit_output.output_effs,
@@ -2064,6 +2064,7 @@ impl Module {
         )
         .with_associated_const_values(associated_const_values)
         .with_associated_const_getters(associated_const_getters);
+        imp.generic_names = emit_output.generic_names;
         if !is_blanket {
             let key = ConcreteTraitImplKey::new(trait_id, emit_output.input_tys);
             self.impls.add_concrete_struct(key, imp)

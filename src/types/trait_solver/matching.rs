@@ -27,7 +27,10 @@ use crate::{
         effects::{EffType, Effect, EffectVar},
         mutability::MutType,
         r#type::{Type, TypeKind},
-        type_inference::{substitution::InstSubst, unify::UnifiedTypeInference},
+        type_inference::{
+            effect_solver::EffectConstraintOrigin, substitution::InstSubst,
+            unify::UnifiedTypeInference,
+        },
         type_like::{TypeLike, instantiate_types},
         type_mapper::{
             BitmapInstantiationMapper, EffectErasingMapper, SimpleInstantiationMapper, TypeMapper,
@@ -211,17 +214,13 @@ impl<'a> TraitSolver<'a> {
         polarity: EffectPolarity,
         fn_span: Location,
     ) -> Result<(), InternalCompilationError> {
-        match polarity {
-            EffectPolarity::Positive => {
-                ty_inf.add_effect_inclusion(impl_eff, fn_span, requested_eff, fn_span)
-            }
-            EffectPolarity::Negative => {
-                ty_inf.add_effect_inclusion(requested_eff, fn_span, impl_eff, fn_span)
-            }
-            EffectPolarity::Invariant => {
-                ty_inf.unify_same_effect(impl_eff, fn_span, requested_eff, fn_span)
-            }
-        }
+        ty_inf.relate_trait_output_effect(
+            impl_eff,
+            requested_eff,
+            polarity,
+            fn_span,
+            EffectConstraintOrigin::Inference,
+        )
     }
 
     pub(super) fn impl_matches_requested_outputs(

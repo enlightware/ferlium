@@ -17,12 +17,15 @@ use crate::{
     ast::{self, PatternType, PropertyAccess},
     containers::iterable_to_string,
     format::{FormatWith, write_with_separator, write_with_separator_and_format_fn},
-    module::{ModuleEnv, ModuleId, SubscriptMemberKind, TraitId, TypeDefId, path::Path},
+    module::{
+        ImplGenericNames, ModuleEnv, ModuleId, SubscriptMemberKind, TraitId, TypeDefId, path::Path,
+    },
     parser::location::{Location, SourceTable},
     types::{
         effects::{EffType, EffectNames, EffectRow, EffectVar, NamedEffectRow},
         r#type::{Type, TypeDisplayEnv, TypeVar},
         type_inference::unify::SubOrSameType,
+        type_like::TypeLike,
         type_scheme::PubTypeConstraint,
     },
 };
@@ -801,6 +804,7 @@ pub struct InternalTraitImplHeader {
     pub output_tys: Vec<Type>,
     pub ty_var_count: u32,
     pub constraints: Vec<PubTypeConstraint>,
+    pub generic_names: ImplGenericNames,
     pub module_id: Option<ModuleId>,
 }
 
@@ -808,7 +812,10 @@ pub struct InternalTraitImplHeader {
 pub struct ExternalTraitImplHeader {
     pub input_bindings: Vec<(String, String)>,
     pub output_bindings: Vec<(String, String)>,
-    pub ty_var_count: u32,
+    /// The names of the impl's type variables, in order.
+    pub ty_var_names: Vec<String>,
+    /// The written names of the impl's effect variables, in order.
+    pub eff_var_names: Vec<String>,
     pub constraints: Vec<String>,
     pub module_name: Option<String>,
 }
@@ -831,9 +838,18 @@ impl Display for DisplayTraitImplHeader<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let header = self.header;
         write!(f, "impl")?;
-        if header.ty_var_count > 0 {
+        if !header.ty_var_names.is_empty() || !header.eff_var_names.is_empty() {
             write!(f, "<")?;
-            write_with_separator((0..header.ty_var_count).map(TypeVar::new), ", ", f)?;
+            write_with_separator(header.ty_var_names.iter(), ", ", f)?;
+            if !header.eff_var_names.is_empty() {
+                let separator = if header.ty_var_names.is_empty() {
+                    "! "
+                } else {
+                    " ! "
+                };
+                write!(f, "{separator}")?;
+                write_with_separator(header.eff_var_names.iter(), ", ", f)?;
+            }
             write!(f, ">")?;
         }
         if header.input_bindings.len() == 1 && header.output_bindings.is_empty() {
@@ -1333,6 +1349,8 @@ pub enum CompilationErrorImpl<S: Scope> {
     OverlappingTraitImpls {
         trait_ref: S::TraitName,
         input_tys: Vec<S::Type>,
+        /// The names the new impl gives to its variables.
+        generic_names: ImplGenericNames,
         impl_span: Location,
         existing_impl: S::TraitImplHeader,
         existing_span: Option<Location>,
@@ -1352,6 +1370,17 @@ pub enum CompilationErrorImpl<S: Scope> {
         method_name: Ustr,
         expected: EffType,
         got: EffType,
+        span: Location,
+        names: EffectNames,
+    },
+    /// An output effect of a trait application at `span` does not relate to the one of its
+    /// implementation: `source` is not included in `target`.
+    TraitOutputEffectMismatch {
+        trait_ref: S::TraitName,
+        output: Ustr,
+        source: EffType,
+        source_span: Location,
+        target: EffType,
         span: Location,
         names: EffectNames,
     },
@@ -1567,24 +1596,36 @@ fn external_trait_impl_header_from_internal(
     env: &ModuleEnv<'_>,
 ) -> ExternalTraitImplHeader {
     let trait_def = env.trait_def(trait_ref);
+    // The impl's variables keep the names its source gives them.
+    let ty_var_names = header.generic_names.ty_var_names(header.ty_var_count);
+    let eff_var_names = header.generic_names.eff_var_names();
+    let type_env = TypeDisplayEnv::new(env, &ty_var_names).with_eff_var_names(&eff_var_names);
     ExternalTraitImplHeader {
         input_bindings: header
             .input_tys
             .iter()
             .zip(trait_def.input_type_names.iter())
-            .map(|(ty, name)| (name.to_string(), ty.format_with(env).to_string()))
+            .map(|(ty, name)| (name.to_string(), ty.format_with(&type_env).to_string()))
             .collect(),
         output_bindings: header
             .output_tys
             .iter()
             .zip(trait_def.output_type_names.iter())
-            .map(|(ty, name)| (name.to_string(), ty.format_with(env).to_string()))
+            .map(|(ty, name)| (name.to_string(), ty.format_with(&type_env).to_string()))
             .collect(),
-        ty_var_count: header.ty_var_count,
+        ty_var_names: (0..header.ty_var_count)
+            .map(|index| ty_var_names[&TypeVar::new(index)].to_string())
+            .collect(),
+        eff_var_names: header
+            .generic_names
+            .effs
+            .values()
+            .map(ToString::to_string)
+            .collect(),
         constraints: header
             .constraints
             .iter()
-            .map(|constraint| constraint.format_with(env).to_string())
+            .map(|constraint| constraint.format_with(&type_env).to_string())
             .collect(),
         module_name: header
             .module_id
@@ -2405,6 +2446,33 @@ impl FormatWith<SourceTable> for CompilationError {
                     fmt_span(span)
                 )
             }
+            TraitOutputEffectMismatch {
+                trait_ref,
+                output,
+                source,
+                source_span,
+                target,
+                span,
+                names,
+            } => {
+                write!(
+                    f,
+                    "Output effect `{}` of trait `{}` does not fit: `{}`",
+                    output,
+                    trait_ref,
+                    NamedEffectRow(source, names),
+                )?;
+                // The effect may come from elsewhere than the trait's use.
+                if source_span != span {
+                    write!(f, " due to {}", fmt_span(source_span))?;
+                }
+                write!(
+                    f,
+                    " is not included in `{}`, as required by {}",
+                    NamedEffectRow(target, names),
+                    fmt_span(span)
+                )
+            }
             CompilerOnlyTraitMethodUse {
                 trait_ref,
                 method_name,
@@ -3202,17 +3270,31 @@ impl CompilationError {
             OverlappingTraitImpls {
                 trait_ref,
                 input_tys,
+                generic_names,
                 impl_span,
                 existing_impl,
                 existing_span,
                 effects_ignored,
             } => compilation_error!(OverlappingTraitImpls {
                 trait_ref: env.trait_name(trait_ref).to_string(),
-                input_tys: input_tys
-                    .iter()
-                    .zip(env.trait_def(trait_ref).input_type_names.iter())
-                    .map(|(ty, name)| format!("{name} = {}", ty.format_with(env)))
-                    .collect(),
+                input_tys: {
+                    let ty_var_count = input_tys
+                        .iter()
+                        .flat_map(|ty| ty.inner_ty_vars())
+                        .map(|var| var.name() + 1)
+                        .max()
+                        .unwrap_or(0);
+                    let ty_var_names = generic_names.ty_var_names(ty_var_count);
+                    let eff_var_names = generic_names.eff_var_names();
+                    let type_env =
+                        TypeDisplayEnv::new(env, &ty_var_names).with_eff_var_names(&eff_var_names);
+                    input_tys
+                        .iter()
+                        .zip(env.trait_def(trait_ref).input_type_names.iter())
+                        .map(|(ty, name)| format!("{name} = {}", ty.format_with(&type_env)))
+                        .collect()
+                },
+                generic_names,
                 impl_span,
                 existing_impl: external_trait_impl_header_from_internal(
                     existing_impl,
@@ -3249,6 +3331,23 @@ impl CompilationError {
                 method_name,
                 expected,
                 got,
+                span,
+                names,
+            }),
+            TraitOutputEffectMismatch {
+                trait_ref,
+                output,
+                source,
+                source_span,
+                target,
+                span,
+                names,
+            } => compilation_error!(TraitOutputEffectMismatch {
+                trait_ref: env.trait_name(trait_ref).to_string(),
+                output,
+                source,
+                source_span,
+                target,
                 span,
                 names,
             }),

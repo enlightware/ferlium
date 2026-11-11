@@ -69,8 +69,8 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        ConcreteTraitImplKey, LocalFunctionId, LocalImplId, LocalSubscriptId, Module, ModuleEnv,
-        ModuleFunction, ModuleId, Path as ModulePath,
+        ConcreteTraitImplKey, ImplGenericNames, LocalFunctionId, LocalImplId, LocalSubscriptId,
+        Module, ModuleEnv, ModuleFunction, ModuleId, Path as ModulePath,
         PendingGeneratedStructuralProjectionSubscripts, PendingModuleFunction, ProjectionKey,
         SubscriptMemberFunctionKind, TraitImpl, UModuleFunction, Visibility, YieldProvenance,
         build_capturing_dictionary_value, build_dictionary_value, dictionary_capture_plan, id::Id,
@@ -1068,6 +1068,7 @@ fn emit_module_contents(
                 0,
                 0,
                 &[],
+                &ImplGenericNames::default(),
                 imp.span,
             )?;
             // Pre-allocate placeholder functions for each trait method.
@@ -1432,6 +1433,7 @@ impl ModuleEmission<'_> {
                 emit_output.ty_var_count,
                 emit_output.eff_var_count,
                 &emit_output.constraints,
+                &emit_output.generic_names,
                 imp.span,
             )?;
             let associated_const_values = associated_const_values_for_source_impl(

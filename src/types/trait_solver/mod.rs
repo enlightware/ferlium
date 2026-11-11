@@ -51,6 +51,7 @@ use crate::{
         effects::{EffType, EffectVar},
         r#trait::{Trait, TraitAssociatedConstIndex},
         r#type::{SubscriptType, Type, TypeDef, TypeKind, TypeVar},
+        type_inference::effect_solver::EffectConstraintOrigin,
         type_like::TypeLike,
         type_properties::{TypePropertyEnv, concrete_type_is_trivial_copy, trivial_copy_impl_key},
         type_scheme::PubTypeConstraint,
@@ -565,6 +566,21 @@ impl<'a> TraitSolver<'a> {
     /// The polarity of each output effect of `trait_id`.
     pub(crate) fn output_effect_polarities(&self, trait_id: TraitId) -> Vec<EffectPolarity> {
         trait_output_effect_polarities(trait_id, &|id| self.trait_def(id))
+    }
+
+    /// The diagnostic origin of a constraint on the output effect `index` of `trait_id`, for an
+    /// application at `span`.
+    pub(crate) fn output_effect_origin(
+        &self,
+        trait_id: TraitId,
+        index: usize,
+        span: Location,
+    ) -> EffectConstraintOrigin {
+        EffectConstraintOrigin::TraitOutput {
+            trait_id,
+            output: self.trait_def(trait_id).output_effect_names[index],
+            span,
+        }
     }
 
     fn type_var_capacity_for_types<'t>(types: impl IntoIterator<Item = &'t Type>) -> u32 {

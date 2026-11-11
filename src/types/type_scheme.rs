@@ -1097,6 +1097,12 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
     }
 
     pub(crate) fn normalize(&mut self) -> InstSubst {
+        self.normalize_with_leading_effects(&[])
+    }
+
+    /// As [`Self::normalize`], numbering the retained variables of `leading` first, in their
+    /// order: written generics, which keep their names by position.
+    pub(crate) fn normalize_with_leading_effects(&mut self, leading: &[EffectVar]) -> InstSubst {
         // Build a substitution that maps each type quantifier to a fresh type variable from 0.
         let ty_subst = normalize_types(&mut self.ty_quantifiers);
 
@@ -1113,9 +1119,17 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
                 eff_subst.insert(*var, EffType::empty());
             }
         });
-        self.eff_quantifiers = retained_effect_vars
-            .into_iter()
-            .sorted()
+        self.eff_quantifiers = leading
+            .iter()
+            .copied()
+            .filter(|var| retained_effect_vars.contains(var))
+            .chain(
+                retained_effect_vars
+                    .iter()
+                    .copied()
+                    .sorted()
+                    .filter(|var| !leading.contains(var)),
+            )
             .enumerate()
             .map(|(i, var)| {
                 let new_var = EffectVar::new(i as u32);

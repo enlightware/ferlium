@@ -8,8 +8,8 @@ use crate::{
     compiler::error::{ImplEffectRestriction, InternalCompilationError, InternalTraitImplHeader},
     internal_compilation_error,
     module::{
-        BlanketTraitImplKey, BlanketTraitImplSubKey, ConcreteTraitImplKey, Module, ModuleEnv,
-        ModuleId, TraitId, TraitImpl, TraitKey,
+        BlanketTraitImplKey, BlanketTraitImplSubKey, ConcreteTraitImplKey, ImplGenericNames,
+        Module, ModuleEnv, ModuleId, TraitId, TraitImpl, TraitKey,
     },
     std::value::{NO_DERIVE_VALUE_ATTRIBUTE, is_value_trait},
     types::{
@@ -132,6 +132,7 @@ pub(crate) fn check_trait_impl(
     ty_var_count: u32,
     eff_var_count: u32,
     constraints: &[PubTypeConstraint],
+    generic_names: &ImplGenericNames,
     span: Location,
 ) -> Result<(), InternalCompilationError> {
     let env = ModuleEnv::new(current, others);
@@ -216,6 +217,7 @@ pub(crate) fn check_trait_impl(
             return Err(internal_compilation_error!(OverlappingTraitImpls {
                 trait_ref: trait_id,
                 input_tys: input_tys.to_vec(),
+                generic_names: generic_names.clone(),
                 impl_span: span,
                 existing_impl: existing_impl_header(&key, imp, module_id),
                 existing_span: imp.source_span,
@@ -325,6 +327,7 @@ pub(crate) fn check_module_coherence(
                 return Err(internal_compilation_error!(OverlappingTraitImpls {
                     trait_ref: key.trait_id(),
                     input_tys,
+                    generic_names: imp.generic_names.clone(),
                     impl_span: imp.source_span.unwrap_or_else(Location::new_synthesized),
                     existing_impl: existing_impl_header(other_key, other_imp, *other_module_id),
                     existing_span: other_imp.source_span,
@@ -881,6 +884,7 @@ fn existing_impl_header(
             output_tys: imp.output_tys.clone(),
             ty_var_count: 0,
             constraints: Vec::new(),
+            generic_names: ImplGenericNames::default(),
             module_id,
         },
         TraitKey::Blanket(key) => InternalTraitImplHeader {
@@ -888,6 +892,7 @@ fn existing_impl_header(
             output_tys: imp.output_tys.clone(),
             ty_var_count: key.sub_key.ty_var_count,
             constraints: key.sub_key.constraints.clone(),
+            generic_names: imp.generic_names.clone(),
             module_id,
         },
     }

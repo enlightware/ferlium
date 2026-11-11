@@ -2813,11 +2813,71 @@ fn an_effect_requirement_of_a_selected_impl_is_reported_where_it_is_applied() {
         fn f<! E>(g: () -> int ! E) -> DataValue {{ serialize((Wrap(Cb(g)),)) }}"
     );
     let error = TestSession::new().fail_compilation(&source);
-    let CompilationErrorImpl::InvalidEffectInclusion { source_span, .. } = &*error else {
+    let CompilationErrorImpl::TraitOutputEffectMismatch {
+        trait_ref, span, ..
+    } = &*error
+    else {
         panic!("unexpected diagnostic: {error:?}")
     };
+    assert_eq!(trait_ref, "Run");
     let call = source.rfind("serialize(").expect("the program has a call");
-    assert_eq!(source_span.start_usize(), call, "{error:?}");
+    assert_eq!(span.start_usize(), call, "{error:?}");
+}
+
+/// The bound `Run<! E = ()>` of a callee, a selected impl or a trait meets a written generic of
+/// the query: the diagnostic names the trait, its output effect and the written generic.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_effect_output_bound_met_by_a_written_generic_names_the_trait_and_the_generic() {
+    for (program, generic) in [
+        (
+            "fn p<T>(x: T) -> int where T: Run<! E = ()> { run(x) }
+            fn f<! G>(g: () -> int ! G) -> int { p(Cb(g)) }",
+            "G",
+        ),
+        (
+            "struct Wrap<T>(T)
+            impl<T> Serialize for Wrap<T> where T: Run<! E = ()> {
+                fn serialize(x: Wrap<T>) -> DataValue { serialize(run(x.0)) }
+            }
+            fn f<! G>(g: () -> int ! G) -> DataValue { serialize(Wrap(Cb(g))) }",
+            "G",
+        ),
+        (
+            "trait Twice<Self> where Self: Run<! E = ()> {
+                fn twice(x: Self) -> int { run(x) + run(x) }
+            }
+            impl<! G> Twice for Cb<! G> {}",
+            "G",
+        ),
+        // The generic reaches the application through an inferred effect.
+        (
+            "fn p<T>(x: T) -> int where T: Run<! E = ()> { run(x) }
+            fn f<! G>(g: () -> int ! G) -> int { let both = [|| 1, g]; p(Cb(both[0])) }",
+            "G",
+        ),
+    ] {
+        let error = TestSession::new().fail_compilation(&format!("{CALL_THROUGH_TRAIT}{program}"));
+        let CompilationErrorImpl::TraitOutputEffectMismatch {
+            trait_ref,
+            output,
+            source,
+            target,
+            names,
+            ..
+        } = &*error
+        else {
+            panic!("unexpected diagnostic for {program}: {error:?}")
+        };
+        assert_eq!(trait_ref, "Run", "{program}");
+        assert_eq!(output.as_str(), "E", "{program}");
+        assert_eq!(
+            NamedEffectRow(source, names).to_string(),
+            generic,
+            "{program}"
+        );
+        assert!(target.is_empty(), "{program}: {error:?}");
+    }
 }
 
 #[test]
@@ -3015,6 +3075,76 @@ fn recursive_custom_value_impls_restrict_effects_across_the_cycle() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_recursive_type_carries_the_restriction_of_a_custom_value_impl() {
+    // The derived `Value` of `Chain` needs the one of `Wrap` at each link, and its own.
+    let prelude = format!(
+        "{RUN_PRELUDE}struct Wrap<T>(T)
+impl<T> Value for Wrap<T> where T: Value, T: Run<! E = ()> {{
+ fn eq(x: Wrap<T>, y: Wrap<T>) -> bool {{ run(x.0) == run(y.0) }}
+ fn to_string(x: Wrap<T>) -> string {{ to_string(run(x.0)) }}
+ fn hash(x: Wrap<T>, state: &mut hasher) {{}}
+ fn clone(x: Wrap<T>) -> Wrap<T> {{ Wrap(x.0) }}
+ fn drop(x: &mut Wrap<T>) {{}}
+}}
+enum Chain<T> {{ End, Link(Wrap<T>, Chain<T>) }}
+"
+    );
+    for (body, expected) in [
+        (
+            "to_string(Chain::Link(Wrap(Cb(g)), Chain::Link(Wrap(Cb(g)), Chain::End)))",
+            string("Chain::Link (5, Chain::Link (5, Chain::End))"),
+        ),
+        (
+            "let a = Chain::Link(Wrap(Cb(g)), Chain::End);\n to_string(a == a)",
+            string("true"),
+        ),
+    ] {
+        let src = format!("{prelude}fn f(g: () -> int) -> string {{ {body} }}\n");
+        let mut session = TestSession::new();
+        session.allow_unsafe();
+        assert_eq!(
+            signature(&mut session, &src, "f"),
+            "fn f(g: () -> int) -> string",
+            "{body}"
+        );
+        let mut session = TestSession::new();
+        session.allow_unsafe();
+        assert_val_eq!(session.run(&format!("{src}f(|| 5)")), expected);
+        let mut session = TestSession::new();
+        session.allow_unsafe();
+        session.fail_compilation(&format!("{src}f(|| idiv(1, 0))"));
+    }
+    // Taking a chain apart drops the rest of it, which needs the impl too.
+    let src = format!(
+        "{prelude}fn first<T>(c: Chain<T>, other: T) -> T {{
+    match c {{
+        Link(w, rest) => w.0,
+        End => other,
+    }}
+}}
+fn f(g: () -> int) -> int {{ run(first(Chain::Link(Wrap(Cb(g)), Chain::End), Cb(g))) }}
+"
+    );
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    assert_eq!(
+        signature(&mut session, &src, "first"),
+        "fn first<T>(c: Chain<T>, other: T) -> T where T: Value, Wrap<T>: Value"
+    );
+    assert_eq!(
+        signature(&mut session, &src, "f"),
+        "fn f(g: () -> int) -> int"
+    );
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    assert_val_eq!(session.run(&format!("{src}f(|| 5)")), int(5));
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    session.fail_compilation(&format!("{src}f(|| idiv(1, 0))"));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn fixed_output_effects_of_prerequisites_are_upper_bounds() {
     // A pure callback fits a bound allowing failure.
     let mut session = TestSession::new();
@@ -3138,6 +3268,57 @@ f(n)",
             int(5),
             "{bounds:?}"
         );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_default_method_may_perform_the_output_effect_of_its_trait() {
+    // Directly, and through a function bounded by the trait.
+    let step = |twice: &str, via: &str| {
+        format!(
+            "struct Cb<T>(T)
+fn forward<T, ! F>(x: T) -> int where T: Step<! E = F> {{ step(x) }}
+trait Step<Self |-> ! E> {{
+    fn step(x: Self) -> int ! E;
+    fn twice(x: Self) -> int{twice}
+    fn via(x: Self) -> int{via}
+}}
+impl<! E> Step for <Self = Cb<(() -> int ! E)> |-> ! E = E> {{
+    fn step(x: Cb<(() -> int ! E)>) -> int {{ x.0() }}
+}}
+fn pure(k: () -> int ! ()) -> int {{ k() }}
+fn f(g: () -> int) -> int {{ twice(Cb(g)) + via(Cb(g)) }}
+"
+        )
+    };
+    let src = step(" ! E { step(x) + step(x) }", " ! E { forward(x) }");
+    assert_eq!(
+        signature(&mut TestSession::new(), &src, "f"),
+        "fn f<! e₀>(g: () -> int ! e₀) -> int ! e₀"
+    );
+    assert_val_eq!(
+        TestSession::new().run(&format!("{src}pure(|| f(|| 2))")),
+        int(6)
+    );
+    for call in [
+        "twice(Cb(|| idiv(1, 0)))",
+        "via(Cb(|| idiv(1, 0)))",
+        "f(|| idiv(1, 0))",
+    ] {
+        TestSession::new().fail_compilation(&format!("{src}pure(|| {call})"));
+        assert_eq!(
+            TestSession::new().fail_run(&format!("{src}{call}")),
+            SourceFailureKind::DivisionByZero
+        );
+    }
+    // A default method cannot perform more than it declares, nor declare less than it performs.
+    for (twice, via) in [
+        (" { step(x) }", " ! E { forward(x) }"),
+        (" ! E { step(x) }", " { forward(x) }"),
+        (" ! E { step(x) + idiv(1, 0) }", " ! E { forward(x) }"),
+    ] {
+        TestSession::new().fail_compilation(&format!("{}1", step(twice, via)));
     }
 }
 
@@ -3271,4 +3452,130 @@ impl<T> Show for Wrap<T> where [T]: Check { fn show(x: Wrap<T>) -> string { \"sh
         assert_val_eq!(session.run(&format!("{src}f(|| 5)")), string(expected));
         session.fail_compilation(&format!("{src}f(|| idiv(1, 0))"));
     }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn accessors_of_a_subscript_keep_the_same_written_effect_names() {
+    // `E` is not used, so `F` comes first, in each accessor.
+    let src = indoc! { "
+        subscript held<! E, F>(slot: &mut (() -> int ! F), x: () -> int) -> (() -> int ! F) {
+            ref { if false { slot->[held](x) = slot }; slot }
+            mut { if false { let z = slot->[held](x); z(); }; slot }
+        }
+        let mut slot = || 5;
+        let f = slot->[held](|| idiv(1, 0));
+        f()
+    " };
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    let module_id = session.compile(src).module_id;
+    let compiler_session = session.session();
+    let module = compiler_session.expect_fresh_module(module_id);
+    let rendered = module.format_with(&compiler_session.modules()).to_string();
+    let accessors: Vec<_> = rendered
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("fn held::"))
+        .collect();
+    assert_eq!(accessors.len(), 2, "{rendered}");
+    for accessor in accessors {
+        assert!(
+            accessor.contains(
+                "<! F, e₁>(slot: &mut () -> int ! F, x: () -> int ! e₁) -> place () -> int ! F"
+            ),
+            "{accessor}"
+        );
+    }
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    assert_val_eq!(session.run(src), int(5));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_effect_left_unwritten_in_an_annotation_is_not_a_written_generic() {
+    // In a local annotation: the closure may fail, whatever `E` is.
+    assert_val_eq!(
+        TestSession::new().run(indoc! { "
+            fn f<! E>(a: () -> int ! E, n: int) -> int {
+                let y: () -> int = || idiv(4, n);
+                y() + a()
+            }
+            f(|| 1, 2)
+        " }),
+        int(3)
+    );
+    // In a parameter: the effect of `x` is its own, so a failing `x` leaves the result pure.
+    let f = "fn f<! E>(a: () -> int ! E, x: () -> int) -> (() -> int ! E) { a }\n";
+    assert_eq!(
+        signature(&mut TestSession::new(), f, "f"),
+        "fn f<! E, e₁>(a: () -> int ! E, x: () -> int ! e₁) -> () -> int ! E"
+    );
+    assert_val_eq!(
+        TestSession::new().run(&format!(
+            "{f}fn pure(k: () -> int ! ()) -> int {{ k() }}
+            pure(f(|| 1, || idiv(1, 0)))"
+        )),
+        int(1)
+    );
+    // Each parameter's unwritten effect is its own, and a written generic keeps its name when
+    // one before it is not used.
+    assert_eq!(
+        signature(
+            &mut TestSession::new(),
+            "fn f<! E, F>(a: () -> int ! F, x: () -> int, y: () -> int) -> int { a() }",
+            "f"
+        ),
+        "fn f<! F, e₁, e₂>(a: () -> int ! F, x: () -> int ! e₁, y: () -> int ! e₂) -> int ! F"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_effect_left_unwritten_in_a_requirement_is_inferred() {
+    // A requirement that the body does not use is met by any implementation, whatever the
+    // body performs.
+    for (body, expected) in [("n", 0), ("let a = [1]; a[n]", 1)] {
+        let h =
+            format!("{CALL_THROUGH_TRAIT}fn h<T>(x: T, n: int) -> int where T: Run {{ {body} }}\n");
+        assert_val_eq!(
+            TestSession::new().run(&format!("{h}h(Cb(|| idiv(1, 0)), 0)")),
+            int(expected),
+            "{body}"
+        );
+        assert_val_eq!(
+            TestSession::new().run(&format!(
+                "{h}fn user<! G>(g: () -> int ! G) -> int {{ h(Cb(g), 0) }}
+                user(|| 1)"
+            )),
+            int(expected),
+            "{body}"
+        );
+    }
+    // A requirement that the body uses adds its effect to the function's.
+    let h = format!(
+        "{CALL_THROUGH_TRAIT}fn h<T>(x: T, n: int) -> int where T: Run {{
+            let a = [n];
+            run(x) + a[0]
+        }}\n"
+    );
+    assert_eq!(
+        signature(&mut TestSession::new(), &h, "h"),
+        "fn h<T ! e₀>(x: T, n: int) -> int ! (fallible, e₀) where T: Run < ! E = e₀>"
+    );
+    assert_eq!(
+        TestSession::new().fail_run(&format!("{h}h(Cb(|| idiv(1, 0)), 0)")),
+        SourceFailureKind::DivisionByZero
+    );
+    // Likewise for the requirement of an impl.
+    let outer = format!(
+        "{CALL_THROUGH_TRAIT}trait Outer<Self> {{ fn outer(s: Self) -> int; }}
+        struct Wrap<T>(T)
+        impl<T> Outer for Wrap<T> where T: Run {{ fn outer(s: Wrap<T>) -> int {{ 7 }} }}\n"
+    );
+    assert_val_eq!(
+        TestSession::new().run(&format!("{outer}outer(Wrap(Cb(|| idiv(1, 0))))")),
+        int(7)
+    );
 }

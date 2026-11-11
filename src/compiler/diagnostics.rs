@@ -302,6 +302,15 @@ pub(crate) fn diagnostics_from_error(
             target_span: got_span,
             ..
         } => vec![*expected_span, *got_span],
+        TraitOutputEffectMismatch {
+            source_span, span, ..
+        } => {
+            if source_span == span {
+                vec![*span]
+            } else {
+                vec![*source_span, *span]
+            }
+        }
         DuplicatedField {
             first_occurrence,
             second_occurrence,

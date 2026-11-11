@@ -28,7 +28,6 @@ use crate::{
     },
     std::{core_traits_names::VALUE_TRAIT_NAME, value::generated_value_evidence_types},
     types::{
-        effect_polarity::EffectPolarity,
         effects::{EffType, EffectVar},
         r#trait::TraitDictionaryEntryIndex,
         r#type::{FnType, Type, TypeKind, TypeVar},
@@ -977,24 +976,16 @@ impl TraitSolver<'_> {
                 span,
             )?;
         }
-        for ((head, output), polarity) in candidate
+        for (index, ((head, output), polarity)) in candidate
             .effects
             .iter()
             .zip(output_effs)
             .zip(self.output_effect_polarities(*trait_id))
+            .enumerate()
         {
             let head = head.instantiate(&substitution.1);
-            match polarity {
-                EffectPolarity::Positive => {
-                    inference.add_effect_inclusion(&head, span, output, span)?
-                }
-                EffectPolarity::Negative => {
-                    inference.add_effect_inclusion(output, span, &head, span)?
-                }
-                EffectPolarity::Invariant => {
-                    inference.unify_same_effect(&head, span, output, span)?
-                }
-            }
+            let origin = self.output_effect_origin(*trait_id, index, span);
+            inference.relate_trait_output_effect(&head, output, polarity, span, origin)?;
         }
         if !inference.declared_generics_intact(&rigid) {
             return Err(unresolved(constraint));

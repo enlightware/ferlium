@@ -1,7 +1,7 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-use std::mem;
+use std::{iter::once, mem};
 
 use itertools::process_results;
 
@@ -87,14 +87,30 @@ fn primitive_effect_by_name(name: Ustr) -> Option<PrimitiveEffect> {
     }
 }
 
+/// The variable standing for an effect left unwritten in an annotation: the first one that no
+/// generic in scope has, as sharing the variable of a written generic would make the effect
+/// that generic. Variables numbered after the generics start after it.
+fn implicit_effect_var(generic_eff_params: Option<&GenericEffParams>) -> EffectVar {
+    EffectVar::new(
+        generic_eff_params
+            .into_iter()
+            .flat_map(|params| params.values())
+            .map(|var| var.name() + 1)
+            .max()
+            .unwrap_or(0),
+    )
+}
+
 fn desugar_fn_effects(
     effects: &PFnEffects,
     generic_eff_params: Option<&GenericEffParams>,
 ) -> Result<EffType, InternalCompilationError> {
     match effects {
         PFnEffects::ImplicitPure => Ok(EffType::empty()),
-        // Always emit variable id 0 here; type inference will freshen it later.
-        PFnEffects::ImplicitGeneric => Ok(EffType::single_variable_id(0)),
+        // Type inference freshens this variable at each occurrence.
+        PFnEffects::ImplicitGeneric => Ok(EffType::single_variable(implicit_effect_var(
+            generic_eff_params,
+        ))),
         PFnEffects::Explicit(effects) => {
             let mut result = EffType::empty();
             let mut first_var_name = None;

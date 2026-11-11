@@ -1585,9 +1585,7 @@ impl PModuleFunction {
                 ))
             })
             .transpose()?;
-        let mut next_effect_var = generic_eff_params
-            .values()
-            .map(|var| var.name() + 1)
+        let mut next_effect_var = once(implicit_effect_var(Some(&generic_eff_params)).name() + 1)
             .chain(
                 args.iter()
                     .filter_map(|arg| arg.ty.map(|(_, ty, _)| ty))
@@ -1681,9 +1679,7 @@ impl ast::PSubscriptDefinition {
             })
             .transpose()?;
 
-        let mut next_effect_var = generic_eff_params
-            .values()
-            .map(|var| var.name() + 1)
+        let mut next_effect_var = once(implicit_effect_var(Some(&generic_eff_params)).name() + 1)
             .chain(
                 args.iter()
                     .filter_map(|arg| arg.ty.map(|(_, ty, _)| ty))

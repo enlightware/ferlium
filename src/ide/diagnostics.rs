@@ -865,6 +865,7 @@ pub(super) fn compilation_error_to_data(
             existing_impl,
             existing_span,
             effects_ignored,
+            ..
         } => {
             let mut diagnostics = vec![error_data_from_location(
                 impl_span,
@@ -918,6 +919,26 @@ pub(super) fn compilation_error_to_data(
                     trait_ref,
                     NamedEffectRow(expected, names),
                     NamedEffectRow(got, names),
+                ),
+            )]
+        }
+        TraitOutputEffectMismatch {
+            trait_ref,
+            output,
+            source,
+            target,
+            span,
+            names,
+            ..
+        } => {
+            vec![error_data_from_location(
+                span,
+                format!(
+                    "Output effect `{}` of trait `{}` does not fit: `{}` is not included in `{}`",
+                    output,
+                    trait_ref,
+                    NamedEffectRow(source, names),
+                    NamedEffectRow(target, names),
                 ),
             )]
         }

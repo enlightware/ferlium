@@ -1,7 +1,7 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{iter::once, slice};
+use std::{borrow::Cow, iter::once, slice};
 
 use indexmap::IndexMap;
 use itertools::Itertools;
@@ -42,11 +42,11 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        DictionaryEntryRequirements, FunctionId, GENERATED_LAMBDA_PREFIX, LocalDecl, LocalDeclId,
-        LocalFunctionId, LocalSubscriptId, Module, ModuleEnv, ModuleFunction, ModuleFunctionSpans,
-        PendingFunctionBody, PendingModuleFunction, ProjectionKey, QualifiedNameEnv,
-        SubscriptMemberFunctionKind, SubscriptMemberKind, SubscriptSignature, TraitId, Visibility,
-        YieldProvenance, id::Id,
+        DictionaryEntryRequirements, FunctionId, GENERATED_LAMBDA_PREFIX, ImplGenericNames,
+        LocalDecl, LocalDeclId, LocalFunctionId, LocalSubscriptId, Module, ModuleEnv,
+        ModuleFunction, ModuleFunctionSpans, PendingFunctionBody, PendingModuleFunction,
+        ProjectionKey, QualifiedNameEnv, SubscriptMemberFunctionKind, SubscriptMemberKind,
+        SubscriptSignature, TraitId, Visibility, YieldProvenance, id::Id,
     },
     std::core_traits_names::VALUE_TRAIT_NAME,
     types::{
@@ -98,6 +98,7 @@ pub(crate) struct EmitTraitOutput {
     pub(crate) constraints: Vec<PubTypeConstraint>,
     pub(crate) functions: Vec<LocalFunctionId>,
     pub(crate) method_requirements: Vec<DictionaryEntryRequirements>,
+    pub(crate) generic_names: ImplGenericNames,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -554,6 +555,24 @@ fn unconstrained_diverging_returns<'func>(
         defaults.push((*id, ret_var));
     }
     defaults
+}
+
+/// `subst` extended for the requirements of a declaration: an output effect left unwritten in
+/// one is inferred, so it gets a variable of its own. The annotations of the bodies keep `subst`,
+/// in which no such effect has a variable.
+fn with_unwritten_requirement_effects<'a>(
+    mut subst: Cow<'a, InstSubst>,
+    requirements: &[PubTypeConstraint],
+    ty_inf: &mut TypeInference,
+) -> Cow<'a, InstSubst> {
+    for requirement in requirements {
+        for var in requirement.inner_effect_vars().into_iter().sorted() {
+            if !subst.1.contains_key(&var) {
+                subst.to_mut().1.insert(var, ty_inf.fresh_effect_var_ty());
+            }
+        }
+    }
+    subst
 }
 
 /// The fixed signature of a function of a recursive group with written effect generics.
@@ -1510,15 +1529,16 @@ where
                     .instantiate_location_cloned(trait_ctx.span),
             );
         }
-        let mut mapper = impl_annotation_subst
-            .as_ref()
-            .map(BitmapInstantiationMapper::new);
+        let subst = with_unwritten_requirement_effects(
+            impl_annotation_subst
+                .as_ref()
+                .map_or_else(Default::default, Cow::Borrowed),
+            trait_ctx.impl_constraints,
+            &mut ty_inf,
+        );
+        let mut mapper = BitmapInstantiationMapper::new(&subst);
         for constraint in trait_ctx.impl_constraints {
-            let constraint = match &mut mapper {
-                Some(m) => constraint.map(m),
-                None => constraint.clone(),
-            };
-            ty_inf.add_pub_constraint(constraint);
+            ty_inf.add_pub_constraint(constraint.map(&mut mapper));
         }
         self_given = Some(
             ty_inf.add_given_constraint(PubTypeConstraint::new_have_trait(
@@ -1539,6 +1559,7 @@ where
             constraints: vec![],
             functions: vec![],
             method_requirements: vec![],
+            generic_names: ImplGenericNames::default(),
         })
     } else {
         None
@@ -1557,6 +1578,8 @@ where
     let mut function_annotation_substs = Vec::new();
     let mut declared_signatures = Vec::new();
     let mut function_explicit_root_tys = Vec::new();
+    // The variable of each written effect generic of each function.
+    let mut function_written_effects: Vec<Vec<EffectVar>> = Vec::new();
     let mut function_attrs = Vec::new();
     let mut function_kinds = Vec::new();
     let mut subscript_signatures: FxHashMap<LocalSubscriptId, SharedSubscriptSignature> =
@@ -1716,7 +1739,12 @@ where
         }
         // A contract already holds the written requirements, as givens.
         if !mode.is_validation() {
-            let mut mapper = BitmapInstantiationMapper::new(&annotation_subst);
+            let subst = with_unwritten_requirement_effects(
+                Cow::Borrowed(&annotation_subst),
+                where_clause,
+                &mut ty_inf,
+            );
+            let mut mapper = BitmapInstantiationMapper::new(&subst);
             for constraint in where_clause {
                 ty_inf.add_pub_constraint(constraint.map(&mut mapper));
             }
@@ -1930,9 +1958,19 @@ where
             output.name_function_with_visibility(id, name.0, *visibility);
         }
         local_fns.push(id);
+        // Read from the substitution, as the accessors of a subscript share the one of the first.
+        let written_effects = (0..generic_params.effect_params().len())
+            .map(|index| {
+                let source_var = EffectVar::new((outer_annotation_eff_var_count + index) as u32);
+                annotation_subst.1[&source_var]
+                    .to_single_variable()
+                    .expect("a written effect generic maps to a variable")
+            })
+            .collect();
         function_annotation_substs.push(annotation_subst);
         ty_inf.add_declared_generics(explicit_root_tys.iter().copied());
         function_explicit_root_tys.push(explicit_root_tys);
+        function_written_effects.push(written_effects);
         function_attrs.push(attrs);
         function_kinds.push(kind);
         subscript_attachments.push(input.subscript_attachments.to_vec());
@@ -2680,6 +2718,39 @@ where
             trait_ctx.span,
         );
 
+        // The written name of each impl variable, at the position normalization gives it.
+        if let Some((ty_subst, eff_subst)) = &impl_annotation_subst {
+            for (index, (name, _)) in trait_ctx.generic_type_params.iter().enumerate() {
+                let position = ty_subst
+                    .get(&TypeVar::new(index as u32))
+                    .map(|root| ty_inf.substitute_in_type(*root))
+                    .and_then(|root| root.data().as_variable().copied())
+                    .and_then(|var| quantifiers.iter().position(|quantifier| *quantifier == var));
+                if let Some(position) = position {
+                    trait_output
+                        .generic_names
+                        .tys
+                        .insert(TypeVar::new(position as u32), *name);
+                }
+            }
+            for (index, name) in trait_ctx.generic_effect_param_names.iter().enumerate() {
+                let position = eff_subst
+                    .get(&EffectVar::new(index as u32))
+                    .and_then(|row| ty_inf.substitute_in_effect_type(row).to_single_variable())
+                    .and_then(|var| {
+                        effect_quantifiers
+                            .iter()
+                            .position(|quantifier| *quantifier == var)
+                    });
+                if let Some(position) = position {
+                    trait_output
+                        .generic_names
+                        .effs
+                        .insert(EffectVar::new(position as u32), *name);
+                }
+            }
+        }
+
         // Fifth pass, normalize the input types/effects, substitute the types in the functions and input/output types.
         let subst = (
             normalize_types(&mut quantifiers),
@@ -3371,13 +3442,33 @@ where
         }
 
         // Fifth pass, normalize the type schemes, substitute the types in the functions.
-        for (input, id) in ast_functions().zip(local_fns.iter()) {
+        for ((input, id), written_effects) in ast_functions()
+            .zip(local_fns.iter())
+            .zip(&function_written_effects)
+        {
             let descr = &mut output.functions[id.as_index()];
-            let subst = descr.definition.ty_scheme.normalize();
+            let subst = descr
+                .definition
+                .ty_scheme
+                .normalize_with_leading_effects(written_effects);
             let normalized_scheme = descr.definition.ty_scheme.clone();
+            // A written generic that the scheme does not retain leaves no name behind, so that
+            // the retained ones keep theirs by position.
+            let retained_effect_params = written_effects
+                .iter()
+                .zip(input.function.generic_params.effect_params())
+                .filter(|(var, _)| subst.1.get(var).is_some_and(|row| !row.is_empty()))
+                .map(|(_, name)| *name)
+                .collect::<Vec<_>>();
             for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
                 let descr = &mut output.functions[function_id.as_index()];
                 let mut mapper = BitmapInstantiationMapper::new(&subst);
+                assert_eq!(
+                    written_effects.len(),
+                    descr.definition.generic_effect_params.len(),
+                    "each written effect generic has its variable"
+                );
+                descr.definition.generic_effect_params = retained_effect_params.clone();
                 if function_id != *id {
                     descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
                     descr.definition.ty_scheme.ty_quantifiers =

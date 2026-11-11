@@ -1,7 +1,7 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{fmt, hash::Hash, rc::Rc};
+use std::{collections::BTreeMap, fmt, hash::Hash, rc::Rc};
 
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
@@ -14,7 +14,7 @@ use crate::{
     FxHashMap,
     containers::b,
     define_id_type,
-    format::{FormatWith, write_with_separator_and_format_fn},
+    format::{FormatWith, type_variable_index_to_string_latin, write_with_separator_and_format_fn},
     hir::{
         ENodeArena, NodeArena,
         dictionary::DictionaryReq,
@@ -413,6 +413,44 @@ pub fn build_capturing_dictionary_value(
         .with_captures(capture_schema, entry_capture_mappings)
 }
 
+/// The written names of an impl's type and effect variables, for diagnostics. A variable that the
+/// source does not name, such as an output that a requirement determines, has none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImplGenericNames {
+    pub tys: BTreeMap<TypeVar, Ustr>,
+    pub effs: BTreeMap<EffectVar, Ustr>,
+}
+
+impl ImplGenericNames {
+    /// A name for each of the `count` type variables of the impl: its written one, or else the
+    /// first letter that names no other.
+    pub fn ty_var_names(&self, count: u32) -> FxHashMap<TypeVar, Ustr> {
+        let mut used = self.tys.values().copied().collect::<FxHashSet<_>>();
+        let mut names = self
+            .tys
+            .iter()
+            .map(|(var, name)| (*var, *name))
+            .collect::<FxHashMap<_, _>>();
+        for var in (0..count).map(TypeVar::new) {
+            if names.contains_key(&var) {
+                continue;
+            }
+            let name = (var.name()..)
+                .map(|index| Ustr::from(&type_variable_index_to_string_latin(index)))
+                .find(|name| !used.contains(name))
+                .expect("some letter is free");
+            used.insert(name);
+            names.insert(var, name);
+        }
+        names
+    }
+
+    /// The written name of each effect variable of the impl that has one.
+    pub fn eff_var_names(&self) -> FxHashMap<EffectVar, Ustr> {
+        self.effs.iter().map(|(var, name)| (*var, *name)).collect()
+    }
+}
+
 /// An implementation of a trait.
 #[allow(clippy::too_many_arguments)]
 #[derive(Debug, Clone, new)]
@@ -440,6 +478,9 @@ pub struct TraitImpl {
     pub public: bool,
     /// Location of the source implementation when it comes from Ferlium code.
     pub source_span: Option<Location>,
+    /// The names the source gives to the impl's variables.
+    #[new(default)]
+    pub generic_names: ImplGenericNames,
 }
 
 impl TraitImpl {

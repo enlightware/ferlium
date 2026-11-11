@@ -14,7 +14,7 @@ use ustr::Ustr;
 
 use super::{
     constraints::{EffectConstraint, MutConstraint, TypeConstraint},
-    effect_solver::{EffectSolver, EffectSolverSnapshot},
+    effect_solver::{EffectConstraintOrigin, EffectSolver, EffectSolverSnapshot},
     evidence_uses::{EvidenceUses, GivenId},
     expr::TypeInference,
     ground_bounds::is_maximal,
@@ -2558,24 +2558,51 @@ impl UnifiedTypeInference {
         }
         assert_eq!(output_effs.len(), impl_output_effs.len());
         let polarities = trait_solver.output_effect_polarities(trait_id);
-        for ((cur_eff, exp_eff), polarity) in output_effs
+        for (index, ((cur_eff, exp_eff), polarity)) in output_effs
             .iter()
             .zip(impl_output_effs.iter())
             .zip(polarities)
+            .enumerate()
         {
-            match polarity {
-                EffectPolarity::Positive => {
-                    self.add_effect_inclusion(exp_eff, span, cur_eff, span)?
-                }
-                EffectPolarity::Negative => {
-                    self.add_effect_inclusion(cur_eff, span, exp_eff, span)?
-                }
-                EffectPolarity::Invariant => {
-                    self.unify_same_effect(cur_eff, span, exp_eff, span)?
-                }
-            }
+            let origin = trait_solver.output_effect_origin(trait_id, index, span);
+            self.relate_trait_output_effect(exp_eff, cur_eff, polarity, span, origin)?;
         }
         Ok(())
+    }
+
+    /// Relate an implementation's output effect to the requested one by the output's polarity:
+    /// an effect the methods perform may be smaller than requested, one they receive larger.
+    pub(crate) fn relate_trait_output_effect(
+        &mut self,
+        impl_eff: &EffType,
+        requested_eff: &EffType,
+        polarity: EffectPolarity,
+        span: Location,
+        origin: EffectConstraintOrigin,
+    ) -> Result<(), InternalCompilationError> {
+        match polarity {
+            EffectPolarity::Positive => self.effects.add_effect_inclusion_with_origin(
+                impl_eff,
+                span,
+                requested_eff,
+                span,
+                origin,
+            ),
+            EffectPolarity::Negative => self.effects.add_effect_inclusion_with_origin(
+                requested_eff,
+                span,
+                impl_eff,
+                span,
+                origin,
+            ),
+            EffectPolarity::Invariant => self.effects.unify_same_effect_with_origin(
+                impl_eff,
+                span,
+                requested_eff,
+                span,
+                origin,
+            ),
+        }
     }
 
     /// Make current and target the same effect type.

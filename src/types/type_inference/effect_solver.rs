@@ -28,11 +28,27 @@ pub(crate) enum EffectConstraintOrigin {
         method_name: Ustr,
         impl_span: Location,
     },
+    /// An output effect of a trait application, related to the one of its implementation.
+    TraitOutput {
+        trait_id: TraitId,
+        output: Ustr,
+        span: Location,
+    },
 }
 
 impl EffectConstraintOrigin {
     fn is_trait_method_impl(&self) -> bool {
         matches!(self, Self::TraitMethodImpl { .. })
+    }
+
+    /// The origin to report a requirement that does not hold: an impl method check is the most
+    /// useful diagnostic, wherever it took part, then the origin of the requirement itself.
+    fn of_requirement<const N: usize>(requirement: &Self, others: [&Self; N]) -> Self {
+        others
+            .into_iter()
+            .find(|origin| origin.is_trait_method_impl())
+            .unwrap_or(requirement)
+            .clone()
     }
 }
 
@@ -316,6 +332,19 @@ impl EffectSolver {
                 span: impl_span,
                 names,
             }),
+            EffectConstraintOrigin::TraitOutput {
+                trait_id,
+                output,
+                span,
+            } => internal_compilation_error!(TraitOutputEffectMismatch {
+                trait_ref: trait_id,
+                output,
+                source,
+                source_span,
+                target,
+                span,
+                names,
+            }),
         }
     }
 
@@ -511,6 +540,23 @@ impl EffectSolver {
         target: &EffType,
         target_span: Location,
     ) -> Result<(), InternalCompilationError> {
+        self.unify_same_effect_with_origin(
+            current,
+            current_span,
+            target,
+            target_span,
+            EffectConstraintOrigin::Inference,
+        )
+    }
+
+    pub(crate) fn unify_same_effect_with_origin(
+        &mut self,
+        current: &EffType,
+        current_span: Location,
+        target: &EffType,
+        target_span: Location,
+        origin: EffectConstraintOrigin,
+    ) -> Result<(), InternalCompilationError> {
         self.ensure_effect_vars(current);
         self.ensure_effect_vars(target);
         log::trace!("effect equality: {current} = {target}");
@@ -521,23 +567,29 @@ impl EffectSolver {
         match (current_vars.as_slice(), target_vars.as_slice()) {
             ([current_var], [target_var]) if current_var != target_var => {
                 if current_atoms.is_empty() && target_atoms.is_empty() {
-                    return self.union_vars(*current_var, *target_var, current_span);
+                    return self.union_vars(*current_var, *target_var, current_span, origin);
                 } else if current_atoms.is_empty() {
-                    return self.alias_var(*current_var, target_row, target_span);
+                    return self.alias_var(*current_var, target_row, target_span, origin);
                 } else if target_atoms.is_empty() {
-                    return self.alias_var(*target_var, current_row, current_span);
+                    return self.alias_var(*target_var, current_row, current_span, origin);
                 }
             }
             ([var], [_, _, ..]) if current_atoms.is_empty() => {
-                return self.alias_var(*var, target_row, target_span);
+                return self.alias_var(*var, target_row, target_span, origin);
             }
             ([_, _, ..], [var]) if target_atoms.is_empty() => {
-                return self.alias_var(*var, current_row, current_span);
+                return self.alias_var(*var, current_row, current_span, origin);
             }
             _ => {}
         }
-        self.add_effect_inclusion(current, current_span, target, target_span)?;
-        self.add_effect_inclusion(target, target_span, current, current_span)
+        self.add_effect_inclusion_with_origin(
+            current,
+            current_span,
+            target,
+            target_span,
+            origin.clone(),
+        )?;
+        self.add_effect_inclusion_with_origin(target, target_span, current, current_span, origin)
     }
 
     pub(crate) fn add_effect_inclusion(
@@ -1087,12 +1139,10 @@ impl EffectSolver {
                 }
             ));
         }
-        // An impl method check is the most useful diagnostic, wherever it took part.
-        let origin = [origin, &source.origin, &ceiling.source.origin]
-            .into_iter()
-            .find(|origin| origin.is_trait_method_impl())
-            .unwrap_or(origin)
-            .clone();
+        let origin = EffectConstraintOrigin::of_requirement(
+            &ceiling.source.origin,
+            [origin, &source.origin],
+        );
         Err(self.invalid_effect_inclusion(
             excess,
             source.span,
@@ -1108,6 +1158,7 @@ impl EffectSolver {
         a: EffectVar,
         b: EffectVar,
         span: Location,
+        origin: EffectConstraintOrigin,
     ) -> Result<(), InternalCompilationError> {
         self.ensure_var(a);
         self.ensure_var(b);
@@ -1121,20 +1172,18 @@ impl EffectSolver {
         if a_class.alias.is_some() || b_class.alias.is_some() {
             let a_row = EffType::single_variable(a_root);
             let b_row = EffType::single_variable(b_root);
-            return self.unify_same_effect(&a_row, span, &b_row, span);
+            return self.unify_same_effect_with_origin(&a_row, span, &b_row, span, origin);
         }
         if a_class.rigid || b_class.rigid {
             // A rigid variable is an atom: the other one must be exactly that atom.
             let a_row = EffType::single_variable(a_root);
             let b_row = EffType::single_variable(b_root);
-            let origin = EffectConstraintOrigin::Inference;
             self.add_inclusion(a_row.clone(), span, b_row.clone(), span, origin.clone())?;
             return self.add_inclusion(b_row, span, a_row, span, origin);
         }
         self.invalidate_publication();
         self.table.union(a_root, b_root);
         let root = self.table.find(a_root);
-        let origin = EffectConstraintOrigin::Inference;
         self.check_ceiling(root, &origin)?;
         let class = self.class(root);
         for (target, mask) in class.successors {
@@ -1150,14 +1199,14 @@ impl EffectSolver {
         var: EffectVar,
         row: EffType,
         span: Location,
+        origin: EffectConstraintOrigin,
     ) -> Result<(), InternalCompilationError> {
         let root = self.table.find(var);
         let var_row = EffType::single_variable(root);
         if let Some(other) = row.to_single_variable() {
-            return self.union_vars(root, other, span);
+            return self.union_vars(root, other, span, origin);
         }
         if self.class(root).rigid {
-            let origin = EffectConstraintOrigin::Inference;
             self.add_inclusion(var_row.clone(), span, row.clone(), span, origin.clone())?;
             return self.add_inclusion(row, span, var_row, span, origin);
         }
@@ -1169,13 +1218,7 @@ impl EffectSolver {
                     rest.insert(Effect::Variable(other));
                 }
             }
-            return self.add_inclusion(
-                rest,
-                span,
-                var_row,
-                span,
-                EffectConstraintOrigin::Inference,
-            );
+            return self.add_inclusion(rest, span, var_row, span, origin);
         }
         let class = self.class(root);
         log::trace!("effect alias: {root} := {row}");
@@ -1188,22 +1231,18 @@ impl EffectSolver {
         );
         for effect in class.lower.iter() {
             let source = class.lower_source(effect);
+            let origin = EffectConstraintOrigin::of_requirement(&origin, [&source.origin]);
             self.add_inclusion(
                 EffType::single(effect),
                 source.span,
                 row.clone(),
                 span,
-                source.origin,
+                origin,
             )?;
         }
         if let Some(ceiling) = class.ceiling {
-            self.add_inclusion(
-                row.clone(),
-                span,
-                ceiling.row,
-                ceiling.source.span,
-                ceiling.source.origin,
-            )?;
+            let origin = EffectConstraintOrigin::of_requirement(&ceiling.source.origin, [&origin]);
+            self.add_inclusion(row.clone(), span, ceiling.row, ceiling.source.span, origin)?;
         }
         for (target, mask) in class.successors {
             let mut upper = mask;

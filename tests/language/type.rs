@@ -754,6 +754,39 @@ fn overlapping_concrete_trait_impls_are_rejected() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn overlapping_trait_impls_are_shown_with_their_written_generics() {
+    // The existing impl declares `U` before `T`, and the new one an effect generic.
+    let mut session = TestSession::new();
+    let err = session.fail_compilation(indoc! { r#"
+        trait Tr<Self> { fn go(x: Self) -> int; }
+        struct P<A, B>(A, B)
+        struct Cb<! F>(() -> int ! F)
+        impl<U, T ! X> Tr for P<(T, Cb<! X>), U> where T: Num, U: Value {
+            fn go(x: P<(T, Cb<! X>), U>) -> int { 1 }
+        }
+        impl<V ! Y> Tr for P<(V, Cb<! Y>), V> where V: Num {
+            fn go(x: P<(V, Cb<! Y>), V>) -> int { 2 }
+        }
+    "# });
+    match err.into_inner() {
+        CompilationErrorImpl::OverlappingTraitImpls {
+            trait_ref,
+            input_tys,
+            existing_impl,
+            ..
+        } => {
+            assert_eq!(input_tys, ["Self = P<(V, Cb<! Y>), V>"]);
+            assert_eq!(
+                existing_impl.display(&trait_ref).to_string(),
+                "impl<T, U ! X> Tr for P<(T, Cb<! X>), U> where T: Num, U: Value"
+            );
+        }
+        other => panic!("expected OverlappingTraitImpls, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn overlapping_trait_impls_with_where_clauses_are_rejected() {
     let mut session = TestSession::new();
     let err = session.fail_compilation(indoc! { r#"

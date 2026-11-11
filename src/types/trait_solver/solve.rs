@@ -11,8 +11,8 @@ use crate::{
     hir::{NodeArena, value::LiteralValue},
     internal_compilation_error,
     module::{
-        CandidateSearch, ConcreteTraitImplKey, FunctionId, GeneratedImplSource, Module, ModuleEnv,
-        ModuleId, TraitDictionary, TraitId, TraitImpl, TraitImplId, id::Id,
+        CandidateSearch, ConcreteTraitImplKey, FunctionId, GeneratedImplSource, ImplGenericNames,
+        Module, ModuleEnv, ModuleId, TraitDictionary, TraitId, TraitImpl, TraitImplId, id::Id,
         named_modules_in_environment,
     },
     std::core_traits_names::{REPR_TRAIT_NAME, VALUE_TRAIT_NAME},
@@ -346,6 +346,7 @@ impl<'a> TraitSolver<'a> {
                     dictionary_ty: Type::tuple([]),
                     public: false,
                     source_span: None,
+                    generic_names: ImplGenericNames::default(),
                 };
                 self.impls.add_concrete_struct(key, imp)
             };

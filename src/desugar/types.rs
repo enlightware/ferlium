@@ -1055,9 +1055,7 @@ impl PTypeDef {
             Some(&generic_eff_params),
             modules_used,
         )?;
-        let mut next_effect_var = generic_eff_params
-            .values()
-            .map(|var| var.name() + 1)
+        let mut next_effect_var = once(implicit_effect_var(Some(&generic_eff_params)).name() + 1)
             .chain(
                 shape
                     .inner_effect_vars()
@@ -1937,11 +1935,7 @@ impl PTraitImpl {
                 )
             })
             .transpose()?;
-        let mut next_effect_var = generic_eff_params
-            .values()
-            .map(|var| var.name() + 1)
-            .max()
-            .unwrap_or(0);
+        let mut next_effect_var = implicit_effect_var(Some(&generic_eff_params)).name() + 1;
         let where_clause = desugar_type_constraints_with_next_effect_var(
             &self.where_clause,
             &generic_ty_params,

@@ -21,7 +21,7 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        DictionaryEntryRequirements, LocalFunctionId, Module, ModuleEnv,
+        DictionaryEntryRequirements, ImplGenericNames, LocalFunctionId, Module, ModuleEnv,
         PendingGeneratedStructuralProjectionSubscripts, PendingModuleFunction, QualifiedNameEnv,
         TraitId, TypeDefId, Visibility, id::Id,
     },
@@ -533,6 +533,7 @@ pub(super) fn emit_auto_value_impls(
             ty_var_count,
             eff_var_count,
             &constraints,
+            &ImplGenericNames::default(),
             type_def_span,
         )?;
 
@@ -710,6 +711,7 @@ pub(super) fn emit_auto_value_impls(
                 constraints,
                 method_requirements: entry_requirements,
                 functions: function_ids,
+                generic_names: ImplGenericNames::default(),
             },
             associated_const_values,
             associated_const_getters,

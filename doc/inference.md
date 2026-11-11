@@ -237,6 +237,14 @@ needs no runtime adapter (see [abi.md](abi.md)).
 Declared effect variables (function, implementation and trait default effect parameters) are rigid
 atoms: the body is checked against them and can neither specialize nor widen them.
 
+An effect left unwritten in an annotation of a function or inside its body, or in a requirement
+of the `where` clause of a function or of an implementation, is inferred, and never stands for a
+declared variable: it is an inference variable of that annotation or requirement alone. So
+`fn h<T>(x: T) -> int where T: Run { 1 }` accepts any implementation, and the effect of `Run`
+joins the effects of `h` only if its body performs it. The signature of a trait method is fixed,
+also when the method has a default body: an effect left unwritten there is the empty one, as it
+is in a type definition.
+
 A recursive group with declared effect variables is inferred in two steps. Joint inference of the
 group proposes a contract for each function, keeping its written effects as written. Each body is
 then checked alone against these fixed contracts, with its declared variables rigid, and each call

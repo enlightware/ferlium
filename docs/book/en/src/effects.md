@@ -70,6 +70,9 @@ Sharing `E` does not force callers to pass callbacks with the same effects: each
 Writing two effect variables in one effect set, such as `! (A, B)`, is an error, and so is a function whose effects would combine two declared effect variables.
 Inferred signatures follow the same rule: `fn compose(f, g) { |x| g(f(x)) }` is inferred with one effect variable shared by `f`, `g` and the returned function.
 
+An effect left unwritten is inferred when it is in a type annotation of a function or of a variable, or in a requirement of the `where` clause of a function or of an implementation.
+In the signature of a trait method, even one with a default body, and in a type definition, it means no effect.
+
 ## Effects in traits
 
 Traits can expose effect outputs, such as `NextEffect` in `Iterator`, and an implementation may bind them explicitly.

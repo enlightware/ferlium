@@ -3,6 +3,8 @@
 
 use std::rc::Rc;
 
+use ustr::ustr;
+
 use super::{
     SnapshotError, SnapshotLiteral, SnapshotTypeGraphBuilder, SnapshotTypeId,
     hir::SnapshotDictionaryReq, semantic::SnapshotConstraint,
@@ -10,12 +12,13 @@ use super::{
 use crate::{
     Location,
     module::{
-        BlanketTraitImplSubKey, ConcreteTraitImplKey, DictionaryEntryEvidence, LocalFunctionId,
-        LocalImplId, ModuleId, TraitId, TraitImpl, TraitImpls, build_dictionary_value, id::Id,
+        BlanketTraitImplSubKey, ConcreteTraitImplKey, DictionaryEntryEvidence, ImplGenericNames,
+        LocalFunctionId, LocalImplId, ModuleId, TraitId, TraitImpl, TraitImpls,
+        build_dictionary_value, id::Id,
     },
     types::{
-        effects::{EffType, Effect},
-        r#type::Type,
+        effects::{EffType, Effect, EffectVar},
+        r#type::{Type, TypeVar},
     },
 };
 
@@ -49,6 +52,9 @@ struct SnapshotTraitImpl {
     dictionary_ty: SnapshotTypeId,
     public: bool,
     source_span: Option<Location>,
+    /// The written names of the impl's type and effect variables, sorted by variable.
+    ty_var_names: Vec<(TypeVar, String)>,
+    eff_var_names: Vec<(EffectVar, String)>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -167,6 +173,18 @@ impl SnapshotTraitImpl {
             dictionary_ty: graph.capture(value.dictionary_ty)?,
             public: value.public,
             source_span: value.source_span,
+            ty_var_names: value
+                .generic_names
+                .tys
+                .iter()
+                .map(|(var, name)| (*var, name.to_string()))
+                .collect(),
+            eff_var_names: value
+                .generic_names
+                .effs
+                .iter()
+                .map(|(var, name)| (*var, name.to_string()))
+                .collect(),
         })
     }
 
@@ -199,6 +217,18 @@ impl SnapshotTraitImpl {
             dictionary_ty: live_type(types, self.dictionary_ty)?,
             public: self.public,
             source_span: self.source_span,
+            generic_names: ImplGenericNames {
+                tys: self
+                    .ty_var_names
+                    .iter()
+                    .map(|(var, name)| (*var, ustr(name)))
+                    .collect(),
+                effs: self
+                    .eff_var_names
+                    .iter()
+                    .map(|(var, name)| (*var, ustr(name)))
+                    .collect(),
+            },
         })
     }
 }
