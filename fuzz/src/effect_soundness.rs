@@ -18,6 +18,10 @@
 //! - declared callers fixing the trait's effect by one or two `where` bounds on the same
 //!   application, which combine by polarity, possibly calling another such caller whose bounds
 //!   their own must fit;
+//! - traits whose default method reaches a method through such bounds on `Self`, implemented by
+//!   their default for concrete types;
+//! - a wrapper with a custom `Value` impl whose methods call a method that a prerequisite
+//!   requires to be pure, used through containers, derivation and generic functions;
 //! - an entry expression summing calls on concrete values, with callbacks that are pure, fail,
 //!   read or write.
 //!
@@ -235,6 +239,53 @@ pub struct Term {
     pub array: Vec<i8>,
 }
 
+/// A trait `D<j>` whose default method reaches a method of `kind` through bounds on `Self`.
+#[derive(Clone, Debug)]
+pub struct DefaultTrait {
+    pub kind: TraitKind,
+    /// The bounds on `Self`, the row of the callback parameter, and a bounded caller to call
+    /// instead of the method.
+    pub bounds: Bounds,
+    /// Whether the default method declares `fallible` whatever it performs.
+    pub widened: bool,
+    /// The values whose types implement the trait by its default.
+    pub impls: Vec<SelfValue>,
+    /// The entry terms calling the default method: an impl, `x` and a callback.
+    pub terms: Vec<(usize, i8, Option<Callback>)>,
+}
+
+/// How a use of the `Value` wrapper reaches its value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Through {
+    /// In the entry expression.
+    Inline,
+    /// Through a function without annotations.
+    Inferred,
+    /// Through a function declaring the prerequisite of the wrapper's impl.
+    Declared,
+    /// Through a function generic over the effect of a carrier's callback, which never fits.
+    Generic,
+}
+
+/// A use of the `Value` wrapper `V<T>`.
+#[derive(Clone, Debug)]
+pub struct ValueUse {
+    pub value: SelfValue,
+    /// What holds the wrapper: nothing, a tuple, an array, a struct or an option.
+    pub container: u8,
+    /// Comparing, printing, copying, or only dropping.
+    pub operation: u8,
+    pub through: Through,
+}
+
+/// A wrapper `V<T>` with a custom `Value` impl whose methods call a method of `kind`, which a
+/// prerequisite requires to be pure.
+#[derive(Clone, Debug)]
+pub struct ValueWrapper {
+    pub kind: TraitKind,
+    pub uses: Vec<ValueUse>,
+}
+
 /// A generated program.
 #[derive(Clone, Debug)]
 pub struct EffectProgram {
@@ -242,6 +293,8 @@ pub struct EffectProgram {
     pub callers: Vec<Caller>,
     pub terms: Vec<Term>,
     pub cycles: Vec<Cycle>,
+    pub defaults: Vec<DefaultTrait>,
+    pub value_wrapper: Option<ValueWrapper>,
 }
 
 /// One of the two callback parameters, `f0` and `f1`, of a function of a recursive cycle.
@@ -459,6 +512,8 @@ impl EffectProgram {
             callers: Vec::new(),
             terms: Vec::new(),
             cycles: Vec::new(),
+            defaults: Vec::new(),
+            value_wrapper: None,
         };
 
         let caller_count = u.int_in_range(0..=4)?;
@@ -578,7 +633,184 @@ impl EffectProgram {
         for _ in 0..cycle_count {
             program.cycles.push(arbitrary_cycle(u)?);
         }
+        // Later constructs are chosen last, so that earlier inputs keep their programs.
+        let default_count = u.int_in_range(0..=2)?;
+        for _ in 0..default_count {
+            if let Some(default) = program.default_trait(u)? {
+                program.defaults.push(default);
+            }
+        }
+        // An exhausted input answers yes to `ratio`: ask for the absence of the wrapper.
+        if !u.ratio(2, 3)? {
+            program.value_wrapper = program.arbitrary_value_wrapper(u)?;
+        }
         Ok(program)
+    }
+
+    /// Whether the program must be compiled as trusted code, as it implements `Value`.
+    pub fn needs_trust(&self) -> bool {
+        self.value_wrapper.is_some()
+    }
+
+    /// The bounded callers of the trait `kind`.
+    fn bounded_callers(&self, kind: TraitKind) -> Vec<usize> {
+        (0..self.callers.len())
+            .filter(|index| {
+                let callee = &self.callers[*index];
+                callee.kind == kind && matches!(callee.flavor, Flavor::Bounded(_))
+            })
+            .collect()
+    }
+
+    /// Whether a function with these bounds may fail, calling the method or its `via` callee.
+    fn bounded_may_fail(&self, kind: TraitKind, bounds: &Bounds) -> bool {
+        if let Some(callee) = bounds.via
+            && let Flavor::Bounded(callee_bounds) = self.callers[callee].flavor
+        {
+            return self.bounded_may_fail(kind, &callee_bounds);
+        }
+        match kind {
+            TraitKind::OwnFallible => true,
+            TraitKind::Callback => false,
+            _ => bounds.combined(kind).unwrap_or(true),
+        }
+    }
+
+    fn default_trait(&self, u: &mut Unstructured) -> Result<Option<DefaultTrait>> {
+        let kind = u.choose(&self.traits)?.kind;
+        let mut bounds = Bounds {
+            first: u.arbitrary()?,
+            second: if u.arbitrary()? {
+                Some(u.arbitrary()?)
+            } else {
+                None
+            },
+            callback: u.arbitrary()?,
+            via: None,
+        };
+        let callees = self.bounded_callers(kind);
+        if !callees.is_empty() && u.ratio(1, 2)? {
+            let callee = *u.choose(&callees)?;
+            bounds.via = Some(callee);
+            // Equal bounds always fit the callee's; others may not.
+            if u.ratio(3, 4)?
+                && let Flavor::Bounded(callee_bounds) = self.callers[callee].flavor
+            {
+                bounds.first = callee_bounds.first;
+                bounds.second = callee_bounds.second;
+                bounds.callback = callee_bounds.callback;
+            }
+        }
+        if kind.takes_callback()
+            && u.ratio(3, 4)?
+            && let Some(combined) = bounds.combined(kind)
+        {
+            bounds.callback = combined;
+        }
+        // Mostly, the types implementing the trait fit its bounds; the others must be rejected.
+        let fitting = u.ratio(7, 8)?;
+        let mut impls: Vec<SelfValue> = Vec::new();
+        for _ in 0..u.int_in_range(1..=4)? {
+            let value = self.plain_self_value(u, 2)?;
+            let Some(eff) = self.eff(kind, &value) else {
+                continue;
+            };
+            if fitting && !bounds.fit(kind, &eff) {
+                continue;
+            }
+            let ty = render_type(&value);
+            if impls.iter().all(|other| render_type(other) != ty) {
+                impls.push(value);
+            }
+        }
+        if impls.is_empty() {
+            return Ok(None);
+        }
+        let mut terms = Vec::new();
+        for _ in 0..u.int_in_range(0..=2)? {
+            let callback = if kind.takes_callback() {
+                let callback = arbitrary_callback(u)?;
+                // Mostly, the callback fits the row the default method declares for it.
+                if !callback.eff().is_subset_of(&fixed_eff(bounds.callback)) && u.ratio(7, 8)? {
+                    continue;
+                }
+                Some(callback)
+            } else {
+                None
+            };
+            terms.push((
+                u.int_in_range(0..=impls.len() - 1)?,
+                u.int_in_range(-1..=3)?,
+                callback,
+            ));
+        }
+        Ok(Some(DefaultTrait {
+            kind,
+            bounds,
+            widened: u.ratio(1, 8)?,
+            impls,
+            terms,
+        }))
+    }
+
+    fn arbitrary_value_wrapper(&self, u: &mut Unstructured) -> Result<Option<ValueWrapper>> {
+        // The prerequisite fixes the effect to `()`, which `OwnFallible` always exceeds.
+        let kinds: Vec<_> = self
+            .traits
+            .iter()
+            .map(|implementation| implementation.kind)
+            .filter(|kind| *kind != TraitKind::OwnFallible)
+            .collect();
+        if kinds.is_empty() {
+            return Ok(None);
+        }
+        let kind = *u.choose(&kinds)?;
+        let carrier = self
+            .implementation(kind)
+            .is_some_and(|implementation| implementation.carrier);
+        let mut uses = Vec::new();
+        for _ in 0..u.int_in_range(1..=3)? {
+            let through = match u.int_in_range(0..=8)? {
+                0..=2 => Through::Inline,
+                3..=5 => Through::Inferred,
+                6 | 7 => Through::Declared,
+                _ if carrier => Through::Generic,
+                _ => Through::Inferred,
+            };
+            // Mostly, the value fits the prerequisite; the others must be rejected.
+            let fitting = u.ratio(5, 6)?;
+            for _ in 0..4 {
+                let value = if through == Through::Generic {
+                    SelfValue::C(arbitrary_callback(u)?)
+                } else {
+                    self.self_value(u, 2)?
+                };
+                let Some(eff) = self.eff(kind, &value) else {
+                    continue;
+                };
+                // An impl accepting more callbacks than pure ones still accepts those.
+                let fits = kind == TraitKind::Callback || eff.is_empty();
+                if fitting && !fits && through != Through::Generic {
+                    continue;
+                }
+                uses.push(ValueUse {
+                    value,
+                    container: u.int_in_range(0..=4)?,
+                    operation: u.int_in_range(0..=3)?,
+                    through,
+                });
+                break;
+            }
+        }
+        Ok(Some(ValueWrapper { kind, uses }))
+    }
+
+    /// A self value without callback carrier, so that its type can be an impl's input.
+    fn plain_self_value(&self, u: &mut Unstructured, depth: usize) -> Result<SelfValue> {
+        Ok(match u.int_in_range(0..=2)? {
+            2 if depth > 0 => SelfValue::W(Box::new(self.plain_self_value(u, depth - 1)?)),
+            index => SelfValue::S(index & 1, u.int_in_range(0..=2)?),
+        })
     }
 
     fn term(&self, u: &mut Unstructured) -> Result<Option<Term>> {
@@ -701,10 +933,17 @@ impl EffectProgram {
         out.push_str(
             "fn total(a: [int]) -> int {\n\tlet mut t = 0;\n\tfor v in a {\n\t\tt = t + v\n\t};\n\tt\n}\n",
         );
+        if self.value_wrapper.is_some() {
+            out.push_str("struct V<T>(T)\nstruct N<T> { member: T }\n");
+            out.push_str("fn same(a, b) {\n\tif a == b {\n\t\t1\n\t} else {\n\t\t0\n\t}\n}\n");
+        }
 
         let mut impls = Vec::new();
         for implementation in &self.traits {
             render_impls(implementation, e, &mut impls);
+        }
+        if let Some(wrapper) = &self.value_wrapper {
+            impls.push(render_value_impl(wrapper.kind, e));
         }
         if variant.reverse {
             impls.reverse();
@@ -715,6 +954,26 @@ impl EffectProgram {
 
         for (index, caller) in self.callers.iter().enumerate() {
             out.push_str(&self.render_caller(index, caller, e, variant.reverse));
+        }
+
+        // A default method may call a bounded caller, so its trait comes after the callers.
+        let mut default_impls = Vec::new();
+        for (index, default) in self.defaults.iter().enumerate() {
+            out.push_str(&self.render_default_trait(index, default, e, variant.reverse));
+            for value in &default.impls {
+                default_impls.push(format!("impl D{index} for {} {{}}\n", render_type(value)));
+            }
+        }
+        if variant.reverse {
+            default_impls.reverse();
+        }
+        for implementation in default_impls {
+            out.push_str(&implementation);
+        }
+        if let Some(wrapper) = &self.value_wrapper {
+            for (index, value_use) in wrapper.uses.iter().enumerate() {
+                out.push_str(&value_use.render_function(index, wrapper.kind, e));
+            }
         }
 
         let mut cycle_functions = Vec::new();
@@ -741,6 +1000,22 @@ impl EffectProgram {
                 .enumerate()
                 .map(|(index, cycle)| cycle.render_term(index)),
         );
+        for (index, default) in self.defaults.iter().enumerate() {
+            for (implementation, x, callback) in &default.terms {
+                let mut args = vec![render_value(&default.impls[*implementation]), x.to_string()];
+                args.extend(callback.map(|callback| callback.render("z")));
+                terms.push(format!("d{index}({})", args.join(", ")));
+            }
+        }
+        if let Some(wrapper) = &self.value_wrapper {
+            terms.extend(
+                wrapper
+                    .uses
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value_use)| value_use.render_term(index)),
+            );
+        }
         if terms.is_empty() {
             out.push_str("0\n");
         } else if variant.reverse {
@@ -823,29 +1098,9 @@ impl EffectProgram {
                 call("s", "z")
             ),
             Flavor::Bounded(bounds) => {
-                let f_param = if kind.takes_callback() {
-                    format!(", f: (int) -> int ! {}", fixed_row(bounds.callback))
-                } else {
-                    String::new()
-                };
-                let mut clauses = vec![format!("\tT: Tr{i}<! {e} = {}>", fixed_row(bounds.first))];
-                if let Some(second) = bounds.second {
-                    clauses.push(format!("\tT: Tr{i}<! {e} = {}>", fixed_row(second)));
-                }
-                // Bounds combine whatever their order.
-                if reverse {
-                    clauses.reverse();
-                }
-                let body = match bounds.via {
-                    Some(callee) => {
-                        let f_arg = if kind.takes_callback() { ", f" } else { "" };
-                        format!("g{callee}(s, x{f_arg})")
-                    }
-                    None => call("s", "x"),
-                };
+                let (f_param, clauses, body) = bounded_parts(kind, &bounds, "T", e, reverse);
                 format!(
-                    "fn g{index}<T>(s: T, x: int{f_param}) -> int\nwhere\n{}\n{{\n\t{body}\n}}\n",
-                    clauses.join(",\n")
+                    "fn g{index}<T>(s: T, x: int{f_param}) -> int\nwhere\n{clauses}\n{{\n\t{body}\n}}\n"
                 )
             }
             Flavor::Delegate(callee) => {
@@ -860,6 +1115,25 @@ impl EffectProgram {
                 )
             }
         }
+    }
+
+    fn render_default_trait(
+        &self,
+        index: usize,
+        default: &DefaultTrait,
+        e: &str,
+        reverse: bool,
+    ) -> String {
+        let kind = default.kind;
+        let (f_param, clauses, body) = bounded_parts(kind, &default.bounds, "Self", e, reverse);
+        let row = if default.widened || self.bounded_may_fail(kind, &default.bounds) {
+            " ! fallible"
+        } else {
+            ""
+        };
+        format!(
+            "trait D{index}<Self>\nwhere\n{clauses}\n{{\n\tfn d{index}(s: Self, x: int{f_param}) -> int{row} {{\n\t\t{body}\n\t}}\n}}\n"
+        )
     }
 
     fn render_term(&self, term: &Term) -> String {
@@ -879,6 +1153,104 @@ impl EffectProgram {
             }
         }
     }
+}
+
+/// The callback parameter, `where` clauses and body of a function reaching a method of `kind`
+/// through fixed bounds on `subject`.
+fn bounded_parts(
+    kind: TraitKind,
+    bounds: &Bounds,
+    subject: &str,
+    e: &str,
+    reverse: bool,
+) -> (String, String, String) {
+    let i = kind.index();
+    let f_param = if kind.takes_callback() {
+        format!(", f: (int) -> int ! {}", fixed_row(bounds.callback))
+    } else {
+        String::new()
+    };
+    let mut clauses = vec![format!(
+        "\t{subject}: Tr{i}<! {e} = {}>",
+        fixed_row(bounds.first)
+    )];
+    if let Some(second) = bounds.second {
+        clauses.push(format!("\t{subject}: Tr{i}<! {e} = {}>", fixed_row(second)));
+    }
+    // Bounds combine whatever their order.
+    if reverse {
+        clauses.reverse();
+    }
+    let body = match bounds.via {
+        Some(callee) => {
+            let f_arg = if kind.takes_callback() { ", f" } else { "" };
+            format!("g{callee}(s, x{f_arg})")
+        }
+        None => method_call(kind, "s", "x", "f"),
+    };
+    (f_param, clauses.join(",\n"), body)
+}
+
+impl ValueUse {
+    /// The use of the wrapper around the value `s`.
+    fn body(&self, s: &str) -> String {
+        let made = match self.container {
+            0 => format!("V({s})"),
+            1 => format!("(V({s}), 1)"),
+            2 => format!("[V({s})]"),
+            3 => format!("N {{ member: V({s}) }}"),
+            _ => format!("Some(V({s}))"),
+        };
+        let used = match self.operation {
+            0 => "same(v, v)",
+            1 => "len(to_string(v))",
+            2 => "let w = [v, v];\n\tsame(w, w)",
+            _ => "1",
+        };
+        format!("let v = {made};\n\t{used}")
+    }
+
+    fn render_function(&self, index: usize, kind: TraitKind, e: &str) -> String {
+        let i = kind.index();
+        match self.through {
+            Through::Inline => String::new(),
+            Through::Inferred => format!("fn u{index}(s) {{\n\t{}\n}}\n", self.body("s")),
+            Through::Declared => format!(
+                "fn u{index}<T>(s: T) -> int\nwhere\n\tT: Value,\n\tT: Tr{i}<! {e} = ()>\n{{\n\t{}\n}}\n",
+                self.body("s")
+            ),
+            Through::Generic => format!(
+                "fn u{index}<! {e}>(f: (int) -> int ! {e}) -> int {{\n\t{}\n}}\n",
+                self.body("C { f: f }")
+            ),
+        }
+    }
+
+    fn render_term(&self, index: usize) -> String {
+        match (&self.through, &self.value) {
+            (Through::Inline, value) => format!("{{\n\t{}\n}}", self.body(&render_value(value))),
+            (Through::Generic, SelfValue::C(callback)) => {
+                format!("u{index}({})", callback.render("w"))
+            }
+            (_, value) => format!("u{index}({})", render_value(value)),
+        }
+    }
+}
+
+/// The custom `Value` impl of the wrapper `V<T>`, whose methods call a method of `kind`.
+fn render_value_impl(kind: TraitKind, e: &str) -> String {
+    let i = kind.index();
+    let probe = |x: &str| match kind {
+        TraitKind::Returned => format!("{{ let h = m{i}({x}.0); h(0) }}"),
+        _ => method_call(kind, &format!("{x}.0"), "0", "|z| z + 1"),
+    };
+    format!(
+        "impl<T> Value for V<T>\nwhere\n\tT: Value,\n\tT: Tr{i}<! {e} = ()>\n{{\n\tfn eq(x: V<T>, y: V<T>) -> bool {{ {} == {} }}\n\tfn to_string(x: V<T>) -> string {{ to_string({}) }}\n\tfn hash(x: V<T>, state: &mut hasher) {{ hash({}, state) }}\n\tfn clone(x: V<T>) -> V<T> {{ V(x.0) }}\n\tfn drop(x: &mut V<T>) {{}}\n}}\n",
+        probe("x"),
+        probe("y"),
+        probe("x"),
+        probe("x"),
+    )
 }
 
 fn arbitrary_callback(u: &mut Unstructured) -> Result<Callback> {
@@ -905,6 +1277,15 @@ fn render_value(value: &SelfValue) -> String {
         SelfValue::S(index, v) => format!("S{index} {{ v: {v} }}"),
         SelfValue::W(inner) => format!("W({})", render_value(inner)),
         SelfValue::C(callback) => format!("C {{ f: {} }}", callback.render("w")),
+    }
+}
+
+/// The type of a value without callback carrier.
+fn render_type(value: &SelfValue) -> String {
+    match value {
+        SelfValue::S(index, _) => format!("S{index}"),
+        SelfValue::W(inner) => format!("W<{}>", render_type(inner)),
+        SelfValue::C(_) => unreachable!("a carrier's type has an effect"),
     }
 }
 

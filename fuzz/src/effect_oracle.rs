@@ -223,11 +223,12 @@ pub fn check_program(program: &EffectProgram) -> Report {
             reverse: true,
         },
     ];
+    let trusted = program.needs_trust();
     let base_source = program.render(variants[0]);
-    let base = check_source(&base_source);
+    let base = check_source_with_trust(&base_source, trusted);
     for variant in &variants[1..] {
         let source = program.render(*variant);
-        let report = check_source(&source);
+        let report = check_source_with_trust(&source, trusted);
         match (&base, &report) {
             (Report::Rejected { .. }, Report::Rejected { .. }) => {}
             (

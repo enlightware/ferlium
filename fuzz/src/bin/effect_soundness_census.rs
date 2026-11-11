@@ -26,6 +26,9 @@ fn main() {
     let mut failed = 0;
     let mut typed_fallible = 0;
     let mut crashes = 0;
+    // Programs that ran while using a default method or the `Value` wrapper.
+    let mut ran_defaults = 0;
+    let mut ran_value_wrapper = 0;
     let mut rejected: BTreeMap<String, (usize, String)> = BTreeMap::new();
     for _ in 0..count {
         let data: Vec<u8> = (0..256)
@@ -50,6 +53,13 @@ fn main() {
         match report {
             Report::Ran { outcome, may_fail } => {
                 ran += 1;
+                ran_defaults += usize::from(program.defaults.iter().any(|d| !d.terms.is_empty()));
+                ran_value_wrapper += usize::from(
+                    program
+                        .value_wrapper
+                        .as_ref()
+                        .is_some_and(|wrapper| !wrapper.uses.is_empty()),
+                );
                 failed += usize::from(matches!(outcome, Outcome::Failure { .. }));
                 typed_fallible += usize::from(may_fail);
             }
@@ -69,6 +79,7 @@ fn main() {
     println!(
         "{count} inputs: {ran} ran ({failed} failed, {typed_fallible} typed fallible), {crashes} crashed"
     );
+    println!("{ran_defaults} ran a default method, {ran_value_wrapper} used a custom `Value` impl");
     for (category, (n, sample)) in &rejected {
         println!("\n== {n} rejected: {category}\n{sample}");
     }
