@@ -754,3 +754,42 @@ fn set_and_map_serialization_roundtrip() {
         string(r#"map { "a" => 1 }"#)
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_types_serialization_roundtrip() {
+    let mut session = TestSession::new();
+    // A named type has its own derived impl, which it finds again among its members.
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            enum List { Nil, Cons(int, List) }
+            let list = List::Cons(1, List::Cons(2, List::Nil));
+            let decoded: List = deserialize(serialize(list));
+            decoded == list and data_text_encode(serialize(list)) == data_text_encode(serialize(decoded))
+        "# }),
+        bool(true)
+    );
+    // Also when generic, and through another named type.
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            enum Tree<T> { Leaf, Node(Tree<T>, T, Tree<T>) }
+            struct Forest<T> { name: string, trees: [Tree<T>] }
+            let tree = Tree::Node(Tree::Leaf, 5, Tree::Node(Tree::Leaf, 7, Tree::Leaf));
+            let forest = Forest { name: "f", trees: [tree, Tree::Leaf] };
+            let decoded: Forest<int> = deserialize(serialize(forest));
+            decoded == forest
+        "# }),
+        bool(true)
+    );
+    // Mutually recursive types.
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            enum Expr { Lit(int), Block(Stmts) }
+            enum Stmts { Done, Then(Expr, Stmts) }
+            let expr = Expr::Block(Stmts::Then(Expr::Lit(1), Stmts::Then(Expr::Lit(2), Stmts::Done)));
+            let decoded: Expr = deserialize(serialize(expr));
+            decoded == expr
+        "# }),
+        bool(true)
+    );
+}

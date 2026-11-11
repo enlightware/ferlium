@@ -62,12 +62,13 @@ fn build_serialize_projection(
     locals: &mut Vec<LocalDecl>,
     self_id: LocalDeclId,
     self_ty: Type,
+    self_is_variant: bool,
     index: usize,
     member_ty: Type,
 ) -> Result<NodeId, InternalCompilationError> {
     use hir::hir_syn::*;
     let load_node = alloc_synth_node(arena, load_local(self_id), self_ty);
-    let projection = if self_ty.data().is_variant() {
+    let projection = if self_is_variant {
         debug_assert_eq!(index, 0);
         hir::NodeKind::Project(hir::Project::variant_payload(load_node))
     } else {
@@ -91,6 +92,45 @@ fn build_serialize_projection(
         [project_node],
         span,
     )
+}
+
+/// How a type is serialized or deserialized by derivation.
+enum DerivedStructure {
+    /// Field by field, with an impl of its own.
+    Own(TypeKind),
+    /// As another type, by that type's impl.
+    Delegated(TraitImplId),
+}
+
+/// The structure by which `ty` is derived, if it has one. A named type is derived by its shape,
+/// as an impl of its own: a recursive type meets itself among its members, and must then find
+/// its impl reserved.
+fn derived_structure(
+    ty: Type,
+    trait_id: TraitId,
+    span: Location,
+    arena: &mut NodeArena,
+    solver: &mut TraitSolver,
+) -> Result<Option<DerivedStructure>, InternalCompilationError> {
+    let is_structure = |kind: &TypeKind| {
+        matches!(
+            kind,
+            TypeKind::Tuple(_) | TypeKind::Record(_) | TypeKind::Variant(_)
+        )
+    };
+    let ty_data = ty.data().clone();
+    let TypeKind::Named(named) = ty_data else {
+        return Ok(is_structure(&ty_data).then_some(DerivedStructure::Own(ty_data)));
+    };
+    let shape = solver
+        .type_def(named.def)
+        .instantiated_shape_with_effects(&named.params, &named.effect_params);
+    let shape_data = shape.data().clone();
+    if is_structure(&shape_data) {
+        return Ok(Some(DerivedStructure::Own(shape_data)));
+    }
+    let impl_id = solver.solve_impl(trait_id, &[shape], span, arena)?;
+    Ok(Some(DerivedStructure::Delegated(impl_id)))
 }
 
 fn record_payload_type() -> Type {
@@ -141,25 +181,14 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
             n(arena, variant(ustr(tag), payload), data_value_type())
         };
 
-        let ty_data = ty.data().clone();
-        if let TypeKind::Named(named) = ty_data {
-            let inner_ty = solver
-                .type_def(named.def)
-                .instantiated_shape_with_effects(&named.params, &named.effect_params);
-            // serialize the inner type
-            return Ok(Some(solver.solve_impl(
-                trait_id,
-                &[inner_ty],
-                span,
-                arena,
-            )?));
-        }
-        if !matches!(
-            ty_data,
-            TypeKind::Tuple(_) | TypeKind::Record(_) | TypeKind::Variant(_)
-        ) {
+        let Some(ty_data) = derived_structure(ty, trait_id, span, arena, solver)? else {
             return Ok(None);
-        }
+        };
+        let ty_data = match ty_data {
+            DerivedStructure::Delegated(impl_id) => return Ok(Some(impl_id)),
+            DerivedStructure::Own(ty_data) => ty_data,
+        };
+        let is_variant = ty_data.is_variant();
         let snapshot = solver.snapshot_derived_impl_state();
         let impl_id =
             solver.reserve_concrete_impl_from_code_entries(trait_id, input_types, &[], &[], []);
@@ -205,6 +234,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                         &mut locals,
                         l_self_id,
                         ty,
+                        is_variant,
                         index,
                         ty_i,
                     )
@@ -263,6 +293,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                         &mut locals,
                         l_self_id,
                         ty,
+                        is_variant,
                         index,
                         ty_i,
                     )?;
@@ -303,6 +334,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                             &mut locals,
                             l_self_id,
                             ty,
+                            is_variant,
                             0,
                             payload_ty,
                         )?
@@ -411,25 +443,13 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
         };
 
         // derive tuple, record, and enum deserialization
-        let ty_data = ty.data().clone();
-        if let TypeKind::Named(named) = ty_data {
-            let inner_ty = solver
-                .type_def(named.def)
-                .instantiated_shape_with_effects(&named.params, &named.effect_params);
-            // deserialize the inner type
-            return Ok(Some(solver.solve_impl(
-                trait_id,
-                &[inner_ty],
-                span,
-                arena,
-            )?));
-        }
-        if !matches!(
-            ty_data,
-            TypeKind::Tuple(_) | TypeKind::Record(_) | TypeKind::Variant(_)
-        ) {
+        let Some(ty_data) = derived_structure(ty, trait_id, span, arena, solver)? else {
             return Ok(None);
-        }
+        };
+        let ty_data = match ty_data {
+            DerivedStructure::Delegated(impl_id) => return Ok(Some(impl_id)),
+            DerivedStructure::Own(ty_data) => ty_data,
+        };
         let snapshot = solver.snapshot_derived_impl_state();
         let impl_id =
             solver.reserve_concrete_impl_from_code_entries(trait_id, input_types, &[], &[], []);
