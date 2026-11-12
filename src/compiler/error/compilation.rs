@@ -1051,9 +1051,20 @@ pub enum CompilationErrorImpl<S: Scope> {
         name: Ustr,
         span: Location,
     },
-    /// A body of a recursive group does not fit the signature inferred for it.
+    /// The effects of a function of a recursive group would change a type, or the answer to a
+    /// trait requirement, that the group was inferred with.
     RecursiveGroupBodyDoesNotFit {
         function: Ustr,
+        span: Location,
+    },
+    /// The signatures of a recursive group still changed at the last of the `rounds` in which
+    /// their effects were inferred. `growing` is a requirement that this last round gave a
+    /// function at more effects than the round before, if there is one.
+    RecursiveGroupDoesNotSettle {
+        function: Ustr,
+        rounds: usize,
+        growing: Option<S::PubTypeConstraint>,
+        type_names: FxHashMap<TypeVar, Ustr>,
         span: Location,
     },
     TraitNotFound(Location),
@@ -1686,9 +1697,32 @@ impl FormatWith<SourceTable> for CompilationError {
             RecursiveGroupBodyDoesNotFit { function: _, span } => {
                 write!(
                     f,
-                    "Function {} does not fit the signature inferred for its recursive group: write its signature",
+                    "The effects of function {} would change a type or a trait implementation that its recursive group was inferred with: write its signature",
                     fmt_span(span)
                 )
+            }
+            RecursiveGroupDoesNotSettle {
+                function: _,
+                rounds,
+                growing,
+                span,
+                ..
+            } => {
+                write!(
+                    f,
+                    "The effects of the recursive group of function {} did not settle in {rounds} rounds of inference",
+                    fmt_span(span)
+                )?;
+                match growing {
+                    Some(requirement) => write!(
+                        f,
+                        ", the last one still adding `{requirement}` at other effects: write its signature, with a `where` clause that relates these effects"
+                    ),
+                    None => write!(
+                        f,
+                        ": write its signature, with its effects and its `where` clause"
+                    ),
+                }
             }
             TraitNotFound(span) => {
                 write!(f, "Cannot find trait {} in this scope", fmt_span(span))
@@ -2645,6 +2679,23 @@ impl CompilationError {
             }
             RecursiveGroupBodyDoesNotFit { function, span } => {
                 compilation_error!(RecursiveGroupBodyDoesNotFit { function, span })
+            }
+            RecursiveGroupDoesNotSettle {
+                function,
+                rounds,
+                growing,
+                type_names,
+                span,
+            } => {
+                let display = TypeDisplayEnv::new(env, &type_names);
+                compilation_error!(RecursiveGroupDoesNotSettle {
+                    function,
+                    rounds,
+                    growing: growing
+                        .map(|requirement| requirement.format_with(&display).to_string()),
+                    type_names,
+                    span,
+                })
             }
             TraitNotFound(span) => compilation_error!(TraitNotFound(span)),
             AmbiguousTraitMethod {

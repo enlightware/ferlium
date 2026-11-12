@@ -811,7 +811,10 @@ struct Settlement {
     /// next round.
     contracts: Vec<GroupContract>,
     references: Vec<GroupReferenceIn>,
-    rounds_left: usize,
+    /// The number of rounds that ended.
+    rounds_done: usize,
+    /// The number of rounds that may change a contract.
+    round_bound: usize,
     /// The module before the round in progress.
     checkpoint: Option<ModuleCheckpoint>,
     /// For each function, the error for which the round in progress leaves it out: it gets
@@ -1114,17 +1117,63 @@ impl Settlement {
                 None => Ok(Some(numbered)),
             };
         }
-        if self.rounds_left == 0 {
-            return Err(errors.into_iter().flatten().next().unwrap_or_else(|| {
-                internal_compilation_error!(RecursiveGroupBodyDoesNotFit {
-                    function: first.name.0,
-                    span: first.name.1,
-                })
-            }));
+        self.rounds_done += 1;
+        if self.rounds_done > self.round_bound {
+            // The errors of this round are of contracts that did not settle.
+            return Err(self.does_not_settle(&next, first, ty_inf));
         }
-        self.rounds_left -= 1;
         self.contracts = next;
         Ok(None)
+    }
+
+    /// The error of a group whose contracts still changed in the last round that the bound
+    /// allows, `next` being the contracts that this round read. It names a requirement that the
+    /// round gave a function at more effects than it had, if there is one. This is what the
+    /// last round did, not a proof that the contracts cannot settle: contracts can grow without
+    /// end, an output of one requirement being an input of the next, and a later round can
+    /// also make such effects one.
+    fn does_not_settle(
+        &self,
+        next: &[GroupContract],
+        first: &ast::DModuleFunction,
+        ty_inf: &mut UnifiedTypeInference,
+    ) -> InternalCompilationError {
+        let without_effects = |contract: &GroupContract| {
+            let requirements = contract.scheme.constraints.iter();
+            requirements
+                .map(|requirement| requirement.map(&mut EffectErasingMapper))
+                .collect::<Vec<_>>()
+        };
+        let growing = next
+            .iter()
+            .zip(&self.contracts)
+            .zip(&self.written_types)
+            .find_map(|((next, contract), (_, params, roots))| {
+                let (before, after) = (without_effects(contract), without_effects(next));
+                let count =
+                    |all: &[PubTypeConstraint], one| all.iter().filter(|r| *r == one).count();
+                let position = after
+                    .iter()
+                    .position(|one| count(&after, one) > count(&before, one))?;
+                // A contract has the types of the baseline, which the written generics name.
+                let names = roots
+                    .iter()
+                    .zip(params)
+                    .filter_map(|(root, param)| {
+                        let root = ty_inf.substitute_in_type(*root);
+                        Some((*root.data().as_variable()?, param.0))
+                    })
+                    .collect::<FxHashMap<_, _>>();
+                Some((next.scheme.constraints[position].clone(), names))
+            });
+        let (growing, type_names) = growing.unzip();
+        internal_compilation_error!(RecursiveGroupDoesNotSettle {
+            function: first.name.0,
+            rounds: self.rounds_done,
+            growing,
+            type_names: type_names.unwrap_or_default(),
+            span: first.name.1,
+        })
     }
 }
 
@@ -3583,7 +3632,8 @@ where
                 warning_count: warnings.len(),
                 contracts,
                 references: group_references.clone(),
-                rounds_left: max_refinement_rounds(shapes),
+                rounds_done: 0,
+                round_bound: max_refinement_rounds(shapes),
                 checkpoint: None,
                 left_out: local_fns.iter().map(|_| None).collect(),
                 written_types: ast_functions()

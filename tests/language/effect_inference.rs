@@ -2489,7 +2489,7 @@ fn the_contracts_of_a_group_do_not_grow_with_its_unrolling() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn a_group_without_a_finite_contract_is_rejected() {
+fn a_group_whose_contracts_do_not_settle_is_rejected() {
     // `step` gives a callback whose effect is the output of `Tr` for the effect of the one it
     // gets, and `f` passes it to itself: unrolled, `f` needs `Tr` at the effect of `g`, at the
     // output of that, and so on without end. Its contract grows until the bound on rounds.
@@ -2515,7 +2515,7 @@ where Pair<T, (() -> int ! E)>: Tr<! Out = O> {
         .fail_compilation(&format!(
             "{prelude}\nfn f<T>(x: T, g, n: int) -> int {body}\nf(3, || 1, 2)"
         ))
-        .expect_recursive_group_body_does_not_fit("f");
+        .expect_recursive_group_does_not_settle("f", "Pair<T, ");
     // The requirement written with its output equal to its input is a finite contract.
     assert_val_eq!(
         TestSession::new().run(&format!(

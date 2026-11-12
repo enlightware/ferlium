@@ -207,7 +207,8 @@ pub(crate) fn diagnostics_from_error(
         | EffectNotFound { span, .. }
         | EffectVariablesCombined { span, .. }
         | AmbiguousEffectGeneric { span, .. }
-        | RecursiveGroupBodyDoesNotFit { span, .. } => vec![*span],
+        | RecursiveGroupBodyDoesNotFit { span, .. }
+        | RecursiveGroupDoesNotSettle { span, .. } => vec![*span],
         WrongNumberOfEffectArguments {
             expected_span,
             got_span,

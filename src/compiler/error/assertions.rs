@@ -103,13 +103,26 @@ impl CompilationError {
         }
     }
 
-    pub fn expect_recursive_group_body_does_not_fit(&self, expected_function: &str) {
+    /// Expects that the recursive group of `expected_function` did not settle, its last round
+    /// adding a requirement that contains `expected_growing`.
+    pub fn expect_recursive_group_does_not_settle(
+        &self,
+        expected_function: &str,
+        expected_growing: &str,
+    ) {
         match self.deref() {
-            CompilationErrorImpl::RecursiveGroupBodyDoesNotFit { function, .. } => {
+            CompilationErrorImpl::RecursiveGroupDoesNotSettle {
+                function, growing, ..
+            } => {
                 assert_eq!(function.as_str(), expected_function);
+                let growing = growing.as_deref().unwrap_or_default();
+                assert!(
+                    growing.contains(expected_growing),
+                    "expected a growing requirement of {expected_growing}, got `{growing}`"
+                );
             }
             _ => panic!(
-                "expect_recursive_group_body_does_not_fit called on non-RecursiveGroupBodyDoesNotFit error {self:?}"
+                "expect_recursive_group_does_not_settle called on non-RecursiveGroupDoesNotSettle error {self:?}"
             ),
         }
     }
