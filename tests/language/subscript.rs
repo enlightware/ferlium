@@ -4568,6 +4568,95 @@ fn yielded_generic_frame_keeps_evidence_across_module_calls() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn members_of_a_subscript_have_one_signature() {
+    // The members are bodies of one signature, also when neither names the other: an argument
+    // that the signature leaves to infer has one type for both.
+    experimental_session()
+        .fail_compilation(indoc! { r#"
+            subscript cell(slot: &mut int, key) -> int {
+                ref {
+                    let offset: int = key;
+                    let local = slot + offset;
+                    yield local
+                }
+
+                mut {
+                    let name: string = key;
+                    let mut local = slot;
+                    yield local;
+                    slot = local
+                }
+            }
+
+            let mut slot = 1;
+            slot->[cell](5)
+        "# })
+        .expect_type_mismatch("int", "string");
+}
+
+/// A subscript whose `ref` member needs trait `A` and whose `mut` member needs trait `B`, each
+/// performing the output effect of its trait, with `A` fallible and `B` pure for `string`,
+/// followed by `uses`.
+fn subscript_of_members_with_different_requirements(uses: &str) -> String {
+    let declarations = indoc! { r#"
+        trait A<Self |-> ! E> { fn run_a(x: Self) -> int ! E; }
+        trait B<Self |-> ! E> { fn run_b(x: Self) -> int ! E; }
+        impl A for <Self = string |-> ! E = fallible> {
+            fn run_a(x) { idiv(6, string_len(x)) }
+        }
+        impl B for <Self = string |-> ! E = ()> {
+            fn run_b(x) { string_len(x) }
+        }
+
+        subscript cell<T>(slot: &mut int, key: T) -> int {
+            ref {
+                let local = slot + run_a(key);
+                yield local
+            }
+
+            mut {
+                let mut local = slot + run_b(key);
+                yield local;
+                slot = local
+            }
+        }
+
+        fn read() -> int {
+            let accessor = cell;
+            let mut slot = 1;
+            slot->[accessor]("ab")
+        }
+
+        fn write() -> int {
+            let accessor = cell;
+            let mut slot = 1;
+            slot->[accessor]("ab") += 10;
+            slot
+        }
+
+        fn pure_only(f: () -> int ! ()) -> int { f() }
+    "# };
+    format!("{declarations}{uses}")
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn first_class_subscript_value_gives_each_member_its_evidence_and_its_effect() {
+    // The value holds the evidence of the one signature, which both members take.
+    let source = subscript_of_members_with_different_requirements("(read(), pure_only(write))");
+    assert_val_eq!(
+        run_experimental_subscript_source(&source),
+        expected_tuple([int(4), int(13)])
+    );
+
+    let source = subscript_of_members_with_different_requirements("pure_only(read)");
+    experimental_session()
+        .fail_compilation(&source)
+        .expect_invalid_effect_inclusion(effect(PrimitiveEffect::Fallible), no_effects());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn first_class_subscript_value_captures_hidden_evidence() {
     let value = run_experimental_subscript_source(indoc! { r#"
             subscript cell<T>(slot: &mut T) -> T

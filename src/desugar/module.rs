@@ -1042,7 +1042,19 @@ impl PModule {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let (subscripts, subscript_dep_graphs): (Vec<_>, Vec<_>) = subscripts.into_iter().unzip();
+        let (subscripts, mut subscript_dep_graphs): (Vec<_>, Vec<_>) =
+            subscripts.into_iter().unzip();
+        // The members of a subscript are bodies of one signature, so they are inferred together:
+        // each depends on the others.
+        for (deps, nodes) in subscript_dep_graphs.iter_mut().zip(&subscript_member_nodes) {
+            for (dep, node) in deps.iter_mut().zip(nodes) {
+                for other in nodes {
+                    if other != node && !dep.0.contains(other) {
+                        dep.0.push(*other);
+                    }
+                }
+            }
+        }
         let mut impl_dep_graph = function_dep_graph;
         impl_dep_graph.extend(subscript_dep_graphs.into_iter().flatten());
         let sccs = find_strongly_connected_components(&impl_dep_graph);

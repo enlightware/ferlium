@@ -428,18 +428,48 @@ fn subscript_signature_from_source(
     }
 }
 
+/// What the members of a subscript have in common once published: their type generics, their
+/// arguments, their result and their requirements.
+type PublishedSubscript = (Vec<TypeVar>, Vec<FnArgType>, Type, Vec<PubTypeConstraint>);
+
+/// Gives a subscript the signature of one of its members, as it is published. The members of a
+/// subscript are bodies of one signature: `published` is what the member seen before has, if
+/// there is one, and this one must have the same, as a use of the subscript as a value gives
+/// the types, the effects and the evidence of that one signature to whichever member it then
+/// takes. The members differ by the effect that each performs.
 fn update_subscript_signature_from_member_definition(
     output: &mut Module,
     subscript_id: LocalSubscriptId,
     projection_receiver: bool,
     member_definition: &CallableDefinition,
-) {
+    published: &mut FxHashMap<LocalSubscriptId, PublishedSubscript>,
+    span: Location,
+) -> Result<(), InternalCompilationError> {
     let mut signature = SubscriptSignature::from_callable_definition(member_definition);
     if projection_receiver {
         signature.normalize_projection_receiver();
     }
+    let common = (
+        member_definition.ty_scheme.ty_quantifiers.clone(),
+        signature.args.clone(),
+        signature.ret,
+        signature.constraints.clone(),
+    );
+    match published.entry(subscript_id) {
+        Entry::Vacant(entry) => {
+            entry.insert(common);
+        }
+        Entry::Occupied(entry) if *entry.get() != common => {
+            return Err(internal_compilation_error!(Internal {
+                error: "the members of a subscript do not have one signature".to_string(),
+                span,
+            }));
+        }
+        Entry::Occupied(_) => {}
+    }
     let subscript = &mut output.subscripts[subscript_id.as_index()];
     subscript.set_resolved_signature(signature);
+    Ok(())
 }
 
 struct SharedSubscriptSignature {
@@ -4206,6 +4236,7 @@ where
 
         // Fifth pass, normalize the type schemes, substitute the types in the functions.
         let mut function_ty_origins = Vec::new();
+        let mut published_subscripts = FxHashMap::default();
         let mut function_effect_substs = Vec::new();
         let mut function_effect_origins = Vec::new();
         for (((input, id), written_effects), leading_effects) in ast_functions()
@@ -4298,7 +4329,9 @@ where
                     subscript_id,
                     projection_key.is_some(),
                     &definition,
-                );
+                    &mut published_subscripts,
+                    input.function.span,
+                )?;
             }
         }
 
