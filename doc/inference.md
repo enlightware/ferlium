@@ -237,7 +237,8 @@ needs no runtime adapter (see [abi.md](abi.md)).
   received ones unite, and the shared effect takes the result.
   Applications that differ only by effects have the same implementation, as effects do not
   select one, so their output types have the same structure: they are equal once their effects
-  are removed. Structures are unified as types are, on the types read without effects, and each
+  are removed. This holds in turn for the applications that take such outputs as inputs.
+  Structures are unified as types are, on the types read without effects, and each
   place of a known structure then gets an effect of its own. A recursive structure is left
   unknown until its implementation or its uses give its type, as its effects can repeat with
   any period.

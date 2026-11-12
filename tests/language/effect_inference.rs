@@ -2226,6 +2226,96 @@ fn a_recursive_output_structure_leaves_its_effects_to_each_output() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn applications_on_outputs_of_the_same_structure_have_outputs_of_the_same_structure() {
+    // `a` and `b` are outputs of one implementation of `R`, at inputs that differ by an effect,
+    // so they have the same structure whatever it is. Then `s(a)` and `s(b)` have one
+    // implementation of `S` too: `c` is a function as `d` is, with an effect of its own.
+    let prelude = indoc! { "
+        struct Pair<T, F>(T, F)
+        struct Box<T>(T)
+        struct W<F>(F)
+        trait R<Self |-> Out> { fn r(x: Self) -> Out; }
+        trait S<Self |-> Out> { fn s(x: Self) -> Out; }
+        fn same<A>(x: Box<A>, y: Box<A>) {}
+        fn f<T, ! E, F>(x: T, g: () -> int ! E, h: () -> int ! F) {
+            let a = r(Pair(x, g));
+            let b = r(Pair(x, h));
+            let c = s(a);
+            let d = s(b);
+            same(Box(d), Box(h));
+            (c, d)
+        }
+    " };
+    assert_eq!(
+        signature(&mut TestSession::new(), prelude, "f"),
+        "fn f<T, B, C ! E, F, e₂>(x: T, g: () -> int ! E, h: () -> int ! F) \
+         -> (() -> int ! e₂, () -> int ! F) where T: Value, B: S <Out = () -> int ! e₂>, \
+         B: Value, C: S <Out = () -> int ! F>, C: Value, Pair<T, () -> int ! E>: R <Out = B>, \
+         Pair<T, () -> int ! F>: R <Out = C>"
+    );
+    let src = formatdoc! { "
+        {prelude}
+        impl<! E> R for <Self = Pair<int, (() -> int ! E)> |-> Out = W<(() -> int ! E)>> {{
+            fn r(x: Pair<int, (() -> int ! E)>) -> W<(() -> int ! E)> {{ W(x.1) }}
+        }}
+        impl<! E> S for <Self = W<(() -> int ! E)> |-> Out = (() -> int ! E)> {{
+            fn s(x: W<(() -> int ! E)>) -> (() -> int ! E) {{ x.0 }}
+        }}
+        fn pure_only(g: () -> int ! ()) {{ g() }}
+        let t = f(0, || 1, || idiv(4, 2));
+        pure_only(t.0) + t.1()
+    " };
+    assert_val_eq!(TestSession::new().run(&src), int(3));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_opaque_output_of_a_group_is_one_type_across_its_calls() {
+    // The recursive call needs `Read` at the effects of `h` and `g` exchanged, and its result
+    // is not used.
+    let program = |use_of_output: &str| {
+        formatdoc! { "
+            struct Pair<T, F>(T, F)
+            trait Read<Self |-> Out> {{ fn read(x: Self) -> Out; }}
+            impl<! E> Read for <Self = Pair<int, (() -> int ! E)> |-> Out = (() -> int ! E)> {{
+                fn read(x: Pair<int, (() -> int ! E)>) -> (() -> int ! E) {{ x.1 }}
+            }}
+            fn pure_only(g: () -> int ! ()) {{ g() }}
+            fn is_fn<A, ! X>(g: () -> A ! X) {{}}
+            fn f<T, ! E, F>(x: T, g: () -> int ! E, h: () -> int ! F, n: int) {{
+                if n > 0 {{ f(x, h, g, n - 1); }};
+                let r = read(Pair(x, g));
+                {use_of_output}
+                r
+            }}
+        " }
+    };
+    let call = "let r = f(0, || 1, || idiv(4, 2), 1); pure_only(r)";
+    // Nothing in the group says what the output of `Read` is: it is one type for the group, so
+    // both requirements have it, and the implementation then makes the two effects one.
+    let opaque = program("");
+    assert_eq!(
+        signature(&mut TestSession::new(), &opaque, "f"),
+        "fn f<T, B ! E, F>(x: T, g: () -> int ! E, h: () -> int ! F, n: int) -> B \
+         where T: Value, B: Value, Pair<T, () -> int ! E>: Read <Out = B>, \
+         Pair<T, () -> int ! F>: Read <Out = B>"
+    );
+    TestSession::new()
+        .fail_compilation(&format!("{opaque}{call}"))
+        .expect_invalid_effect_inclusion(effect(PrimitiveEffect::Fallible), no_effects());
+    // Once the group says that it is a function, its effect is of each call.
+    let exposed = program("is_fn(r);");
+    assert_eq!(
+        signature(&mut TestSession::new(), &exposed, "f"),
+        "fn f<T, B ! E, F, e₂, e₃>(x: T, g: () -> int ! E, h: () -> int ! F, n: int) \
+         -> () -> B ! e₂ where T: Value, Pair<T, () -> int ! E>: Read <Out = () -> B ! e₂>, \
+         Pair<T, () -> int ! F>: Read <Out = () -> B ! e₃>"
+    );
+    assert_val_eq!(TestSession::new().run(&format!("{exposed}{call}")), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn a_field_read_through_a_call_of_a_group_has_the_effect_of_its_declaration() {
     // The recursive call needs the field `kind` with an effect of its own, which is the one of
     // the body's own read, not all that the call performs.

@@ -148,6 +148,8 @@ struct HaveTraitOutputs {
     /// Per output effect, the fixed bounds.
     bounds: Vec<Vec<(EffType, Location)>>,
     span: Location,
+    /// The rank of the application among those of the pass.
+    order: usize,
 }
 
 pub(super) struct ConstraintPassAggregation<'a> {
@@ -1606,7 +1608,8 @@ impl UnifiedTypeInference {
     /// their `polarities` and the effects to learn take the combined bound, whatever their order.
     ///
     /// Applications that differ only by effects have the same implementation, as effects do not
-    /// select one: their output types have the same structure, and effects of their own.
+    /// select one: their output types have the same structure, and effects of their own, see
+    /// [`Self::unify_same_structures`].
     pub(super) fn aggregate_constraints_for_pass<'a>(
         &mut self,
         constraints: impl IntoIterator<Item = &'a PubTypeConstraint>,
@@ -1617,10 +1620,10 @@ impl UnifiedTypeInference {
         let mut projection_indices = FxHashMap::<(Type, Ustr), usize>::default();
         let mut have_traits: FxHashMap<(TraitId, Vec<Type>), HaveTraitOutputs> =
             FxHashMap::default();
-        // Per trait and inputs without their effects, the output types of the first application.
-        let mut output_structures: FxHashMap<(TraitId, Vec<Type>), (Vec<Type>, Location)> =
-            FxHashMap::default();
-        let mut same_structures = Vec::new();
+        // The applications that have output types, by trait and inputs without their effects,
+        // and whether two of them differ only by effects.
+        let mut output_structures: FxHashSet<(TraitId, Vec<Type>)> = FxHashSet::default();
+        let mut differ_only_by_effects = false;
 
         for constraint in constraints {
             use PubTypeConstraint::*;
@@ -1838,6 +1841,7 @@ impl UnifiedTypeInference {
                     let output_effects = self.substitute_in_effect_types(output_effs);
                     let key = (*trait_id, input_types);
                     let site = span.use_site;
+                    let order = have_traits.len();
                     let outputs = match have_traits.entry(key) {
                         Entry::Occupied(entry) => {
                             let outputs = entry.into_mut();
@@ -1852,25 +1856,15 @@ impl UnifiedTypeInference {
                                 let (trait_id, input_types) = entry.key();
                                 let erased =
                                     instantiate_types(input_types, &mut EffectErasingMapper);
-                                match output_structures.entry((*trait_id, erased)) {
-                                    Entry::Occupied(first) => {
-                                        let (first_types, first_site) = first.get();
-                                        same_structures.extend(
-                                            first_types.iter().zip(&output_types).map(
-                                                |(first, ty)| (*first, *first_site, *ty, site),
-                                            ),
-                                        );
-                                    }
-                                    Entry::Vacant(first) => {
-                                        first.insert((output_types.clone(), site));
-                                    }
-                                }
+                                differ_only_by_effects |=
+                                    !output_structures.insert((*trait_id, erased));
                             }
                             entry.insert(HaveTraitOutputs {
                                 types: output_types,
                                 learned: vec![None; output_effects.len()],
                                 bounds: vec![Vec::new(); output_effects.len()],
                                 span: site,
+                                order,
                             })
                         }
                     };
@@ -1888,7 +1882,17 @@ impl UnifiedTypeInference {
                 }
             }
         }
-        self.unify_same_structures(&same_structures)?;
+        if differ_only_by_effects {
+            let applications = have_traits
+                .iter()
+                .filter(|(_, outputs)| !outputs.types.is_empty())
+                .sorted_by_key(|(_, outputs)| outputs.order)
+                .map(|((trait_id, inputs), outputs)| {
+                    (*trait_id, &inputs[..], &outputs.types[..], outputs.span)
+                })
+                .collect::<Vec<_>>();
+            self.unify_same_structures(&applications)?;
+        }
         for ((trait_id, _), outputs) in have_traits {
             if outputs.bounds.iter().all(Vec::is_empty) {
                 continue;
@@ -1912,37 +1916,65 @@ impl UnifiedTypeInference {
         Ok(aggregation)
     }
 
-    /// Give the types of each pair the same structure, the effects in them staying unrelated:
-    /// each pair is a type of the first side, its site, and those of the second side.
+    /// Give the same structure to the output types of the trait applications whose inputs have
+    /// the same structure, the effects in them staying unrelated. Each application is its
+    /// trait, its input types, its output types and its site.
+    ///
+    /// Two types have the same structure when they are equal once their effects are removed.
+    /// Such applications have one implementation, as effects do not select one, so their outputs
+    /// are its output types at different effects. This holds again for the applications that
+    /// take these outputs as inputs, so the relation is closed under the applications.
     ///
     /// The structures are solved apart from the types. Each type is read without its effects, a
-    /// twin variable standing for each of its unknown parts, and these readings are unified as
-    /// types are: this refuses the structures that no type has, and accepts the recursive ones
-    /// that a type can have. A variable whose twin is then known takes a copy of that structure,
-    /// see [`Self::structure_copy`]. Nothing is kept from one pass to the next, as the pairs
+    /// twin variable standing for each of its unknown parts, and the readings of the outputs of
+    /// applications whose inputs have the same reading are unified as types are: this refuses
+    /// the structures that no type has, and accepts the recursive ones that a type can have. A
+    /// variable whose twin is then known takes a copy of that structure, see
+    /// [`Self::structure_copy`]. Nothing is kept from one pass to the next, as the applications
     /// relate these copies again.
     fn unify_same_structures(
         &mut self,
-        pairs: &[(Type, Location, Type, Location)],
+        applications: &[(TraitId, &[Type], &[Type], Location)],
     ) -> Result<(), InternalCompilationError> {
-        if pairs.is_empty() {
-            return Ok(());
-        }
         let mut reading = StructureReading {
             inference: self,
             twins: FxHashMap::default(),
             read: Vec::new(),
-            site: Location::new_synthesized(),
         };
-        let mut structures = Vec::with_capacity(pairs.len());
-        for (left, left_span, right, right_span) in pairs {
-            let left = reading.read(*left, *left_span);
-            let right = reading.read(*right, *right_span);
-            structures.push((left, *left_span, right, *right_span));
-        }
+        let structures = applications
+            .iter()
+            .map(|(trait_id, inputs, outputs, site)| {
+                let inputs = reading.read(inputs, *site);
+                (*trait_id, inputs, reading.read(outputs, *site), *site)
+            })
+            .collect::<Vec<_>>();
         let read = reading.read;
-        for (left, left_span, right, right_span) in structures {
-            self.unify_same_type(left, left_span, right, right_span)?;
+        // Unifying outputs can give two other applications inputs of the same reading, which
+        // were visited before if the applications do not come in the order of their dependencies.
+        loop {
+            let mut firsts: FxHashMap<(TraitId, Vec<Type>), usize> = FxHashMap::default();
+            let mut progress = false;
+            for (index, (trait_id, inputs, outputs, site)) in structures.iter().enumerate() {
+                let first = match firsts.entry((*trait_id, self.normalize_types(inputs))) {
+                    Entry::Occupied(first) => *first.get(),
+                    Entry::Vacant(first) => {
+                        first.insert(index);
+                        continue;
+                    }
+                };
+                let (_, _, first_outputs, first_site) = &structures[first];
+                for (first_output, output) in first_outputs.iter().zip(outputs) {
+                    let first_output = self.normalize_type(*first_output);
+                    let output = self.normalize_type(*output);
+                    if first_output != output {
+                        self.unify_same_type(first_output, *first_site, output, *site)?;
+                        progress = true;
+                    }
+                }
+            }
+            if !progress {
+                break;
+            }
         }
         for (var, twin, site) in read {
             let structure = self.normalize_type(Type::variable(twin));
@@ -2909,17 +2941,19 @@ impl UnifiedTypeInference {
 struct StructureReading<'a> {
     inference: &'a mut UnifiedTypeInference,
     twins: FxHashMap<TypeVar, TypeVar>,
-    /// Each variable read, its twin, and the site of the type that first held it.
+    /// Each variable read, its twin, and the site of the types that first held it.
     read: Vec<(TypeVar, TypeVar, Location)>,
-    /// The site of the type being read.
-    site: Location,
 }
 
 impl StructureReading<'_> {
-    fn read(&mut self, ty: Type, site: Location) -> Type {
-        self.site = site;
-        let ty = self.inference.normalize_type(ty);
-        ty.map(self)
+    fn read(&mut self, tys: &[Type], site: Location) -> Vec<Type> {
+        let tys = self.inference.normalize_types(tys);
+        let read = self.read.len();
+        let tys = instantiate_types(&tys, self);
+        for (_, _, read_site) in &mut self.read[read..] {
+            *read_site = site;
+        }
+        tys
     }
 }
 
@@ -2931,7 +2965,7 @@ impl TypeMapper for StructureReading<'_> {
         };
         let twin = *self.twins.entry(var).or_insert_with(|| {
             let twin = self.inference.fresh_type_var();
-            self.read.push((var, twin, self.site));
+            self.read.push((var, twin, Location::new_synthesized()));
             twin
         });
         Type::variable(twin)
