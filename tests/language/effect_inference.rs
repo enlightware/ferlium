@@ -6,7 +6,7 @@
 
 use test_log::test;
 
-use indoc::indoc;
+use indoc::{formatdoc, indoc};
 use ustr::ustr;
 
 use crate::harness::{TestSession, float, int, string};
@@ -1976,6 +1976,252 @@ fn an_application_through_a_called_function_is_the_one_of_the_caller() {
         signature(&mut TestSession::new(), src, "f"),
         "fn f<T, B ! E>(x: T, g: () -> int ! E) -> B where T: Value, B: Value, Pair<T, () -> int ! E>: Read <Out = B>"
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_output_type_has_the_effects_that_its_impl_gives_it() {
+    // `Out` is the callback with its effect: each application has the effect of its own
+    // callback, whatever the order of the applications, also in a recursive function.
+    let prelude = indoc! { "
+        struct Pair<T, F>(T, F)
+        trait Read<Self |-> Out> { fn read(x: Self) -> Out; }
+        impl<! E> Read for <Self = Pair<int, (() -> int ! E)> |-> Out = (() -> int ! E)> {
+            fn read(x: Pair<int, (() -> int ! E)>) -> (() -> int ! E) { x.1 }
+        }
+        fn pure_only(g: () -> int ! ()) -> int { g() }
+    " };
+    let reads = [
+        "let a = read(Pair(x, g)); let b = read(Pair(x, h));",
+        "let b = read(Pair(x, h)); let a = read(Pair(x, g));",
+    ];
+    let recursions = ["", "if n > 0 { f(x, g, h, n - 1); };"];
+    let cases = reads
+        .into_iter()
+        .flat_map(|reads| recursions.map(|recursion| (reads, recursion)));
+    for (reads, recursion) in cases {
+        let src = format!(
+            "{prelude}fn f<T, ! E, F>(x: T, g: () -> int ! E, h: () -> int ! F, n: int) {{
+                {reads}
+                {recursion}
+                (a, b)
+            }}\n"
+        );
+        assert_val_eq!(
+            TestSession::new().run(&format!(
+                "{src}let r = f(3, || 2, || idiv(4, 2), 1); pure_only(r.0) + r.1()"
+            )),
+            int(4),
+            "{src}"
+        );
+        assert_val_eq!(
+            TestSession::new().run(&format!(
+                "{src}let r = f(3, || idiv(4, 2), || 2, 1); r.0() + pure_only(r.1)"
+            )),
+            int(4),
+            "{src}"
+        );
+        TestSession::new()
+            .try_compile(&format!(
+                "{src}let r = f(3, || 2, || idiv(4, 2), 1); pure_only(r.1)"
+            ))
+            .expect_err("the output of the second application is fallible")
+            .expect_invalid_effect_inclusion(effect(PrimitiveEffect::Fallible), no_effects());
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn applications_that_differ_only_by_effects_have_outputs_of_the_same_structure() {
+    // Effects do not select an implementation, so both applications of `Read` have the same
+    // one. The call of `a` says that its output is a function: the output of the other
+    // application is one too, with a result and an effect of its own.
+    let prelude = indoc! { "
+        struct Pair<T, F>(T, F)
+        trait Read<Self |-> Out> { fn read(x: Self) -> Out; }
+        impl<! E> Read for <Self = Pair<int, (() -> int ! E)> |-> Out = (() -> int ! E)> {
+            fn read(x: Pair<int, (() -> int ! E)>) -> (() -> int ! E) { x.1 }
+        }
+    " };
+    let function = |end: &str| {
+        format!(
+            "{prelude}fn f<T, ! E, F>(x: T, g: () -> int ! E, h: () -> int ! F, n: int) {{
+                let a = read(Pair(x, g));
+                let b = read(Pair(x, h));
+                {end}
+            }}\n"
+        )
+    };
+    let src = function("(a() + 1, b)");
+    assert_eq!(
+        signature(&mut TestSession::new(), &src, "f"),
+        "fn f<T, B, C ! E, F, e₂, e₃>(x: T, g: () -> int ! E, h: () -> int ! F, n: int) \
+         -> (B, () -> C ! e₃) ! e₂ where T: Value, B: Num + Value, \
+         Pair<T, () -> int ! E>: Read <Out = () -> B ! e₂>, \
+         Pair<T, () -> int ! F>: Read <Out = () -> C ! e₃>"
+    );
+    // In a recursive function too, where the types are found before the effects.
+    for src in [
+        src,
+        function("if n > 0 { f(x, g, h, n - 1); }; (a() + 1, b)"),
+    ] {
+        assert_val_eq!(
+            TestSession::new().run(&format!(
+                "{src}let r = f(3, || 2, || idiv(4, 2), 1); r.0 + r.1()"
+            )),
+            int(5),
+            "{src}"
+        );
+    }
+    // Outputs of different structures have no implementation.
+    TestSession::new()
+        .fail_compilation(&function("let c: int = a; let d: bool = b; 0"))
+        .expect_type_mismatch("int", "bool");
+    // Nor has an output that would hold the structure of the other.
+    TestSession::new()
+        .fail_compilation(&function("b == [a]"))
+        .expect_infinite_type_ty_var_cycle();
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn each_place_of_a_shared_output_structure_has_its_own_effects() {
+    // The first output holds the same pure function type twice. The second output takes its
+    // structure, and its two functions still have an effect each.
+    let function = |first: &str, second: &str| {
+        formatdoc! { "
+            struct Box<T, F, G>(T, F, G)
+            struct Out<A, B>(A, B)
+            trait Read<Self |-> Out> {{ fn read(x: Self) -> Out; }}
+            impl<! E, F> Read for
+                <Self = Box<int, (() -> int ! E), (() -> int ! F)>
+                 |-> Out = Out<(() -> int ! E), (() -> int ! F)>> {{
+                fn read(x: Box<int, (() -> int ! E), (() -> int ! F)>)
+                    -> Out<(() -> int ! E), (() -> int ! F)> {{
+                    Out(x.1, x.2)
+                }}
+            }}
+            fn f<T, ! F>(x: T, g: () -> int ! (), h: () -> int ! F) {{
+                {first}
+                {second}
+                (a, b)
+            }}
+            let r = f(0, || 1, || idiv(4, 2));
+            r.0.0() + r.1.0() + r.1.1()
+        " }
+    };
+    let a = "let a: Out<(() -> int ! ()), (() -> int ! ())> = read(Box(x, g, g));";
+    let b = "let b = read(Box(x, g, h));";
+    for src in [function(a, b), function(b, a)] {
+        assert_val_eq!(TestSession::new().run(&src), int(4), "{src}");
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn output_structures_follow_the_rules_of_recursive_types() {
+    let prelude = indoc! { "
+        struct In<T, F>(T, F)
+        struct Box<T>(T)
+        fn same<A>(x: Box<A>, y: Box<A>) {}
+    " };
+    // Each output would hold an array of the next one, in a cycle: no type has this structure,
+    // in whatever order the body says it.
+    let cycle = [
+        "same(Box(r1(In(x, h))), Box([b]));",
+        "same(Box(r2(In(x, h))), Box([c]));",
+        "same(Box(r3(In(x, h))), Box([a]));",
+    ];
+    for order in [[0, 1, 2], [2, 1, 0], [1, 2, 0]] {
+        let relations = order.map(|index| cycle[index]).join("\n");
+        let src = formatdoc! { "
+            {prelude}
+            trait R1<Self |-> Out> {{ fn r1(x: Self) -> Out; }}
+            trait R2<Self |-> Out> {{ fn r2(x: Self) -> Out; }}
+            trait R3<Self |-> Out> {{ fn r3(x: Self) -> Out; }}
+            fn f<T, ! E, F>(x: T, g: () -> int ! E, h: () -> int ! F) {{
+                let a = r1(In(x, g));
+                let b = r2(In(x, g));
+                let c = r3(In(x, g));
+                {relations}
+            }}
+        " };
+        TestSession::new()
+            .fail_compilation(&src)
+            .expect_infinite_type_ty_var_cycle();
+    }
+    // An output that holds itself as the payload of a variant is a recursive type, which the
+    // implementation gives.
+    for (first, second) in [("g", "h"), ("h", "g")] {
+        let src = formatdoc! { "
+            {prelude}
+            trait R<Self |-> Out> {{ fn r(x: Self) -> Out; }}
+            type V = End | Next(V);
+            impl<! E> R for <Self = In<int, (() -> int ! E)> |-> Out = V> {{
+                fn r(x: In<int, (() -> int ! E)>) -> V {{ End }}
+            }}
+            fn next<A>(x: Box<A>) -> Box<End | Next(A)> {{ Box(End) }}
+            fn f<T, ! E, F>(x: T, g: () -> int ! E, h: () -> int ! F) {{
+                let a = r(In(x, {first}));
+                same(Box(r(In(x, {second}))), next(Box(a)));
+            }}
+            f(0, || 1, || idiv(4, 2));
+            0
+        " };
+        assert_val_eq!(TestSession::new().run(&src), int(0), "{src}");
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_recursive_output_structure_leaves_its_effects_to_each_output() {
+    // With two pure functions, `Alt` is a list of one function type. The second output has this
+    // structure, yet its functions alternate between two effects: its implementation says so,
+    // not the first output.
+    let function = |first: &str, second: &str| {
+        formatdoc! { "
+            struct Box<T, F, G>(T, F, G)
+            struct Out<A>(A)
+            type Alt<A, B> = End | Next(A, End | Next(B, Alt<A, B>));
+            trait Read<Self |-> Out> {{ fn read(x: Self) -> Out; }}
+            impl<! E, F> Read for
+                <Self = Box<int, (() -> int ! E), (() -> int ! F)>
+                 |-> Out = Out<Alt<(() -> int ! E), (() -> int ! F)>>> {{
+                fn read(x: Box<int, (() -> int ! E), (() -> int ! F)>)
+                    -> Out<Alt<(() -> int ! E), (() -> int ! F)>> {{
+                    Out(Next(x.1, Next(x.2, End)))
+                }}
+            }}
+            fn f<T, ! F>(x: T, g: () -> int ! (), h: () -> int ! F) {{
+                {first}
+                {second}
+                (a, b)
+            }}
+            fn pure_only(g: () -> int ! ()) {{ g() }}
+            let r = f(0, || 1, || idiv(4, 2));
+        " }
+    };
+    let a = "let a: Out<Alt<(() -> int ! ()), (() -> int ! ())>> = read(Box(x, g, g));";
+    let b = "let b = read(Box(x, g, h));";
+    let read = |first: &str, second: &str| {
+        formatdoc! { "
+            match r.1.0 {{
+                End => 0,
+                Next(c, rest) => match rest {{
+                    End => 0,
+                    Next(d, more) => {first}(c) + {second}(d),
+                }},
+            }}
+        " }
+    };
+    for function in [function(a, b), function(b, a)] {
+        let src = format!("{function}{}", read("pure_only", "(|g| g())"));
+        assert_val_eq!(TestSession::new().run(&src), int(3), "{src}");
+        let src = format!("{function}{}", read("pure_only", "pure_only"));
+        TestSession::new()
+            .fail_compilation(&src)
+            .expect_invalid_effect_inclusion(effect(PrimitiveEffect::Fallible), no_effects());
+    }
 }
 
 #[test]

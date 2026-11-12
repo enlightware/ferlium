@@ -1604,6 +1604,9 @@ impl UnifiedTypeInference {
     /// Equal trait applications have the same outputs, so their output types and the output
     /// effects still to learn are equated. Fixed output effects are bounds: they are combined by
     /// their `polarities` and the effects to learn take the combined bound, whatever their order.
+    ///
+    /// Applications that differ only by effects have the same implementation, as effects do not
+    /// select one: their output types have the same structure, and effects of their own.
     pub(super) fn aggregate_constraints_for_pass<'a>(
         &mut self,
         constraints: impl IntoIterator<Item = &'a PubTypeConstraint>,
@@ -1614,6 +1617,10 @@ impl UnifiedTypeInference {
         let mut projection_indices = FxHashMap::<(Type, Ustr), usize>::default();
         let mut have_traits: FxHashMap<(TraitId, Vec<Type>), HaveTraitOutputs> =
             FxHashMap::default();
+        // Per trait and inputs without their effects, the output types of the first application.
+        let mut output_structures: FxHashMap<(TraitId, Vec<Type>), (Vec<Type>, Location)> =
+            FxHashMap::default();
+        let mut same_structures = Vec::new();
 
         for constraint in constraints {
             use PubTypeConstraint::*;
@@ -1836,21 +1843,36 @@ impl UnifiedTypeInference {
                             let outputs = entry.into_mut();
                             assert_eq!(outputs.types.len(), output_types.len());
                             for (expected, actual) in outputs.types.iter().zip(&output_types) {
-                                self.unify_same_type_with_sub_effects(
-                                    *actual,
-                                    site,
-                                    *expected,
-                                    outputs.span,
-                                )?;
+                                self.unify_same_type(*actual, site, *expected, outputs.span)?;
                             }
                             outputs
                         }
-                        Entry::Vacant(entry) => entry.insert(HaveTraitOutputs {
-                            types: output_types,
-                            learned: vec![None; output_effects.len()],
-                            bounds: vec![Vec::new(); output_effects.len()],
-                            span: site,
-                        }),
+                        Entry::Vacant(entry) => {
+                            if !output_types.is_empty() {
+                                let (trait_id, input_types) = entry.key();
+                                let erased =
+                                    instantiate_types(input_types, &mut EffectErasingMapper);
+                                match output_structures.entry((*trait_id, erased)) {
+                                    Entry::Occupied(first) => {
+                                        let (first_types, first_site) = first.get();
+                                        same_structures.extend(
+                                            first_types.iter().zip(&output_types).map(
+                                                |(first, ty)| (*first, *first_site, *ty, site),
+                                            ),
+                                        );
+                                    }
+                                    Entry::Vacant(first) => {
+                                        first.insert((output_types.clone(), site));
+                                    }
+                                }
+                            }
+                            entry.insert(HaveTraitOutputs {
+                                types: output_types,
+                                learned: vec![None; output_effects.len()],
+                                bounds: vec![Vec::new(); output_effects.len()],
+                                span: site,
+                            })
+                        }
                     };
                     assert_eq!(outputs.learned.len(), output_effects.len());
                     for (index, effect) in output_effects.into_iter().enumerate() {
@@ -1866,6 +1888,7 @@ impl UnifiedTypeInference {
                 }
             }
         }
+        self.unify_same_structures(&same_structures)?;
         for ((trait_id, _), outputs) in have_traits {
             if outputs.bounds.iter().all(Vec::is_empty) {
                 continue;
@@ -1887,6 +1910,70 @@ impl UnifiedTypeInference {
             }
         }
         Ok(aggregation)
+    }
+
+    /// Give the types of each pair the same structure, the effects in them staying unrelated:
+    /// each pair is a type of the first side, its site, and those of the second side.
+    ///
+    /// The structures are solved apart from the types. Each type is read without its effects, a
+    /// twin variable standing for each of its unknown parts, and these readings are unified as
+    /// types are: this refuses the structures that no type has, and accepts the recursive ones
+    /// that a type can have. A variable whose twin is then known takes a copy of that structure,
+    /// see [`Self::structure_copy`]. Nothing is kept from one pass to the next, as the pairs
+    /// relate these copies again.
+    fn unify_same_structures(
+        &mut self,
+        pairs: &[(Type, Location, Type, Location)],
+    ) -> Result<(), InternalCompilationError> {
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        let mut reading = StructureReading {
+            inference: self,
+            twins: FxHashMap::default(),
+            read: Vec::new(),
+            site: Location::new_synthesized(),
+        };
+        let mut structures = Vec::with_capacity(pairs.len());
+        for (left, left_span, right, right_span) in pairs {
+            let left = reading.read(*left, *left_span);
+            let right = reading.read(*right, *right_span);
+            structures.push((left, *left_span, right, *right_span));
+        }
+        let read = reading.read;
+        for (left, left_span, right, right_span) in structures {
+            self.unify_same_type(left, left_span, right, right_span)?;
+        }
+        for (var, twin, site) in read {
+            let structure = self.normalize_type(Type::variable(twin));
+            if let Some(copy) = self.structure_copy(structure) {
+                self.unify_same_type(Type::variable(var), site, copy, site)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The most general type of a structure read by [`StructureReading`], if it is known and
+    /// finite: the structure with a new effect at each place, and a new type variable for each
+    /// part that is not copied.
+    ///
+    /// An unknown part is not copied, and neither is a recursive one: it stands for an infinite
+    /// tree, whose effects can repeat with any period when it has some, so a copy with a finite
+    /// number of effects may not be the most general. Such a part stays a variable that the
+    /// pairs keep checking against the structure, until its own implementation or its uses give
+    /// its type.
+    fn structure_copy(&mut self, structure: Type) -> Option<Type> {
+        let mut kind = { structure.data().clone() };
+        if kind.as_variable().is_some() || structure.is_global_recursive() {
+            return None;
+        }
+        kind.for_each_inner_type_mut(|part| {
+            *part = match self.structure_copy(*part) {
+                Some(copy) => copy,
+                None => Type::variable(self.fresh_type_var()),
+            };
+        });
+        Some(kind.map(&mut FreshEffects { inference: self }))
     }
 
     /// Combine fixed bounds on one output effect: an implementation's performed effect fits all
@@ -2545,8 +2632,10 @@ impl UnifiedTypeInference {
             }
         };
         assert_eq!(output_tys.len(), impl_output_tys.len());
+        // The output types are those of the implementation, effects included: unlike its
+        // output effects, they have no polarity by which a request could differ from them.
         for (cur_ty, exp_ty) in output_tys.iter().zip(impl_output_tys.iter()) {
-            self.unify_same_type_with_sub_effects(*cur_ty, span, *exp_ty, span)?;
+            self.unify_same_type(*cur_ty, span, *exp_ty, span)?;
         }
         assert_eq!(output_effs.len(), impl_output_effs.len());
         let polarities = trait_solver.output_effect_polarities(trait_id);
@@ -2812,6 +2901,72 @@ impl UnifiedTypeInference {
     /// solver whose inference goes on after a query read its published effects.
     pub(crate) fn restore_effects_finalized(&mut self, finalized: bool) {
         self.effects.set_finalized(finalized);
+    }
+}
+
+/// Reads the structure of types for [`UnifiedTypeInference::unify_same_structures`]: the types
+/// without their effects, a twin variable standing for each type variable.
+struct StructureReading<'a> {
+    inference: &'a mut UnifiedTypeInference,
+    twins: FxHashMap<TypeVar, TypeVar>,
+    /// Each variable read, its twin, and the site of the type that first held it.
+    read: Vec<(TypeVar, TypeVar, Location)>,
+    /// The site of the type being read.
+    site: Location,
+}
+
+impl StructureReading<'_> {
+    fn read(&mut self, ty: Type, site: Location) -> Type {
+        self.site = site;
+        let ty = self.inference.normalize_type(ty);
+        ty.map(self)
+    }
+}
+
+impl TypeMapper for StructureReading<'_> {
+    fn map_type(&mut self, ty: Type) -> Type {
+        let var = { ty.data().as_variable().copied() };
+        let Some(var) = var else {
+            return ty;
+        };
+        let twin = *self.twins.entry(var).or_insert_with(|| {
+            let twin = self.inference.fresh_type_var();
+            self.read.push((var, twin, self.site));
+            twin
+        });
+        Type::variable(twin)
+    }
+
+    fn map_mut_type(&mut self, mut_ty: MutType) -> MutType {
+        mut_ty
+    }
+
+    fn map_effect_type(&mut self, _eff_ty: &EffType) -> EffType {
+        EffType::empty()
+    }
+}
+
+/// Gives a new effect to each effect place of one type constructor, leaving its parts as they
+/// are, for [`UnifiedTypeInference::structure_copy`].
+struct FreshEffects<'a> {
+    inference: &'a mut UnifiedTypeInference,
+}
+
+impl TypeMapper for FreshEffects<'_> {
+    fn map_type(&mut self, ty: Type) -> Type {
+        ty
+    }
+
+    fn map_mut_type(&mut self, mut_ty: MutType) -> MutType {
+        mut_ty
+    }
+
+    fn map_effect_type(&mut self, _eff_ty: &EffType) -> EffType {
+        EffType::single_variable(self.inference.fresh_effect_var())
+    }
+
+    fn affects_type(&mut self, _ty: Type) -> bool {
+        false
     }
 }
 

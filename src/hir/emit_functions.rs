@@ -1576,8 +1576,7 @@ where
 /// finds nothing to change.
 ///
 /// A group whose contracts do not settle within the bound is refused. Its requirements can keep
-/// growing, as not every copy of requirements is recognized, see
-/// [`UnifiedTypeInference::coalesce_requirement_copies`].
+/// growing, when an output of a requirement is an input of the one that the next round adds.
 fn max_refinement_rounds(shapes: &[GroupContract]) -> usize {
     const PRIMITIVE_EFFECTS: usize = 3;
     const WAYS_TO_WEAKEN_A_ROW: usize = PRIMITIVE_EFFECTS + 2;

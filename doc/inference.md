@@ -232,9 +232,17 @@ needs no runtime adapter (see [abi.md](abi.md)).
   Equal applications of a trait in one scope denote one implementation, so they share the output
   effects still being inferred. Two applications can become equal only when effects are final,
   as when a callback is passed on and the effect that its receiver has for it is found to be its
-  own: their output types are made equal then. Fixed ones, such as those written in `where` clauses, are bounds
-  that this implementation must all fit: performed bounds intersect, received ones unite, and the
-  shared effect takes the result.
+  own: their output types are made equal then. Fixed output effects, such as those written in
+  `where` clauses, are bounds that this implementation must all fit: performed bounds intersect,
+  received ones unite, and the shared effect takes the result.
+  Applications that differ only by effects have the same implementation, as effects do not
+  select one, so their output types have the same structure: they are equal once their effects
+  are removed. Structures are unified as types are, on the types read without effects, and each
+  place of a known structure then gets an effect of its own. A recursive structure is left
+  unknown until its implementation or its uses give its type, as its effects can repeat with
+  any period.
+  The output types of a resolved application are those of its implementation, effects
+  included: unlike output effects, they have no polarity.
 
 Declared effect variables (function, implementation and trait default effect parameters) are rigid
 atoms: the body is checked against them and can neither specialize nor widen them.
