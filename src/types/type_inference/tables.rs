@@ -80,7 +80,7 @@ impl Revision {
 /// Equality revisions exclude reads (including path compression) and allocation.
 /// Rollback advances the revision: a cache from a speculative branch must never
 /// match a later branch, even if both performed the same number of bindings.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct RevisionedTable<K: UnifyKey> {
     table: InPlaceUnificationTable<K>,
     revision: Revision,
@@ -146,7 +146,7 @@ impl<K: UnifyKey> RevisionedTable<K> {
 
 /// Any mutable access invalidates readers, including replacement with another
 /// vector of the same length. Read-only access and cloning the contents do not.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(super) struct RevisionedConstraints {
     constraints: Vec<PubTypeConstraint>,
     revision: Revision,

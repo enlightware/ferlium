@@ -137,6 +137,16 @@ fn loop_control_error(
     })
 }
 
+/// A reference to a function of a recursive group, in a body of that group.
+#[derive(Debug, Clone)]
+pub(crate) struct GroupReference {
+    pub(crate) function: FunctionId,
+    /// The type of the function at this reference: the types of its group, and effects of
+    /// this reference alone.
+    pub(crate) fn_ty: FnType,
+    pub(crate) span: Location,
+}
+
 /// The type inference status, containing the unification table and the constraints
 #[derive(Default, Debug)]
 pub struct TypeInference {
@@ -144,11 +154,14 @@ pub struct TypeInference {
     pub(super) given_constraints: Vec<PubTypeConstraint>,
     /// The type variables standing for generic parameters written by the enclosing declaration.
     pub(super) declared_generics: Vec<Type>,
-    /// For each function of a recursive group inferred through contracts, the types its type
-    /// quantifiers take in this body: the group keeps one type instance, only effects vary.
+    /// For each function of a recursive group whose bodies are inferred together against their
+    /// shapes, the types that its type quantifiers take: the group keeps one type instance, only
+    /// effects vary.
     group_type_instances: FxHashMap<FunctionId, Vec<Type>>,
-    /// The functions of that group that this body uses.
-    used_group_functions: FxHashSet<FunctionId>,
+    /// The references to the functions of that group, in the order the bodies make them.
+    group_references: Vec<GroupReference>,
+    /// Whether equal trait applications share their outputs only within one function.
+    pub(super) applications_per_function: bool,
     pub(super) evidence_uses: EvidenceUses,
     pub(super) ty_unification_table: InPlaceUnificationTable<TyVarKey>,
     pub(super) ty_constraints: Vec<TypeConstraint>,
@@ -533,29 +546,64 @@ impl TypeInference {
         self.declared_generics.extend(generics);
     }
 
-    /// Give the functions of a recursive group, in this body, one instance of their type
-    /// quantifiers each, in quantifier order.
+    /// Give the functions of a recursive group one instance of their type quantifiers each, in
+    /// quantifier order.
     pub(crate) fn set_group_type_instances(&mut self, instances: FxHashMap<FunctionId, Vec<Type>>) {
         self.group_type_instances = instances;
     }
 
-    /// The functions of the recursive group that the bodies inferred so far use.
-    pub(crate) fn used_group_functions(&self) -> &FxHashSet<FunctionId> {
-        &self.used_group_functions
+    /// Make the trait applications of each function of the recursive group its own: an output
+    /// effect is of one function, also when another has the same application on the same types.
+    pub(crate) fn set_applications_per_function(&mut self) {
+        self.applications_per_function = true;
     }
 
-    /// A call to a function of the group takes the body's instance of its types.
+    /// The references to the functions of the recursive group made so far.
+    pub(crate) fn group_references(&self) -> &[GroupReference] {
+        &self.group_references
+    }
+
+    /// Record which function makes each requirement, also when no evidence is given.
+    pub(crate) fn track_requirement_owners(&mut self) {
+        self.evidence_uses.enable();
+    }
+
+    pub(crate) fn add_same_type_constraint(
+        &mut self,
+        current: Type,
+        expected: Type,
+        span: Location,
+    ) {
+        if current != expected {
+            self.ty_constraints.push(TypeConstraint::SameType {
+                current,
+                current_span: span,
+                expected,
+                expected_span: span,
+            });
+        }
+    }
+
+    /// A reference to a function of the group takes the group's instance of its types, and is
+    /// recorded with the type `fn_ty` that the function has there. Returns whether `function`
+    /// is of the group: its reference then records no instantiation, as what the function needs
+    /// is found when the group is emitted.
     fn share_group_type_instance(
         &mut self,
         function: FunctionId,
         ty_quantifiers: &[TypeVar],
         subst: &InstSubst,
+        fn_ty: &FnType,
         span: Location,
-    ) {
+    ) -> bool {
         let Some(instance) = self.group_type_instances.get(&function) else {
-            return;
+            return false;
         };
-        self.used_group_functions.insert(function);
+        self.group_references.push(GroupReference {
+            function,
+            fn_ty: fn_ty.clone(),
+            span,
+        });
         for (var, expected) in ty_quantifiers.iter().zip(instance.clone()) {
             self.ty_constraints.push(TypeConstraint::SameType {
                 current: subst.0[var],
@@ -564,6 +612,7 @@ impl TypeInference {
                 expected_span: span,
             });
         }
+        true
     }
 
     pub(crate) fn add_given_constraint(&mut self, constraint: PubTypeConstraint) -> GivenId {
@@ -1056,15 +1105,18 @@ impl TypeInference {
                         (definition.clone(), function, module_id, runtime_arg_passing)
                     })
                 {
-                    let (fn_ty, inst_data, subst) = definition
+                    let (fn_ty, mut inst_data, subst) = definition
                         .ty_scheme
                         .instantiate_with_fresh_vars(self, expr_span, None, env.module_env);
-                    self.share_group_type_instance(
+                    if self.share_group_type_instance(
                         function,
                         &definition.ty_scheme.ty_quantifiers,
                         &subst,
+                        &fn_ty,
                         expr_span,
-                    );
+                    ) {
+                        inst_data = hir::FnInstData::none();
+                    }
                     let node = K::GetFunction(b(hir::GetFunction {
                         function,
                         function_path: path.clone(),
@@ -4418,18 +4470,18 @@ impl TypeInference {
                 }));
             }
 
-            let (inst_fn_ty, inst_data, subst) = definition.ty_scheme.instantiate_with_fresh_vars(
-                self,
-                path_span,
-                None,
-                env.module_env,
-            );
-            self.share_group_type_instance(
+            let (inst_fn_ty, mut inst_data, subst) = definition
+                .ty_scheme
+                .instantiate_with_fresh_vars(self, path_span, None, env.module_env);
+            if self.share_group_type_instance(
                 function,
                 &definition.ty_scheme.ty_quantifiers,
                 &subst,
+                &inst_fn_ty,
                 path_span,
-            );
+            ) {
+                inst_data = hir::FnInstData::none();
+            }
             let visible_arg_passing = visible_arg_passing_from_runtime(
                 runtime_arg_passing.as_deref(),
                 &inst_data,

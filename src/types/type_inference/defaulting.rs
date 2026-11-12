@@ -296,7 +296,7 @@ impl UnifiedTypeInference {
         value_trait_id: TraitId,
         env: ModuleEnv<'_>,
     ) {
-        let derived = self.remaining_ty_constraints.clone();
+        let derived = self.remaining_ty_constraints.to_vec();
         for constraint in derived {
             let PubTypeConstraint::HaveTrait {
                 origin: _,
@@ -460,29 +460,44 @@ impl UnifiedTypeInference {
             })
             .unwrap_or_else(|| vec![ty]);
         for evidence_ty in evidence_tys {
-            let mut constraint = PubTypeConstraint::new_have_trait(
+            self.add_requirement(PubTypeConstraint::new_have_trait(
                 value_trait_id,
                 vec![evidence_ty],
                 vec![],
                 vec![],
                 span,
-            );
-            constraint.set_origin(self.evidence_uses.fresh_origin());
-            if let Some(owner) = self.evidence_uses.active_owner() {
-                self.evidence_uses.register(constraint.origin(), owner);
-            }
-            if let Some(existing) = self
-                .remaining_ty_constraints
-                .iter()
-                .find(|c| **c == constraint)
-            {
-                self.evidence_uses
-                    .merge(existing.origin(), constraint.origin());
-            }
-            if !self.remaining_ty_constraints.contains(&constraint) {
-                self.remaining_ty_constraints.push(constraint);
-            }
+            ));
         }
+    }
+
+    /// Add a requirement, owned by the function whose constraints are being made, see
+    /// [`Self::constraint_owner_scope`]. An equal requirement that is there already gets this
+    /// owner too.
+    pub(crate) fn add_requirement(&mut self, mut constraint: PubTypeConstraint) {
+        constraint.set_origin(self.evidence_uses.fresh_origin());
+        if let Some(owner) = self.evidence_uses.active_owner() {
+            self.evidence_uses.register(constraint.origin(), owner);
+        }
+        if let Some(existing) = self
+            .remaining_ty_constraints
+            .iter()
+            .find(|c| **c == constraint)
+        {
+            self.evidence_uses
+                .merge(existing.origin(), constraint.origin());
+        }
+        if !self.remaining_ty_constraints.contains(&constraint) {
+            self.remaining_ty_constraints.push(constraint);
+        }
+    }
+
+    /// Solve the requirements again, after relations between types or requirements were added.
+    pub(crate) fn solve_requirements(
+        &mut self,
+        trait_solver: &mut TraitSolver<'_>,
+        arena: &mut NodeArena,
+    ) -> Result<(), InternalCompilationError> {
+        self.resolve_remaining_constraints_to_fixed_point(trait_solver, arena)
     }
 
     /// Re-solve remaining constraints after defaulting has added new information

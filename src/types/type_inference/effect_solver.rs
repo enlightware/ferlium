@@ -185,7 +185,7 @@ pub(crate) struct EffectSolverSnapshot {
 /// other variables are merged along their inclusions, each mapping to its least atoms and its
 /// group's representative: the group's rigid variable if its least solution holds exactly one,
 /// otherwise its smallest variable.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub(crate) struct EffectSolver {
     table: InPlaceUnificationTable<EffectVarKey>,
     constraints: Vec<EffectConstraint>,
@@ -200,7 +200,7 @@ pub(crate) struct EffectSolver {
 }
 
 /// The substitution of class roots once effects are finalized.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PublicationView {
     roots: FxHashMap<EffectVar, EffType>,
     representatives: FxHashMap<EffectVar, EffectVar>,

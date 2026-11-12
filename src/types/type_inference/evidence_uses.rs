@@ -7,7 +7,11 @@
 
 use std::rc::Rc;
 
-use crate::{FxHashSet, module::LocalFunctionId, types::type_scheme::ConstraintOrigin};
+use crate::{
+    FxHashSet,
+    module::{LocalFunctionId, id::Id},
+    types::type_scheme::ConstraintOrigin,
+};
 
 /// Stable index in the inference context's supplied-evidence list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -111,6 +115,30 @@ impl EvidenceUses {
         data.groups[right].parent = left;
         let owners = std::mem::take(&mut data.groups[right].owners);
         data.groups[left].owners.extend(owners);
+    }
+
+    /// The functions that the obligation of `origin` is of, in a fixed order: `None` stands
+    /// for no function.
+    pub fn owners(&self, origin: ConstraintOrigin) -> Vec<Option<LocalFunctionId>> {
+        let Some(index) = origin.index() else {
+            return vec![None];
+        };
+        let mut owners = self.data.groups[self.root(index)]
+            .owners
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        owners.sort_by_key(|owner| owner.map(|owner| owner.as_index()));
+        owners
+    }
+
+    /// Whether functions own the obligation of `origin` and `owner` is not one of them.
+    pub fn owned_by_others(&self, origin: ConstraintOrigin, owner: LocalFunctionId) -> bool {
+        let Some(index) = origin.index() else {
+            return false;
+        };
+        let owners = &self.data.groups[self.root(index)].owners;
+        !owners.contains(&None) && !owners.contains(&Some(owner))
     }
 
     pub fn record(&mut self, origin: ConstraintOrigin, given: GivenId) {

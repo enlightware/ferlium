@@ -967,14 +967,17 @@ fn extra_arg_kind_from_inst_data(
 /// quantifier is the caller's quantifier with the same origin. An origin that the caller does not
 /// quantify is a type its body cannot observe, as its unbound variables are: `never`.
 ///
-/// Effects are instantiated per call. A preliminary call may predate final effect
-/// quantification: complete positional effect arguments are used when present, otherwise the
-/// function surface reconstructs the missing mapping.
+/// Effects are instantiated per call. `recorded_effects` are those that the settling of the
+/// group recorded for this reference, if it did, in the order of the callee's effect
+/// quantifiers. Otherwise a preliminary call may predate final effect quantification: complete
+/// positional effect arguments are used when present, and the function surface reconstructs the
+/// missing mapping.
 fn late_module_call_inst_data(
     callee: &LateFunctionInstData,
     call_ty: &FnType,
     call_inst_data: &hir::FnInstData,
     caller_ty_origins: &[TypeVar],
+    recorded_effects: Option<&Vec<EffType>>,
     span: Location,
 ) -> Result<hir::FnInstData, InternalCompilationError> {
     let error = |message: String| {
@@ -995,6 +998,25 @@ fn late_module_call_inst_data(
             (TypeVar::new(index as u32), ty)
         })
         .collect::<FxHashMap<_, _>>();
+    if let Some(effects) =
+        recorded_effects.filter(|effects| effects.len() == callee.effect_quantifiers.len())
+    {
+        let eff_subst = callee
+            .effect_quantifiers
+            .iter()
+            .copied()
+            .zip(effects.iter().cloned())
+            .collect::<EffectsInstSubst>();
+        let subst = (ty_subst, eff_subst);
+        let mut mapper = BitmapInstantiationMapper::new(&subst);
+        let dicts_req =
+            instantiate_dictionary_requirements(&callee.requirements.requirements, &mut mapper);
+        return Ok(hir::FnInstData::new(
+            dicts_req,
+            call_inst_data.ty_args.clone(),
+            call_inst_data.eff_args.clone(),
+        ));
+    }
     let mut eff_subst = if call_inst_data.eff_args.len() == callee.effect_quantifiers.len() {
         callee
             .effect_quantifiers
@@ -2597,11 +2619,16 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                         .module_inst_data
                         .and_then(|inst_data| inst_data.get(&function.function))
                 {
+                    let recorded_effects = self
+                        .ctx
+                        .caller_reference_effects
+                        .and_then(|effects| effects.get(&function_span));
                     let late_inst_data = late_module_call_inst_data(
                         requirements,
                         &ty.fn_ty,
                         &inst_data,
                         self.ctx.caller_ty_origins,
+                        recorded_effects,
                         node_span,
                     )?;
                     self.elaborate_extra_args_from_inst_data(&late_inst_data, node_span)?
@@ -2748,11 +2775,16 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                         let TypeKind::Function(call_ty) = node_ty.data().clone() else {
                             panic!("get_function must have a function type")
                         };
+                        let recorded_effects = self
+                            .ctx
+                            .caller_reference_effects
+                            .and_then(|effects| effects.get(&get_fn.function_span));
                         let late_inst_data = late_module_call_inst_data(
                             requirements,
                             &call_ty,
                             &get_fn.inst_data,
                             self.ctx.caller_ty_origins,
+                            recorded_effects,
                             node_span,
                         )?;
                         self.elaborate_extra_args_from_inst_data(&late_inst_data, node_span)?
@@ -3405,12 +3437,14 @@ mod tests {
             fn_ty: FnType::new_by_val(Vec::<Type>::new(), Type::unit(), EffType::empty()),
             effect_quantifiers: Vec::new(),
             ty_origins: vec![second, first, own],
+            reference_effects: FxHashMap::default(),
         };
         let inst_data = late_module_call_inst_data(
             &callee,
             &callee.fn_ty,
             &hir::FnInstData::none(),
             &[first, second],
+            None,
             Location::new_synthesized(),
         )
         .unwrap();
@@ -3439,10 +3473,18 @@ mod tests {
             ),
             effect_quantifiers: vec![effect],
             ty_origins: Vec::new(),
+            reference_effects: FxHashMap::default(),
         };
         assert!(
-            late_module_call_inst_data(&added, &added.fn_ty, &hir::FnInstData::none(), &[], span,)
-                .is_ok()
+            late_module_call_inst_data(
+                &added,
+                &added.fn_ty,
+                &hir::FnInstData::none(),
+                &[],
+                None,
+                span,
+            )
+            .is_ok()
         );
 
         let removed = LateFunctionInstData {
@@ -3450,6 +3492,7 @@ mod tests {
             fn_ty: FnType::new_by_val(Vec::<Type>::new(), Type::unit(), EffType::empty()),
             effect_quantifiers: Vec::new(),
             ty_origins: Vec::new(),
+            reference_effects: FxHashMap::default(),
         };
         let preliminary = hir::FnInstData::new(
             Vec::new(),
@@ -3457,7 +3500,8 @@ mod tests {
             vec![EffType::single_variable(effect)],
         );
         assert!(
-            late_module_call_inst_data(&removed, &removed.fn_ty, &preliminary, &[], span,).is_ok()
+            late_module_call_inst_data(&removed, &removed.fn_ty, &preliminary, &[], None, span)
+                .is_ok()
         );
     }
 

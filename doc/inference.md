@@ -236,12 +236,10 @@ needs no runtime adapter (see [abi.md](abi.md)).
   `where` clauses, are bounds that this implementation must all fit: performed bounds intersect,
   received ones unite, and the shared effect takes the result.
   Applications that differ only by effects have the same implementation, as effects do not
-  select one, so their output types have the same structure: they are equal once their effects
-  are removed. This holds in turn for the applications that take such outputs as inputs.
-  Structures are unified as types are, on the types read without effects, and each
-  place of a known structure then gets an effect of its own. A recursive structure is left
-  unknown until its implementation or its uses give its type, as its effects can repeat with
-  any period.
+  select one, so their output types have the same structure, each with effects of its own: they
+  are equal once their effects are removed. This holds in turn for the applications that take
+  such outputs as inputs. A recursive output is left unknown until its implementation or its
+  uses give its type, as its effects can repeat with any period.
   The output types of a resolved application are those of its implementation, effects
   included: unlike output effects, they have no polarity.
 
@@ -257,22 +255,32 @@ also when the method has a default body: an effect left unwritten there is the e
 is in a type definition.
 
 A recursive group of functions behaves, for effects, as its unrolling: each
-function calling copies of the others, down to functions that call nothing. Joint inference of
-the group, in which effects are not related at all, first gives the types of each signature and
-the places of the effects left to infer; effects do not decide types, so nothing is lost. Each
-body is then inferred alone, by ordinary inference, assuming a contract for every function of the
-group, its own included, which gives its next contract; the first contracts are those of
-functions that call nothing. The group is settled when every body gives its contract again:
-this is the rule for typing recursive definitions, so the result is sound however the contracts
-were found. A group that does not settle within a bound on the rounds is rejected. An error in a
-body counts only once the contracts have settled, as a contract may not say enough before. Each
-call in the group instantiates its callee's contract, for effects only; types keep one instance
-per group.
+function calling copies of the others, down to functions that call nothing. Types keep one
+instance per group; effects are instantiated at each reference to a function of the group.
 
-Each copy of a function brings the requirements of the copies it calls. An effect that only
-inputs of such a requirement name is ambiguous and takes its least solution (see
-[publication](#publication)), so copies that differ only by such effects are one requirement at
-each round. This does not make every group settle: outputs that requirements determine from one
+Types are inferred first, for the whole group, with effects not related: effects do not decide
+types, so nothing is lost. Effects are then found by rounds over that one inference. A round
+gives each reference an instance of the contract of its function and reads the next contract of
+every function, starting from the contracts of functions that call nothing. A contract is the
+effects of a signature, the effect that the function performs, and its requirements with their
+effects; it holds no type that a round found, so a round cannot change a type for the next one.
+The group is settled when every function gets its contract again: each body then confirmed the
+contracts that it assumed, its own included, which is the rule for typing recursive definitions,
+so the result is sound however the contracts were found. What a round assumes is provisional:
+a function that fails in a round keeps its contract, and its error counts only once the contracts
+have settled. A group that does not settle within a bound on the rounds is rejected.
+
+A requirement is of the function whose body makes it, and of a function that names another, at
+the effects of that reference. Sharing a type does not make two functions need the same effects:
+the output effect of a requirement is of one function, as the rows of its signature are.
+As contracts are provisional, a requirement that followed from an earlier one could go round a
+cycle of references after no function makes it any more. So each requirement of a contract has
+the length of its chain of references back to the function that makes it, and a group is settled
+only when these lengths settle too: a requirement that only goes round has none that does.
+
+An effect that only inputs of a requirement name is ambiguous and takes its least solution (see
+[publication](#publication)), so requirements that differ only by such effects are one at each
+round. This does not make every group settle: outputs that requirements determine from one
 another can still grow at each round.
 
 ### Solving

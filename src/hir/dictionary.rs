@@ -6,7 +6,7 @@ use std::fmt;
 use ustr::Ustr;
 
 use crate::{
-    FxHashMap, FxHashSet,
+    FxHashMap, FxHashSet, Location,
     format::FormatWith,
     module::{
         EvidenceBindingId, ExtraParameterId, LocalFunctionId, ModuleEnv,
@@ -553,6 +553,11 @@ pub struct LateFunctionInstData {
     /// the order of the quantifiers. The functions of a recursive group are inferred with one
     /// instance of each type, so two of them name one type by the same inference variable.
     pub ty_origins: Vec<TypeVar>,
+    /// For the references that the body of this function makes to functions of its recursive
+    /// group, by their site: the effects that the reference gives to the effect quantifiers of
+    /// the function it names, in their order. They are recorded when the contracts of the group
+    /// settle; the effects of a reference that is not here are reconstructed.
+    pub reference_effects: FxHashMap<Location, Vec<EffType>>,
 }
 
 /// Recursive functions in the current module can be called before their final requirements are
@@ -581,6 +586,8 @@ pub struct DictElaborationCtx<'d, 'sr, 'sm> {
     /// [`LateFunctionInstData::ty_origins`] of the function being elaborated; empty outside a
     /// module, where no call is instantiated late.
     pub(crate) caller_ty_origins: &'d [TypeVar],
+    /// [`LateFunctionInstData::reference_effects`] of the function being elaborated.
+    pub(crate) caller_reference_effects: Option<&'d FxHashMap<Location, Vec<EffType>>>,
 }
 
 impl<'d, 'sr, 'sm> DictElaborationCtx<'d, 'sr, 'sm> {
@@ -601,6 +608,7 @@ impl<'d, 'sr, 'sm> DictElaborationCtx<'d, 'sr, 'sm> {
             active_dictionary_constructions: Vec::new(),
             retained_effect_vars: FxHashSet::default(),
             caller_ty_origins: &[],
+            caller_reference_effects: None,
         };
         this.reset_evidence_bindings();
         this

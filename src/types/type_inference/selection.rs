@@ -33,7 +33,7 @@ pub(super) enum SelectionPhase {
     Publication,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(super) struct SelectionStats {
     normalizations: usize,
     performed_bounds_normalizations: usize,

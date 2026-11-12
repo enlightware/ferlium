@@ -2316,6 +2316,94 @@ fn an_opaque_output_of_a_group_is_one_type_across_its_calls() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_requirement_that_two_functions_of_a_group_declare_is_of_both() {
+    // Both functions declare the same requirement, and `g` declares it again with another
+    // output: the two are one application in `g`, whichever function comes first.
+    let prelude = "trait R<Self |-> Out> { fn r(x: Self) -> Out; }\n";
+    let f = indoc! { "
+        fn f<T>(x: T) -> int
+        where T: R<Out = (() -> int ! ())> {
+            if false { g(x, || 1); };
+            0
+        }
+    " };
+    let g = indoc! { "
+        fn g<T, ! E>(x: T, cb: () -> int ! E) -> int
+        where T: R<Out = (() -> int ! ())>,
+              T: R<Out = (() -> int ! E)> {
+            if false { f(x); };
+            0
+        }
+    " };
+    for [first, second] in [[f, g], [g, f]] {
+        let error = TestSession::new().fail_compilation(&format!("{prelude}{first}{second}0"));
+        assert!(
+            format!("{error:?}").contains("InvalidEffectInclusion"),
+            "{first}{second}: {error:?}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn what_a_round_assumes_of_a_group_does_not_refuse_it() {
+    // Before the effect of `g` is known, the two callbacks of `f` look pure alike, which would
+    // make the two applications of `R` one, and `A` and `B` one type. Once `g` is known to be
+    // fallible they are two applications, so the group is accepted.
+    let prelude = indoc! { "
+        struct Pair<T, F>(T, F)
+        trait R<Self |-> Out> { fn r(x: Self) -> Out; }
+        impl<! E> R for <Self = Pair<int, (() -> int ! E)> |-> Out = (() -> int ! E)> {
+            fn r(x: Pair<int, (() -> int ! E)>) -> (() -> int ! E) { x.1 }
+        }
+        fn same<T>(x: T, y: T) {}
+    " };
+    let g = indoc! { "
+        fn g<T, A, B>(x: T, a: A, b: B) -> int {
+            if false { f(x, a, b); };
+            idiv(4, 2)
+        }
+    " };
+    for second_callback in [
+        // The types of the outputs are those of two written generics.
+        "|| g(x, a, b)",
+        // The effects of the outputs are those of two annotated callbacks.
+        "(|| g(x, a, b): () -> int ! fallible)",
+    ] {
+        let f = formatdoc! { "
+            fn f<T, A, B>(x: T, a: A, b: B) -> int {{
+                let p = r(Pair(x, || {{ let z: int = 1; z }}));
+                let q = r(Pair(x, {second_callback}));
+                same(p, a);
+                same(q, b);
+                3
+            }}
+        " };
+        assert_in_both_orders(prelude, [&f, g], "f(0, || 1, || idiv(4, 2))", 3);
+    }
+    // When these types are inferred, nothing refuses the two applications being one, and `g`
+    // takes the requirement that follows. Once `f` does not make it any more, `g` drops it:
+    // it must not go round the group for ever.
+    let f = indoc! { "
+        fn f<T>(x: T, a, b) -> int {
+            let p = r(Pair(x, || { let z: int = 1; z }));
+            let q = r(Pair(x, || g(x, a, b)));
+            same(p, a);
+            same(q, b);
+            3
+        }
+    " };
+    let g = indoc! { "
+        fn g<T>(x: T, a, b) -> int {
+            if false { f(x, a, b); };
+            idiv(4, 2)
+        }
+    " };
+    assert_in_both_orders(prelude, [f, g], "f(0, || 1, || idiv(4, 2))", 3);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn a_field_read_through_a_call_of_a_group_has_the_effect_of_its_declaration() {
     // The recursive call needs the field `kind` with an effect of its own, which is the one of
     // the body's own read, not all that the call performs.

@@ -85,7 +85,7 @@ pub(crate) struct UnifiedTypeInferenceSnapshot {
 }
 
 /// Equality state, retained bounds and public obligations during inference.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct UnifiedTypeInference {
     pub(super) selection_stats: SelectionStats,
     pub(super) constraints_normalized_at: Option<(Revision, Revision, Revision, Revision)>,
@@ -109,6 +109,12 @@ pub struct UnifiedTypeInference {
     /// the obligations: an equal application reuses that expansion, so that recursive `Value`
     /// impls expand once. This guards expansion only; it proves nothing.
     expanded_value_applications: Vec<Vec<Type>>,
+    /// Whether equal trait applications share their outputs only within one function: the
+    /// bodies of a recursive group are inferred together, and each has effects of its own.
+    applications_per_function: bool,
+    /// The number of trait applications that were answered other than by a given: by an
+    /// implementation, or by the structure of their inputs.
+    answered_applications: usize,
 }
 
 /// Lexical owner for deferred obligations. Restores the enclosing owner on every
@@ -179,6 +185,22 @@ impl ConstraintPassAggregation<'_> {
 impl UnifiedTypeInference {
     pub(crate) fn given_used_by(&self, owner: LocalFunctionId, given: GivenId) -> bool {
         self.evidence_uses.used_by(owner, given)
+    }
+
+    /// Whether functions own `requirement` and `function` is not one of them. A requirement
+    /// that no function owns is of all those whose types reach it.
+    pub(crate) fn is_requirement_of_others(
+        &self,
+        requirement: &PubTypeConstraint,
+        function: LocalFunctionId,
+    ) -> bool {
+        self.evidence_uses
+            .owned_by_others(requirement.origin(), function)
+    }
+
+    /// The number of trait applications answered so far other than by a given.
+    pub(crate) fn answered_applications(&self) -> usize {
+        self.answered_applications
     }
 
     pub(crate) fn constraint_owner_scope(
@@ -396,6 +418,7 @@ impl UnifiedTypeInference {
             mut_constraints,
             ty_coverage_constraints,
             mut effects,
+            applications_per_function,
             ..
         } = ty_inf;
         let effect_constraints = effects.drain_constraints();
@@ -416,6 +439,8 @@ impl UnifiedTypeInference {
             effects,
             obligations: vec![],
             expanded_value_applications: vec![],
+            applications_per_function,
+            answered_applications: 0,
         };
         // Keep source/inference order stable. Constraint equality deliberately ignores spans, so
         // iterating a hash set here made the diagnostic span and dictionary order depend on the
@@ -1416,9 +1441,9 @@ impl UnifiedTypeInference {
         trait_solver: &mut TraitSolver<'_>,
         arena: &mut NodeArena,
     ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
-        let mut input_tys = self.normalize_types(input_tys);
-        let mut output_tys = self.normalize_types(output_tys);
-        let mut output_effs = self.substitute_in_effect_types(output_effs);
+        let input_tys = self.normalize_types(input_tys);
+        let output_tys = self.normalize_types(output_tys);
+        let output_effs = self.substitute_in_effect_types(output_effs);
         match self.match_given(
             trait_id,
             &input_tys,
@@ -1440,6 +1465,38 @@ impl UnifiedTypeInference {
             }
             GivenMatch::Absent => {}
         }
+        let kept = self.answer_trait_application(
+            trait_id,
+            input_tys,
+            output_tys,
+            output_effs,
+            span,
+            assumptions,
+            is_ty_adt,
+            trait_solver,
+            arena,
+        )?;
+        if kept.is_none() {
+            self.answered_applications += 1;
+        }
+        Ok(kept)
+    }
+
+    /// Answers a trait application that no given answers, by the structure of its inputs or
+    /// by an implementation, if its inputs are known enough; returns it if they are not.
+    #[allow(clippy::too_many_arguments)]
+    fn answer_trait_application(
+        &mut self,
+        trait_id: TraitId,
+        mut input_tys: Vec<Type>,
+        mut output_tys: Vec<Type>,
+        mut output_effs: Vec<EffType>,
+        span: Location,
+        assumptions: ConstraintAssumptions<'_>,
+        is_ty_adt: impl Fn(Type) -> bool,
+        trait_solver: &mut TraitSolver<'_>,
+        arena: &mut NodeArena,
+    ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
         let repr_trait_id = trait_solver.std_trait_id(REPR_TRAIT_NAME);
 
         // Look for the special case of a Repr trait constraint where the target
@@ -1596,6 +1653,12 @@ impl UnifiedTypeInference {
             } else if position < structural_count && deferred_structure {
                 retry_structure = true;
             }
+            if self.applications_per_function {
+                // What an implementation requires is of the function that needed it.
+                for obligation in &mut self.obligations {
+                    obligation.set_origin(constraint.origin());
+                }
+            }
             new_constraints.append(&mut self.obligations);
         }
         Ok(new_constraints)
@@ -1618,8 +1681,11 @@ impl UnifiedTypeInference {
         let constraints = constraints.into_iter();
         let mut aggregation = ConstraintPassAggregation::with_capacity(constraints.size_hint().0);
         let mut projection_indices = FxHashMap::<(Type, Ustr), usize>::default();
-        let mut have_traits: FxHashMap<(TraitId, Vec<Type>), HaveTraitOutputs> =
-            FxHashMap::default();
+        // Equal applications, by the function they are of when each function has its own.
+        let mut have_traits: FxHashMap<
+            (TraitId, Vec<Type>, Option<LocalFunctionId>),
+            HaveTraitOutputs,
+        > = FxHashMap::default();
         // The applications that have output types, by trait and inputs without their effects,
         // and whether two of them differ only by effects.
         let mut output_structures: FxHashSet<(TraitId, Vec<Type>)> = FxHashSet::default();
@@ -1829,53 +1895,62 @@ impl UnifiedTypeInference {
                     aggregation.constraints.push(Cow::Borrowed(constraint));
                 }
                 HaveTrait {
+                    origin,
                     trait_id,
                     input_tys,
                     output_tys,
                     output_effs,
                     span,
-                    ..
                 } => {
                     let input_types = self.normalize_types(input_tys);
                     let output_types = self.normalize_types(output_tys);
                     let output_effects = self.substitute_in_effect_types(output_effs);
-                    let key = (*trait_id, input_types);
-                    let site = span.use_site;
-                    let order = have_traits.len();
-                    let outputs = match have_traits.entry(key) {
-                        Entry::Occupied(entry) => {
-                            let outputs = entry.into_mut();
-                            assert_eq!(outputs.types.len(), output_types.len());
-                            for (expected, actual) in outputs.types.iter().zip(&output_types) {
-                                self.unify_same_type(*actual, site, *expected, outputs.span)?;
-                            }
-                            outputs
-                        }
-                        Entry::Vacant(entry) => {
-                            if !output_types.is_empty() {
-                                let (trait_id, input_types) = entry.key();
-                                let erased =
-                                    instantiate_types(input_types, &mut EffectErasingMapper);
-                                differ_only_by_effects |=
-                                    !output_structures.insert((*trait_id, erased));
-                            }
-                            entry.insert(HaveTraitOutputs {
-                                types: output_types,
-                                learned: vec![None; output_effects.len()],
-                                bounds: vec![Vec::new(); output_effects.len()],
-                                span: site,
-                                order,
-                            })
-                        }
+                    // A requirement that several functions share is reconciled with the
+                    // applications of each of them.
+                    let functions = if self.applications_per_function {
+                        self.evidence_uses.owners(*origin)
+                    } else {
+                        vec![None]
                     };
-                    assert_eq!(outputs.learned.len(), output_effects.len());
-                    for (index, effect) in output_effects.into_iter().enumerate() {
-                        if !effect.has_variables() {
-                            outputs.bounds[index].push((effect, site));
-                        } else if let Some((learned, learned_site)) = &outputs.learned[index] {
-                            self.unify_same_effect(&effect, site, learned, *learned_site)?;
-                        } else {
-                            outputs.learned[index] = Some((effect, site));
+                    let site = span.use_site;
+                    for function in functions {
+                        let key = (*trait_id, input_types.clone(), function);
+                        let order = have_traits.len();
+                        let outputs = match have_traits.entry(key) {
+                            Entry::Occupied(entry) => {
+                                let outputs = entry.into_mut();
+                                assert_eq!(outputs.types.len(), output_types.len());
+                                for (expected, actual) in outputs.types.iter().zip(&output_types) {
+                                    self.unify_same_type(*actual, site, *expected, outputs.span)?;
+                                }
+                                outputs
+                            }
+                            Entry::Vacant(entry) => {
+                                if !output_types.is_empty() {
+                                    let (trait_id, input_types, _) = entry.key();
+                                    let erased =
+                                        instantiate_types(input_types, &mut EffectErasingMapper);
+                                    differ_only_by_effects |=
+                                        !output_structures.insert((*trait_id, erased));
+                                }
+                                entry.insert(HaveTraitOutputs {
+                                    types: output_types.clone(),
+                                    learned: vec![None; output_effects.len()],
+                                    bounds: vec![Vec::new(); output_effects.len()],
+                                    span: site,
+                                    order,
+                                })
+                            }
+                        };
+                        assert_eq!(outputs.learned.len(), output_effects.len());
+                        for (index, effect) in output_effects.iter().enumerate() {
+                            if !effect.has_variables() {
+                                outputs.bounds[index].push((effect.clone(), site));
+                            } else if let Some((learned, learned_site)) = &outputs.learned[index] {
+                                self.unify_same_effect(effect, site, learned, *learned_site)?;
+                            } else {
+                                outputs.learned[index] = Some((effect.clone(), site));
+                            }
                         }
                     }
                     aggregation.constraints.push(Cow::Borrowed(constraint));
@@ -1887,13 +1962,13 @@ impl UnifiedTypeInference {
                 .iter()
                 .filter(|(_, outputs)| !outputs.types.is_empty())
                 .sorted_by_key(|(_, outputs)| outputs.order)
-                .map(|((trait_id, inputs), outputs)| {
+                .map(|((trait_id, inputs, _), outputs)| {
                     (*trait_id, &inputs[..], &outputs.types[..], outputs.span)
                 })
                 .collect::<Vec<_>>();
             self.unify_same_structures(&applications)?;
         }
-        for ((trait_id, _), outputs) in have_traits {
+        for ((trait_id, _, _), outputs) in have_traits {
             if outputs.bounds.iter().all(Vec::is_empty) {
                 continue;
             }

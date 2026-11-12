@@ -137,6 +137,7 @@ pub(super) fn insert_inst_data_for_function_and_lambdas(
     id: LocalFunctionId,
     dicts: ExtraParameters,
     ty_origins: &[TypeVar],
+    reference_effects: &FxHashMap<Location, Vec<EffType>>,
 ) {
     for function_id in function_and_associated_lambdas(&id, associated_lambdas) {
         let definition = &module
@@ -157,6 +158,7 @@ pub(super) fn insert_inst_data_for_function_and_lambdas(
                 fn_ty: definition.ty_scheme.ty.clone(),
                 effect_quantifiers,
                 ty_origins: ty_origins.to_vec(),
+                reference_effects: reference_effects.clone(),
             },
         );
     }
@@ -631,6 +633,7 @@ pub(super) fn borrow_check_and_elaborate_dict(
         generated_projection_subscripts,
     );
     ctx.caller_ty_origins = &module_inst_data[id].ty_origins;
+    ctx.caller_reference_effects = Some(&module_inst_data[id].reference_effects);
     for function_id in function_and_associated_lambdas(id, associated_lambdas) {
         let function_slot = &mut output.functions[function_id.as_index()];
         borrow_check_and_elaborate_pending_function(
