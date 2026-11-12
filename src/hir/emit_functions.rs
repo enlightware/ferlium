@@ -26,7 +26,7 @@ use crate::{
     format::FormatWith,
     hir::{
         self, NodeArena,
-        dictionary::LateFunctionInstData,
+        dictionary::{LateFunctionInstData, ModuleInstData},
         elaboration::elaborate_generated_functions,
         emit_hir::{
             ImplStubData, PendingModuleFunctions, PubTypeConstraintPtr,
@@ -2365,7 +2365,7 @@ where
             annotation_subst = shared_signature.annotation_subst.clone();
             explicit_root_tys = shared_signature.explicit_root_tys.clone();
             let signature = shared_signature.signature.clone();
-            output.subscripts[subscript_id.as_index()].set_resolved_signature(signature.clone());
+            output.subscripts[subscript_id.as_index()].set_inferring_signature(signature.clone());
             let member_kind = if requires_mutable_yield {
                 SubscriptMemberKind::Mut
             } else {
@@ -3429,7 +3429,7 @@ where
             .iter()
             .map(|dicts| DictionaryEntryRequirements::from_callable(dicts.requirements.clone()))
             .collect();
-        let mut module_inst_data = FxHashMap::default();
+        let mut module_inst_data = ModuleInstData::default();
         for (id, dicts) in local_fns.iter().zip(&method_dicts) {
             // The methods of an implementation have its quantifiers, and are inferred jointly.
             insert_inst_data_for_function_and_lambdas(
@@ -4355,7 +4355,7 @@ where
             }
             None => vec![FxHashMap::default(); local_fns.len()],
         };
-        let mut module_inst_data = FxHashMap::default();
+        let mut module_inst_data = ModuleInstData::default();
         for (((id, ty_origins), effect_origins), reference_effects) in local_fns
             .iter()
             .zip(function_ty_origins)
@@ -4380,8 +4380,13 @@ where
                 },
             );
         }
+        for (id, kind) in local_fns.iter().zip(&function_kinds) {
+            if let EmitFunctionKind::SubscriptMember { subscript_id, .. } = kind {
+                module_inst_data.subscripts.insert(*subscript_id, *id);
+            }
+        }
         for id in local_fns.iter() {
-            let dicts = &module_inst_data.get(id).unwrap().requirements;
+            let dicts = &module_inst_data.functions[id].requirements;
             borrow_check_and_elaborate_dict(
                 output,
                 others,

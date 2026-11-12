@@ -9,7 +9,7 @@ use crate::{
     FxHashMap, FxHashSet, Location,
     format::FormatWith,
     module::{
-        EvidenceBindingId, ExtraParameterId, LocalFunctionId, ModuleEnv,
+        EvidenceBindingId, ExtraParameterId, LocalFunctionId, LocalSubscriptId, ModuleEnv,
         PendingGeneratedStructuralProjectionSubscripts, SubscriptId, TraitDictionaryId, TraitId,
         TraitImplId, id::Id,
     },
@@ -564,7 +564,13 @@ pub struct LateFunctionInstData {
 
 /// Recursive functions in the current module can be called before their final requirements are
 /// known. Elaboration replays those requirements against the final callee type and call-site type.
-pub type ModuleInstData = FxHashMap<LocalFunctionId, LateFunctionInstData>;
+#[derive(Default)]
+pub struct ModuleInstData {
+    pub functions: FxHashMap<LocalFunctionId, LateFunctionInstData>,
+    /// For each subscript whose members are among these functions, one of them. The members of
+    /// a subscript have one signature, so what one needs is what a value of the subscript needs.
+    pub subscripts: FxHashMap<LocalSubscriptId, LocalFunctionId>,
+}
 
 /// Shared context for dictionary and value-dispatch elaboration.
 pub struct DictElaborationCtx<'d, 'sr, 'sm> {

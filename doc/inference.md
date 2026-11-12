@@ -74,6 +74,9 @@ The access bodies of a subscript are bodies of one signature, so they are inferr
 when neither names the other, and are published with the same types and requirements. They differ
 by the effect that each performs. A subscript used as a value has that one signature, and gives its
 evidence to whichever body the use then takes.
+While its bodies are inferred, a subscript has the types of that inference: a use of it by the
+group that its bodies are of, by name, as a field or as a value, takes its signature as it is, as a
+use of a function of the group does, and gets its evidence once the group is final.
 
 ### Public requirements
 

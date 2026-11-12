@@ -240,6 +240,10 @@ pub struct SubscriptSignature {
 pub(crate) enum SubscriptSignatureState {
     /// Source-predeclared bundle whose member SCC has not emitted its real signature yet.
     Pending,
+    /// The signature while the members are inferred: its variables are those of that inference,
+    /// so a use by the group that the members are of takes it as it is, as it takes the type of
+    /// a function of the group.
+    Inferring(SubscriptSignature),
     /// Fully inferred shared bundle signature.
     Resolved(SubscriptSignature),
 }
@@ -350,7 +354,7 @@ impl SubscriptDefinition {
     /// Return the resolved shared signature, if this bundle has emitted its members.
     pub fn resolved_signature(&self) -> Option<&SubscriptSignature> {
         match &self.signature {
-            SubscriptSignatureState::Pending => None,
+            SubscriptSignatureState::Pending | SubscriptSignatureState::Inferring(_) => None,
             SubscriptSignatureState::Resolved(signature) => Some(signature),
         }
     }
@@ -366,18 +370,32 @@ impl SubscriptDefinition {
         self.signature = SubscriptSignatureState::Resolved(signature);
     }
 
+    /// Give the signature that the members are inferred against.
+    pub(crate) fn set_inferring_signature(&mut self, signature: SubscriptSignature) {
+        self.signature = SubscriptSignatureState::Inferring(signature);
+    }
+
     /// Derive the first-class capability type scheme for this subscript bundle.
+    ///
+    /// While the members are inferred, it quantifies nothing: the group that uses the subscript
+    /// then has one instance of its types, and finds what it requires once the group is final.
     pub fn type_scheme(&self, owner: &Module) -> Option<TypeScheme<SubscriptType>> {
-        let signature = self.resolved_signature()?;
-        Some(TypeScheme::new_infer_quantifiers_with_constraints(
-            SubscriptType::new(
-                signature.args.clone(),
-                signature.ret,
-                subscript_member_type(owner, self.ref_member.as_ref()),
-                subscript_member_type(owner, self.mut_member.as_ref()),
-            ),
-            signature.constraints.clone(),
-        ))
+        let (signature, inferring) = match &self.signature {
+            SubscriptSignatureState::Pending => return None,
+            SubscriptSignatureState::Inferring(signature) => (signature, true),
+            SubscriptSignatureState::Resolved(signature) => (signature, false),
+        };
+        let ty = SubscriptType::new(
+            signature.args.clone(),
+            signature.ret,
+            subscript_member_type(owner, self.ref_member.as_ref()),
+            subscript_member_type(owner, self.mut_member.as_ref()),
+        );
+        Some(if inferring {
+            TypeScheme::new_just_type(ty)
+        } else {
+            TypeScheme::new_infer_quantifiers_with_constraints(ty, signature.constraints.clone())
+        })
     }
 }
 

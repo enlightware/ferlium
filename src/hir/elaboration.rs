@@ -1829,13 +1829,34 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
         node_effects: &EffType,
         node_span: Location,
     ) -> Result<NodeKind<Elaborated>, InternalCompilationError> {
-        let captures = if get_subscript.inst_data.dicts_req.is_empty() {
-            Vec::new()
-        } else {
+        let captures = if !get_subscript.inst_data.dicts_req.is_empty() {
             let (captures, _) =
                 self.elaborate_extra_args_from_inst_data(&get_subscript.inst_data, node_span)?;
             get_subscript.inst_data.dicts_req.clear();
             captures
+        } else if get_subscript.subscript.module
+            == self.ctx.trait_solver.current_type_items.module.id
+            && let Some(requirements) = self.ctx.module_inst_data.and_then(|inst_data| {
+                let member = inst_data
+                    .subscripts
+                    .get(&get_subscript.subscript.subscript)?;
+                inst_data.functions.get(member)
+            })
+            && !requirements.requirements.is_empty()
+        {
+            // The subscript is of the group being emitted: its value holds what its members
+            // require, as a reference to a function of the group does.
+            let late_inst_data = late_module_call_inst_data(
+                requirements,
+                &get_subscript.inst_data,
+                self.ctx.caller_inst_data,
+                node_span,
+                node_span,
+            )?;
+            self.elaborate_extra_args_from_inst_data(&late_inst_data, node_span)?
+                .0
+        } else {
+            Vec::new()
         };
         if captures.is_empty() {
             Ok(NodeKind::GetSubscript(b(get_subscript)))
@@ -2416,7 +2437,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     && let Some(requirements) = self
                         .ctx
                         .module_inst_data
-                        .and_then(|inst_data| inst_data.get(&function.function))
+                        .and_then(|inst_data| inst_data.functions.get(&function.function))
                 {
                     let late_inst_data = late_module_call_inst_data(
                         requirements,
@@ -2563,7 +2584,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     if let Some(requirements) = self
                         .ctx
                         .module_inst_data
-                        .and_then(|inst_data| inst_data.get(&get_fn.function.function))
+                        .and_then(|inst_data| inst_data.functions.get(&get_fn.function.function))
                         .filter(|inst_data| !inst_data.requirements.is_empty())
                     {
                         let late_inst_data = late_module_call_inst_data(

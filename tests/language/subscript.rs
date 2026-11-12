@@ -4657,6 +4657,187 @@ fn first_class_subscript_value_gives_each_member_its_evidence_and_its_effect() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_use_of_a_subscript_inside_its_group_has_the_types_of_the_group() {
+    // While the bodies of a subscript are inferred, a use of the subscript by them, or by a
+    // function that they name, has their types: an argument left to infer is one type.
+    experimental_session()
+        .fail_compilation(indoc! { r#"
+            subscript cell(slot: &mut int, key, depth: int) -> int {
+                ref {
+                    let local = if depth == 0 {
+                        let offset: int = key;
+                        slot + offset
+                    } else {
+                        let accessor = cell;
+                        slot->[accessor]("text", depth - 1)
+                    };
+                    yield local
+                }
+            }
+
+            let mut slot = 21;
+            slot->[cell](2, 1)
+        "# })
+        .expect_type_mismatch("string", "int");
+
+    experimental_session()
+        .fail_compilation(indoc! { r#"
+            fn read(slot: &mut int) -> int {
+                let accessor = cell;
+                slot->[accessor]("text", 0)
+            }
+
+            subscript cell(slot: &mut int, key, depth: int) -> int {
+                ref {
+                    let local = if depth == 0 {
+                        let offset: int = key;
+                        slot + offset
+                    } else {
+                        read(slot)
+                    };
+                    yield local
+                }
+            }
+
+            let mut slot = 21;
+            slot->[cell](2, 1)
+        "# })
+        .expect_type_mismatch("string", "int");
+
+    // The same for a subscript named as a field, whose result is left to infer.
+    experimental_session()
+        .fail_compilation(indoc! { r#"
+            fn read(secret: Secret) -> int {
+                string_len(secret.value)
+            }
+
+            #[private_repr]
+            struct Secret {
+                raw: int,
+                depth: int,
+            }
+
+            subscript Secret.value(self) {
+                ref {
+                    let local = if self.depth == 0 {
+                        self.raw
+                    } else {
+                        read(Secret { raw: self.raw, depth: 0 })
+                    };
+                    yield local
+                }
+            }
+
+            let secret = Secret { raw: 21, depth: 1 };
+            secret.value
+        "# })
+        .expect_type_mismatch("int", "string");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_subscript_value_inside_its_group_holds_the_evidence_of_its_members() {
+    // The value of a subscript taken by its own bodies, or by a function that they name, holds
+    // what the bodies require, found once the group is final.
+    let traits = indoc! { r#"
+        trait A<Self |-> ! E> { fn run_a(x: Self) -> int ! E; }
+        impl A for <Self = string |-> ! E = fallible> {
+            fn run_a(x) { idiv(6, string_len(x)) }
+        }
+        impl A for <Self = int |-> ! E = ()> {
+            fn run_a(x) { x }
+        }
+        fn pure_only(f: () -> int ! ()) -> int { f() }
+    "# };
+    let by_itself = indoc! { r#"
+        subscript cell<T>(slot: &mut int, key: T, depth: int) -> int {
+            ref {
+                let local = if depth == 0 {
+                    slot + run_a(key)
+                } else {
+                    let accessor = cell;
+                    slot->[accessor](key, depth - 1)
+                };
+                yield local
+            }
+
+            mut {
+                let mut local = if depth == 0 {
+                    slot + run_a(key)
+                } else {
+                    let accessor = cell;
+                    slot->[accessor](key, depth - 1)
+                };
+                yield local;
+                slot = local
+            }
+        }
+
+        fn read_string() -> int {
+            let mut slot = 1;
+            slot->[cell]("ab", 2)
+        }
+
+        fn read_int() -> int {
+            let mut slot = 1;
+            slot->[cell](5, 2)
+        }
+
+        fn write_int() -> int {
+            let mut slot = 1;
+            slot->[cell](5, 2) += 10;
+            slot
+        }
+    "# };
+    let source = format!("{traits}{by_itself}(read_string(), pure_only(read_int), write_int())");
+    assert_val_eq!(
+        run_experimental_subscript_source(&source),
+        expected_tuple([int(4), int(6), int(16)])
+    );
+    experimental_session()
+        .fail_compilation(&format!("{traits}{by_itself}pure_only(read_string)"))
+        .expect_invalid_effect_inclusion(effect(PrimitiveEffect::Fallible), no_effects());
+
+    let through_two_functions = indoc! { r#"
+        fn take<T>(slot: &mut int, key: T, depth: int) -> int {
+            let accessor = cell;
+            slot->[accessor](key, depth)
+        }
+
+        fn step<T>(slot: &mut int, key: T, depth: int) -> int {
+            if depth == 0 {
+                slot + run_a(key)
+            } else {
+                take(slot, key, depth - 1)
+            }
+        }
+
+        subscript cell<T>(slot: &mut int, key: T, depth: int) -> int {
+            ref {
+                let local = step(slot, key, depth);
+                yield local
+            }
+        }
+
+        fn read_string() -> int {
+            let mut slot = 1;
+            slot->[cell]("ab", 2)
+        }
+
+        fn read_int() -> int {
+            let mut slot = 1;
+            take(slot, 5, 2)
+        }
+    "# };
+    let source = format!("{traits}{through_two_functions}(read_string(), pure_only(read_int))");
+    assert_val_eq!(
+        run_experimental_subscript_source(&source),
+        expected_tuple([int(4), int(6)])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn first_class_subscript_value_captures_hidden_evidence() {
     let value = run_experimental_subscript_source(indoc! { r#"
             subscript cell<T>(slot: &mut T) -> T

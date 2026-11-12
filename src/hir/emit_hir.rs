@@ -139,7 +139,7 @@ pub(super) fn insert_inst_data_for_function_and_lambdas(
     for function_id in function_and_associated_lambdas(&id, associated_lambdas) {
         // A lambda is named inside its function alone, whose effects it shares.
         let effects_per_reference = data.effects_per_reference && function_id == id;
-        module_inst_data.insert(
+        module_inst_data.functions.insert(
             function_id,
             LateFunctionInstData {
                 effects_per_reference,
@@ -617,7 +617,7 @@ pub(super) fn borrow_check_and_elaborate_dict(
         &mut solver,
         generated_projection_subscripts,
     );
-    ctx.caller_inst_data = Some(&module_inst_data[id]);
+    ctx.caller_inst_data = Some(&module_inst_data.functions[id]);
     for function_id in function_and_associated_lambdas(id, associated_lambdas) {
         let function_slot = &mut output.functions[function_id.as_index()];
         borrow_check_and_elaborate_pending_function(
