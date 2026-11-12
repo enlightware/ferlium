@@ -26,6 +26,7 @@ use crate::{
     format::FormatWith,
     hir::{
         self, NodeArena,
+        dictionary::LateFunctionInstData,
         elaboration::elaborate_generated_functions,
         emit_hir::{
             ImplStubData, PendingModuleFunctions, PubTypeConstraintPtr,
@@ -976,7 +977,8 @@ impl Settlement {
     /// `numbered` are the effect variables of each function in the order of the numbers of its
     /// contract, and `normalized` is what each effect variable is in the published scheme of
     /// each function. A reference is left out if its effects cannot be told, or if another
-    /// reference of the same site has other effects.
+    /// reference of the same site has other effects. Nothing else tells its effects, so its
+    /// elaboration then fails.
     fn recorded_reference_effects(
         &self,
         numbered: &[Vec<EffectVar>],
@@ -3268,6 +3270,7 @@ where
 
         // Fifth pass, normalize the input types/effects, substitute the types in the functions and input/output types.
         let ty_origins = quantifiers.clone();
+        let effect_origins = effect_quantifiers.clone();
         let subst = (
             normalize_types(&mut quantifiers),
             normalize_effect_vars(&mut effect_quantifiers),
@@ -3349,14 +3352,18 @@ where
             .collect();
         let mut module_inst_data = FxHashMap::default();
         for (id, dicts) in local_fns.iter().zip(&method_dicts) {
+            // The methods of an implementation have its quantifiers, and are inferred jointly.
             insert_inst_data_for_function_and_lambdas(
                 &mut module_inst_data,
                 &associated_lambdas,
-                output,
                 *id,
-                dicts.clone(),
-                &ty_origins,
-                &FxHashMap::default(),
+                LateFunctionInstData {
+                    requirements: dicts.clone(),
+                    ty_origins: ty_origins.clone(),
+                    effect_origins: effect_origins.clone(),
+                    effects_per_reference: false,
+                    reference_effects: FxHashMap::default(),
+                },
             );
         }
         for (id, dicts) in local_fns.iter().zip(&method_dicts) {
@@ -4150,6 +4157,7 @@ where
         // Fifth pass, normalize the type schemes, substitute the types in the functions.
         let mut function_ty_origins = Vec::new();
         let mut function_effect_substs = Vec::new();
+        let mut function_effect_origins = Vec::new();
         for (((input, id), written_effects), leading_effects) in ast_functions()
             .zip(local_fns.iter())
             .zip(&function_written_effects)
@@ -4162,6 +4170,15 @@ where
                 .ty_scheme
                 .normalize_with_leading_effects(leading_effects);
             function_effect_substs.push(subst.1.clone());
+            function_effect_origins.push(
+                subst
+                    .1
+                    .iter()
+                    .filter_map(|(origin, row)| Some((row.to_single_variable()?, *origin)))
+                    .sorted()
+                    .map(|(_, origin)| origin)
+                    .collect::<Vec<_>>(),
+            );
             let normalized_scheme = descr.definition.ty_scheme.clone();
             // A written generic that the scheme does not retain leaves no name behind, so that
             // the retained ones keep theirs by position.
@@ -4256,24 +4273,28 @@ where
             None => vec![FxHashMap::default(); local_fns.len()],
         };
         let mut module_inst_data = FxHashMap::default();
-        for ((id, ty_origins), reference_effects) in local_fns
+        for (((id, ty_origins), effect_origins), reference_effects) in local_fns
             .iter()
-            .zip(&function_ty_origins)
-            .zip(&reference_effects)
+            .zip(function_ty_origins)
+            .zip(function_effect_origins)
+            .zip(reference_effects)
         {
             let descr = &output.functions[id.as_index()];
-            let dicts = descr
+            let requirements = descr
                 .definition
                 .ty_scheme
                 .extra_parameters(ModuleEnv::new(output, others));
             insert_inst_data_for_function_and_lambdas(
                 &mut module_inst_data,
                 &associated_lambdas,
-                output,
                 *id,
-                dicts,
-                ty_origins,
-                reference_effects,
+                LateFunctionInstData {
+                    requirements,
+                    ty_origins,
+                    effect_origins,
+                    effects_per_reference: settlement.is_some(),
+                    reference_effects,
+                },
             );
         }
         for id in local_fns.iter() {

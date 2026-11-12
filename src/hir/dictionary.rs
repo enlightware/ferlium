@@ -17,7 +17,7 @@ use crate::{
         effects::{EffType, EffectVar},
         mutability::MutType,
         trait_solver::{EvidencePlan, TraitSolver, alpha_canonicalize_dictionary_requirements},
-        r#type::{FnType, SubscriptType, Type, TypeVar},
+        r#type::{SubscriptType, Type, TypeVar},
         type_like::{TypeLike, instantiate_effect_types_in_place, instantiate_types_in_place},
         type_mapper::TypeMapper,
         type_scheme::ProjectionRequirementKind,
@@ -540,23 +540,25 @@ pub(crate) fn instantiate_dictionary_requirements<M: TypeMapper>(
     dicts.iter().map(|dict| dict.instantiate(mapper)).collect()
 }
 
-/// Final generic information needed to elaborate calls inferred before a recursive callee's
-/// constraints were known.
+/// What a reference inside a recursive group needs of the function that it names, and of the
+/// function that makes it, once the group is final.
 #[derive(Clone, Debug)]
 pub struct LateFunctionInstData {
     pub requirements: ExtraParameters,
-    pub fn_ty: FnType,
-    /// Final normalized effect quantifiers. Preliminary recursive calls do not always record them,
-    /// so late elaboration can reconstruct their instantiation from the function surface.
-    pub effect_quantifiers: Vec<EffectVar>,
     /// The inference variable that each type quantifier was before the scheme was normalized, in
     /// the order of the quantifiers. The functions of a recursive group are inferred with one
     /// instance of each type, so two of them name one type by the same inference variable.
     pub ty_origins: Vec<TypeVar>,
-    /// For the references that the body of this function makes to functions of its recursive
-    /// group, by their site: the effects that the reference gives to the effect quantifiers of
-    /// the function it names, in their order. They are recorded when the contracts of the group
-    /// settle; the effects of a reference that is not here are reconstructed.
+    /// The inference variable that each effect quantifier was, in the same way.
+    pub effect_origins: Vec<EffectVar>,
+    /// Whether each reference to this function has effects of its own: it is a function of a
+    /// group whose contracts were settled. Otherwise the function was inferred jointly with
+    /// those that name it, or is a lambda of the function that names it, and they name an
+    /// effect by the same inference variable, as they do a type.
+    pub effects_per_reference: bool,
+    /// For the references that the body of this function makes to functions that have effects
+    /// per reference, by their site: the effects that the reference gives to the effect
+    /// quantifiers of the function it names, in their order.
     pub reference_effects: FxHashMap<Location, Vec<EffType>>,
 }
 
@@ -583,11 +585,9 @@ pub struct DictElaborationCtx<'d, 'sr, 'sm> {
     pub(crate) active_dictionary_constructions: Vec<DictionaryReq>,
     /// Effect variables quantified by the callable currently being elaborated.
     pub(crate) retained_effect_vars: FxHashSet<EffectVar>,
-    /// [`LateFunctionInstData::ty_origins`] of the function being elaborated; empty outside a
-    /// module, where no call is instantiated late.
-    pub(crate) caller_ty_origins: &'d [TypeVar],
-    /// [`LateFunctionInstData::reference_effects`] of the function being elaborated.
-    pub(crate) caller_reference_effects: Option<&'d FxHashMap<Location, Vec<EffType>>>,
+    /// The data of the function being elaborated; none outside a module, where no call is
+    /// instantiated late.
+    pub(crate) caller_inst_data: Option<&'d LateFunctionInstData>,
 }
 
 impl<'d, 'sr, 'sm> DictElaborationCtx<'d, 'sr, 'sm> {
@@ -607,8 +607,7 @@ impl<'d, 'sr, 'sm> DictElaborationCtx<'d, 'sr, 'sm> {
             evidence_bindings: Vec::new(),
             active_dictionary_constructions: Vec::new(),
             retained_effect_vars: FxHashSet::default(),
-            caller_ty_origins: &[],
-            caller_reference_effects: None,
+            caller_inst_data: None,
         };
         this.reset_evidence_bindings();
         this

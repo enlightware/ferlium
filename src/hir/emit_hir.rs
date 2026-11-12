@@ -133,32 +133,17 @@ fn validate_name_uniqueness(source: &ast::PModule) -> Result<(), InternalCompila
 pub(super) fn insert_inst_data_for_function_and_lambdas(
     module_inst_data: &mut ModuleInstData,
     associated_lambdas: &FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
-    module: &Module,
     id: LocalFunctionId,
-    dicts: ExtraParameters,
-    ty_origins: &[TypeVar],
-    reference_effects: &FxHashMap<Location, Vec<EffType>>,
+    data: LateFunctionInstData,
 ) {
     for function_id in function_and_associated_lambdas(&id, associated_lambdas) {
-        let definition = &module
-            .get_function_by_id(function_id)
-            .expect("function receiving late instantiation data must exist")
-            .definition;
-        let mut effect_quantifiers = definition
-            .ty_scheme
-            .eff_quantifiers
-            .iter()
-            .copied()
-            .collect::<Vec<_>>();
-        effect_quantifiers.sort();
+        // A lambda is named inside its function alone, whose effects it shares.
+        let effects_per_reference = data.effects_per_reference && function_id == id;
         module_inst_data.insert(
             function_id,
             LateFunctionInstData {
-                requirements: dicts.clone(),
-                fn_ty: definition.ty_scheme.ty.clone(),
-                effect_quantifiers,
-                ty_origins: ty_origins.to_vec(),
-                reference_effects: reference_effects.clone(),
+                effects_per_reference,
+                ..data.clone()
             },
         );
     }
@@ -632,8 +617,7 @@ pub(super) fn borrow_check_and_elaborate_dict(
         &mut solver,
         generated_projection_subscripts,
     );
-    ctx.caller_ty_origins = &module_inst_data[id].ty_origins;
-    ctx.caller_reference_effects = Some(&module_inst_data[id].reference_effects);
+    ctx.caller_inst_data = Some(&module_inst_data[id]);
     for function_id in function_and_associated_lambdas(id, associated_lambdas) {
         let function_slot = &mut output.functions[function_id.as_index()];
         borrow_check_and_elaborate_pending_function(

@@ -4489,3 +4489,39 @@ fn an_effect_left_unwritten_in_a_requirement_is_inferred() {
         int(7)
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn functions_between_a_default_method_and_its_trait_keep_evidence_and_effects() {
+    // The default method names `b`, which names `c`, which names the method through the
+    // evidence of the trait: the output effect of the trait and the effect of the callback
+    // reach every caller, in whatever order the items are written.
+    let step = "trait Step<Self |-> ! E> {
+    fn step(x: Self) -> int ! E;
+    fn a(x: Self, g: () -> int, n: int) -> int ! E {
+        if n <= 0 {
+            step(x)
+        } else {
+            b(x, g, n - 1)
+        }
+    }
+}\n";
+    let b = "fn b(x, g, n: int) -> int { c(x, g, n) + g() }\n";
+    let c = "fn c(x, g, n: int) -> int { a(x, g, n) }\n";
+    let impls = "struct P;
+struct F;
+impl Step for <Self = P |-> ! E = ()> { fn step(x) { 2 } }
+impl Step for <Self = F |-> ! E = fallible> { fn step(x) { idiv(6, 3) } }
+fn pure(k: () -> int ! ()) -> int { k() }\n";
+    for group in [[step, b, c], [c, b, step], [b, step, c]] {
+        let src = format!("{}{impls}", group.concat());
+        assert_val_eq!(
+            TestSession::new().run(&format!(
+                "{src}pure(|| a(P, || 1, 2)) + b(F, || 1, 0) + c(F, || 5, 1)"
+            )),
+            int(14)
+        );
+        TestSession::new().fail_compilation(&format!("{src}pure(|| a(F, || 1, 2))"));
+        TestSession::new().fail_compilation(&format!("{src}pure(|| b(P, || idiv(1, 1), 0))"));
+    }
+}

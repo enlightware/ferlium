@@ -960,32 +960,27 @@ fn extra_arg_kind_from_inst_data(
     )
 }
 
-/// Instantiate requirements that were discovered only after a recursive module call was inferred.
+/// The requirements of a function of the module at a reference whose inference left them
+/// out, because the function was not final: it is of the recursive group of the function that
+/// makes the reference, or is one of its lambdas.
 ///
 /// The functions of a recursive group are inferred with one instance of each type, so the caller
 /// and the callee name a type by the same inference variable: the type argument of a callee
 /// quantifier is the caller's quantifier with the same origin. An origin that the caller does not
 /// quantify is a type its body cannot observe, as its unbound variables are: `never`.
 ///
-/// Effects are instantiated per call. `recorded_effects` are those that the settling of the
-/// group recorded for this reference, if it did, in the order of the callee's effect
-/// quantifiers. Otherwise a preliminary call may predate final effect quantification: complete
-/// positional effect arguments are used when present, and the function surface reconstructs the
-/// missing mapping.
+/// Effects are the same when the callee has no effects per reference, an effect that the
+/// caller does not retain being none. Otherwise they are those that the settling of the group
+/// recorded for the `site` of the reference.
 fn late_module_call_inst_data(
     callee: &LateFunctionInstData,
-    call_ty: &FnType,
     call_inst_data: &hir::FnInstData,
-    caller_ty_origins: &[TypeVar],
-    recorded_effects: Option<&Vec<EffType>>,
+    caller: Option<&LateFunctionInstData>,
+    site: Location,
     span: Location,
 ) -> Result<hir::FnInstData, InternalCompilationError> {
-    let error = |message: String| {
-        internal_compilation_error!(Internal {
-            error: message,
-            span,
-        })
-    };
+    let caller_ty_origins = caller.map_or(&[][..], |caller| &caller.ty_origins);
+    let caller_effect_origins = caller.map_or(&[][..], |caller| &caller.effect_origins);
     let ty_subst = callee
         .ty_origins
         .iter()
@@ -998,82 +993,35 @@ fn late_module_call_inst_data(
             (TypeVar::new(index as u32), ty)
         })
         .collect::<FxHashMap<_, _>>();
-    if let Some(effects) =
-        recorded_effects.filter(|effects| effects.len() == callee.effect_quantifiers.len())
-    {
-        let eff_subst = callee
-            .effect_quantifiers
-            .iter()
-            .copied()
-            .zip(effects.iter().cloned())
-            .collect::<EffectsInstSubst>();
-        let subst = (ty_subst, eff_subst);
-        let mut mapper = BitmapInstantiationMapper::new(&subst);
-        let dicts_req =
-            instantiate_dictionary_requirements(&callee.requirements.requirements, &mut mapper);
-        return Ok(hir::FnInstData::new(
-            dicts_req,
-            call_inst_data.ty_args.clone(),
-            call_inst_data.eff_args.clone(),
-        ));
-    }
-    let mut eff_subst = if call_inst_data.eff_args.len() == callee.effect_quantifiers.len() {
-        callee
-            .effect_quantifiers
-            .iter()
-            .copied()
-            .zip(call_inst_data.eff_args.iter().cloned())
+    let quantifiers = (0..callee.effect_origins.len() as u32).map(EffectVar::new);
+    let eff_subst = if callee.effects_per_reference {
+        let recorded = caller
+            .and_then(|caller| caller.reference_effects.get(&site))
+            .filter(|effects| effects.len() == callee.effect_origins.len())
+            .ok_or_else(|| {
+                internal_compilation_error!(Internal {
+                    error: "a reference inside a settled group has no recorded effects".into(),
+                    span,
+                })
+            })?;
+        quantifiers
+            .zip(recorded.iter().cloned())
             .collect::<EffectsInstSubst>()
     } else {
-        // Finalization may add or remove effect quantifiers. In that case preliminary positions do
-        // not name the final universe and must not be replayed; reconstruct it below instead.
-        EffectsInstSubst::default()
+        quantifiers
+            .zip(&callee.effect_origins)
+            .map(|(quantifier, origin)| {
+                let position = caller_effect_origins
+                    .iter()
+                    .position(|other| other == origin);
+                let effects = match position {
+                    Some(position) => EffType::single_variable(EffectVar::new(position as u32)),
+                    None => EffType::empty(),
+                };
+                (quantifier, effects)
+            })
+            .collect::<EffectsInstSubst>()
     };
-    if callee.fn_ty.args.len() != call_ty.args.len() {
-        return Err(error(format!(
-            "late-instantiated call has arity {}, but its final callee has arity {}",
-            call_ty.args.len(),
-            callee.fn_ty.args.len()
-        )));
-    }
-    for (pattern, actual) in callee.fn_ty.args.iter().zip(&call_ty.args) {
-        if !bind_type_effect_instantiation(
-            pattern.ty,
-            actual.ty,
-            &mut eff_subst,
-            &mut FxHashSet::default(),
-        ) {
-            return Err(error(format!(
-                "cannot reconstruct effects for late-instantiated call argument types {:?} and {:?}",
-                pattern.ty, actual.ty
-            )));
-        }
-    }
-    if !bind_type_effect_instantiation(
-        callee.fn_ty.ret,
-        call_ty.ret,
-        &mut eff_subst,
-        &mut FxHashSet::default(),
-    ) {
-        return Err(error(format!(
-            "cannot reconstruct nested effects for late-instantiated result types {:?} and {:?}",
-            callee.fn_ty.ret, call_ty.ret
-        )));
-    }
-    if !bind_effect_instantiation(&callee.fn_ty.effects, &call_ty.effects, &mut eff_subst) {
-        return Err(error(format!(
-            "cannot reconstruct late call effects {:?} as {:?} with substitution {eff_subst:?}",
-            callee.fn_ty.effects, call_ty.effects
-        )));
-    }
-    // Functions and associated lambdas in one recursive group share the final normalized effect
-    // universe. A quantifier absent from both preliminary arguments and the function surface is
-    // therefore an unchanged caller quantifier, not an unknown positional argument.
-    for quantifier in &callee.effect_quantifiers {
-        eff_subst
-            .entry(*quantifier)
-            .or_insert_with(|| EffType::single_variable(*quantifier));
-    }
     let subst = (ty_subst, eff_subst);
     let mut mapper = BitmapInstantiationMapper::new(&subst);
     let dicts_req =
@@ -1083,155 +1031,6 @@ fn late_module_call_inst_data(
         call_inst_data.ty_args.clone(),
         call_inst_data.eff_args.clone(),
     ))
-}
-
-/// Reconstruct effect-variable instantiation while walking corresponding type surfaces.
-fn bind_type_effect_instantiation(
-    pattern: Type,
-    actual: Type,
-    subst: &mut EffectsInstSubst,
-    active: &mut FxHashSet<(Type, Type)>,
-) -> bool {
-    if !active.insert((pattern, actual)) {
-        return true;
-    }
-    let pattern_kind = pattern.data().clone();
-    let actual_kind = actual.data().clone();
-    let matches = match (pattern_kind, actual_kind) {
-        (TypeKind::Variable(_), _) => true,
-        (TypeKind::Tuple(left), TypeKind::Tuple(right)) => {
-            left.len() == right.len()
-                && left
-                    .into_iter()
-                    .zip(right)
-                    .all(|(left, right)| bind_type_effect_instantiation(left, right, subst, active))
-        }
-        (TypeKind::Record(left), TypeKind::Record(right))
-        | (TypeKind::Variant(left), TypeKind::Variant(right)) => {
-            left.len() == right.len()
-                && left
-                    .into_iter()
-                    .zip(right)
-                    .all(|((left_name, left), (right_name, right))| {
-                        left_name == right_name
-                            && bind_type_effect_instantiation(left, right, subst, active)
-                    })
-        }
-        (TypeKind::Native(left), TypeKind::Native(right)) => {
-            left.bare_ty == right.bare_ty
-                && left.arguments.len() == right.arguments.len()
-                && left
-                    .arguments
-                    .into_iter()
-                    .zip(right.arguments)
-                    .all(|(left, right)| bind_type_effect_instantiation(left, right, subst, active))
-        }
-        (TypeKind::Named(left), TypeKind::Named(right)) => {
-            left.def == right.def
-                && left.params.len() == right.params.len()
-                && left.effect_params.len() == right.effect_params.len()
-                && left
-                    .params
-                    .into_iter()
-                    .zip(right.params)
-                    .all(|(left, right)| bind_type_effect_instantiation(left, right, subst, active))
-                && left
-                    .effect_params
-                    .iter()
-                    .zip(&right.effect_params)
-                    .all(|(left, right)| bind_effect_instantiation(left, right, subst))
-        }
-        (TypeKind::Function(left), TypeKind::Function(right)) => {
-            left.args.len() == right.args.len()
-                && left.args.iter().zip(&right.args).all(|(left, right)| {
-                    bind_type_effect_instantiation(left.ty, right.ty, subst, active)
-                })
-                && bind_type_effect_instantiation(left.ret, right.ret, subst, active)
-                && bind_effect_instantiation(&left.effects, &right.effects, subst)
-        }
-        (TypeKind::Subscript(left), TypeKind::Subscript(right)) => {
-            left.args.len() == right.args.len()
-                && left.args.iter().zip(&right.args).all(|(left, right)| {
-                    bind_type_effect_instantiation(left.ty, right.ty, subst, active)
-                })
-                && bind_type_effect_instantiation(left.ret, right.ret, subst, active)
-                && match (&left.ref_member, &right.ref_member) {
-                    (Some(left), Some(right)) => {
-                        bind_effect_instantiation(&left.effects, &right.effects, subst)
-                    }
-                    (None, None) => true,
-                    _ => false,
-                }
-                && match (&left.mut_member, &right.mut_member) {
-                    (Some(left), Some(right)) => {
-                        bind_effect_instantiation(&left.effects, &right.effects, subst)
-                    }
-                    (None, None) => true,
-                    _ => false,
-                }
-        }
-        (TypeKind::Never, TypeKind::Never) => true,
-        (left, right) => left == right,
-    };
-    active.remove(&(pattern, actual));
-    matches
-}
-
-/// Bind one effect-set pattern. A lone unmapped variable absorbs the effects not already accounted
-/// for by primitives and previously bound variables. Multiple missing variables are accepted only
-/// when their identities are already present on the actual side; otherwise the mapping is not
-/// unique.
-fn bind_effect_instantiation(
-    pattern: &EffType,
-    actual: &EffType,
-    subst: &mut EffectsInstSubst,
-) -> bool {
-    let missing = pattern
-        .iter()
-        .filter_map(|effect| match effect {
-            Effect::Variable(var) => Some(var),
-            Effect::Primitive(_) => None,
-        })
-        .filter(|var| !subst.contains_key(var))
-        .collect::<Vec<_>>();
-    if missing.is_empty() {
-        return effect_set_is_contained_in(&pattern.instantiate(subst), actual);
-    }
-    let mut without_missing = subst.clone();
-    for var in &missing {
-        without_missing.insert(*var, EffType::empty());
-    }
-    let known = pattern.instantiate(&without_missing);
-    if known.iter().any(|effect| !actual.contains(effect)) {
-        return false;
-    }
-    let residual = actual
-        .iter()
-        .filter(|effect| !known.contains(*effect))
-        .collect::<EffType>();
-    if missing.len() > 1 {
-        if residual.is_empty() {
-            for var in missing {
-                subst.insert(var, EffType::empty());
-            }
-            return true;
-        }
-        for var in missing {
-            if !residual.contains(Effect::Variable(var)) {
-                return false;
-            }
-            subst.insert(var, EffType::single_variable(var));
-        }
-        return effect_set_is_contained_in(&pattern.instantiate(subst), actual);
-    }
-
-    let var = missing[0];
-    subst.insert(var, residual);
-    effect_set_is_contained_in(&pattern.instantiate(subst), actual)
-}
-
-fn effect_set_is_contained_in(required: &EffType, available: &EffType) -> bool {
-    required.iter().all(|effect| available.contains(effect))
 }
 
 /// Bind the variables in a final callee type to the corresponding call-site types.
@@ -2619,16 +2418,11 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                         .module_inst_data
                         .and_then(|inst_data| inst_data.get(&function.function))
                 {
-                    let recorded_effects = self
-                        .ctx
-                        .caller_reference_effects
-                        .and_then(|effects| effects.get(&function_span));
                     let late_inst_data = late_module_call_inst_data(
                         requirements,
-                        &ty.fn_ty,
                         &inst_data,
-                        self.ctx.caller_ty_origins,
-                        recorded_effects,
+                        self.ctx.caller_inst_data,
+                        function_span,
                         node_span,
                     )?;
                     self.elaborate_extra_args_from_inst_data(&late_inst_data, node_span)?
@@ -2772,19 +2566,11 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                         .and_then(|inst_data| inst_data.get(&get_fn.function.function))
                         .filter(|inst_data| !inst_data.requirements.is_empty())
                     {
-                        let TypeKind::Function(call_ty) = node_ty.data().clone() else {
-                            panic!("get_function must have a function type")
-                        };
-                        let recorded_effects = self
-                            .ctx
-                            .caller_reference_effects
-                            .and_then(|effects| effects.get(&get_fn.function_span));
                         let late_inst_data = late_module_call_inst_data(
                             requirements,
-                            &call_ty,
                             &get_fn.inst_data,
-                            self.ctx.caller_ty_origins,
-                            recorded_effects,
+                            self.ctx.caller_inst_data,
+                            get_fn.function_span,
                             node_span,
                         )?;
                         self.elaborate_extra_args_from_inst_data(&late_inst_data, node_span)?
@@ -3421,6 +3207,20 @@ mod tests {
         }
     }
 
+    fn late_data(
+        requirements: Vec<DictionaryReq>,
+        ty_origins: Vec<TypeVar>,
+        effect_origins: Vec<EffectVar>,
+    ) -> LateFunctionInstData {
+        LateFunctionInstData {
+            requirements: extra_parameters(requirements),
+            ty_origins,
+            effect_origins,
+            effects_per_reference: false,
+            reference_effects: FxHashMap::default(),
+        }
+    }
+
     #[test]
     fn late_call_maps_callee_types_to_the_caller_by_their_origins() {
         // The callee numbers the two types in the opposite order, and has one of its own.
@@ -3432,20 +3232,19 @@ mod tests {
                 Type::variable(TypeVar::new(payload)),
             )
         };
-        let callee = LateFunctionInstData {
-            requirements: extra_parameters(vec![requirement(0, 1), requirement(2, 2)]),
-            fn_ty: FnType::new_by_val(Vec::<Type>::new(), Type::unit(), EffType::empty()),
-            effect_quantifiers: Vec::new(),
-            ty_origins: vec![second, first, own],
-            reference_effects: FxHashMap::default(),
-        };
+        let callee = late_data(
+            vec![requirement(0, 1), requirement(2, 2)],
+            vec![second, first, own],
+            Vec::new(),
+        );
+        let caller = late_data(Vec::new(), vec![first, second], Vec::new());
+        let span = Location::new_synthesized();
         let inst_data = late_module_call_inst_data(
             &callee,
-            &callee.fn_ty,
             &hir::FnInstData::none(),
-            &[first, second],
-            None,
-            Location::new_synthesized(),
+            Some(&caller),
+            span,
+            span,
         )
         .unwrap();
         assert!(inst_data.dicts_req[0].same_contract(&requirement(1, 0)));
@@ -3459,86 +3258,48 @@ mod tests {
     }
 
     #[test]
-    fn late_call_reconstructs_effect_quantifiers_added_or_removed_by_finalization() {
-        let effect = EffectVar::new(0);
-        let no_parameters = extra_parameters(Vec::new());
-        let span = Location::new_synthesized();
-
-        let added = LateFunctionInstData {
-            requirements: no_parameters.clone(),
-            fn_ty: FnType::new_by_val(
-                Vec::<Type>::new(),
-                Type::unit(),
-                EffType::single_variable(effect),
-            ),
-            effect_quantifiers: vec![effect],
-            ty_origins: Vec::new(),
-            reference_effects: FxHashMap::default(),
+    fn late_call_gives_callee_effects_by_their_origins_or_as_recorded() {
+        let callback = |effect: EffType| {
+            Type::function_type(FnType::new_by_val(Vec::<Type>::new(), Type::unit(), effect))
         };
-        assert!(
-            late_module_call_inst_data(
-                &added,
-                &added.fn_ty,
-                &hir::FnInstData::none(),
-                &[],
-                None,
-                span,
+        let variable = |index: u32| EffType::single_variable(EffectVar::new(index));
+        let requirement = |first: EffType, second: EffType| {
+            DictionaryReq::new_variant_payload_indirection(
+                callback(first),
+                ustr("Some"),
+                callback(second),
             )
-            .is_ok()
-        );
-
-        let removed = LateFunctionInstData {
-            requirements: no_parameters.clone(),
-            fn_ty: FnType::new_by_val(Vec::<Type>::new(), Type::unit(), EffType::empty()),
-            effect_quantifiers: Vec::new(),
-            ty_origins: Vec::new(),
-            reference_effects: FxHashMap::default(),
         };
-        let preliminary = hir::FnInstData::new(
+        // The callee numbers the two effects in the opposite order, and has one of its own.
+        let (first, second, own) = (EffectVar::new(40), EffectVar::new(41), EffectVar::new(42));
+        let mut callee = late_data(
+            vec![
+                requirement(variable(0), variable(1)),
+                requirement(variable(2), variable(2)),
+            ],
             Vec::new(),
-            Vec::new(),
-            vec![EffType::single_variable(effect)],
+            vec![second, first, own],
         );
+        let mut caller = late_data(Vec::new(), Vec::new(), vec![first, second]);
+        let span = Location::new_synthesized();
+        let none = hir::FnInstData::none();
+
+        let shared = late_module_call_inst_data(&callee, &none, Some(&caller), span, span).unwrap();
+        assert!(shared.dicts_req[0].same_contract(&requirement(variable(1), variable(0))));
         assert!(
-            late_module_call_inst_data(&removed, &removed.fn_ty, &preliminary, &[], None, span)
-                .is_ok()
+            shared.dicts_req[1].same_contract(&requirement(EffType::empty(), EffType::empty()))
         );
-    }
 
-    #[test]
-    fn late_effect_mapping_accepts_call_site_effect_supersets() {
-        let callee_effect = EffectVar::new(0);
-        let caller_only_effect = EffectVar::new(1);
-        let pattern = EffType::multiple(&[
-            Effect::Primitive(PrimitiveEffect::Write),
-            Effect::Variable(callee_effect),
-        ]);
-        let actual = EffType::multiple(&[
-            Effect::Primitive(PrimitiveEffect::Write),
-            Effect::Variable(callee_effect),
-            Effect::Variable(caller_only_effect),
-        ]);
-        let mut subst =
-            EffectsInstSubst::from_iter([(callee_effect, EffType::single_variable(callee_effect))]);
-
-        assert!(bind_effect_instantiation(&pattern, &actual, &mut subst));
-    }
-
-    #[test]
-    fn late_effect_mapping_can_instantiate_multiple_variables_as_pure() {
-        let left = EffectVar::new(0);
-        let right = EffectVar::new(1);
-        let pattern = EffType::multiple(&[
-            Effect::Primitive(PrimitiveEffect::Fallible),
-            Effect::Variable(left),
-            Effect::Variable(right),
-        ]);
-        let actual = EffType::single_primitive(PrimitiveEffect::Fallible);
-        let mut subst = EffectsInstSubst::default();
-
-        assert!(bind_effect_instantiation(&pattern, &actual, &mut subst));
-        assert_eq!(subst.get(&left), Some(&EffType::empty()));
-        assert_eq!(subst.get(&right), Some(&EffType::empty()));
+        // A function with effects per reference takes those recorded for the site, and no other.
+        callee.effects_per_reference = true;
+        assert!(late_module_call_inst_data(&callee, &none, Some(&caller), span, span).is_err());
+        let write = EffType::single_primitive(PrimitiveEffect::Write);
+        caller
+            .reference_effects
+            .insert(span, vec![variable(0), write.clone(), EffType::empty()]);
+        let recorded =
+            late_module_call_inst_data(&callee, &none, Some(&caller), span, span).unwrap();
+        assert!(recorded.dicts_req[0].same_contract(&requirement(variable(0), write)));
     }
 
     fn layout_trait() -> Trait {
