@@ -2041,6 +2041,190 @@ fn a_type_that_only_requirements_of_a_group_name_is_not_the_body_to_choose() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn the_contracts_of_a_group_do_not_grow_with_its_unrolling() {
+    // Each use of `f` as a value needs `Num` for its type, with an effect of its own that
+    // nothing else knows: these requirements are copies of one another, and one is enough.
+    // Taken apart, each copy of `f` would bring those of the copies that it uses, without end.
+    for src in [
+        "fn f<! E>(a) { f + 0 == f + 0 }",
+        "fn f<! E>(a) { f + 0 == h + 0 }\nfn h(a) { f == f + f }",
+        "fn result<! E>(mut a) { a.a.a.c() != result and result + 0 == item + 0 + 1 + 0 }\nfn item<z, c, result>(a) { result == result + result + result + item }",
+    ] {
+        assert_val_eq!(
+            TestSession::new().run(&format!("{src}\n0")),
+            int(0),
+            "{src}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_group_whose_requirements_keep_growing_is_rejected() {
+    // Each use of `f` as a value needs `Conv` for its type, with an effect and a result type
+    // of its own. A copy that also differs by a type is not recognized, so the contract of `f`
+    // grows at each round, until the bound on rounds.
+    TestSession::new()
+        .fail_compilation(
+            "trait Conv<Self |-> O> { fn conv(x: Self) -> O; }
+fn f<! E>(a, g: () -> int ! E) -> int {
+    let u = conv(f);
+    g()
+}
+0",
+        )
+        .expect_recursive_group_body_does_not_fit("f");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn the_requirements_of_a_group_keep_the_effects_of_its_signature_apart() {
+    // The two requirements of `f` differ only by the effects of its two callbacks, which its
+    // callers choose: they stay two, as without the recursive call.
+    let prelude = "struct Cb<T>(T)
+trait Select<Self, Other> {
+    fn select(x: Self, y: Other) -> int;
+}
+impl<! E> Select for <Self = int, Other = Cb<(() -> int ! E)>> {
+    fn select(x: int, y: Cb<(() -> int ! E)>) -> int { x }
+}";
+    let header = "fn f<T, ! E, F>(x: T, n: int, g: () -> int ! E, h: () -> int ! F) -> int";
+    let selections = [
+        "select(x, Cb(g)) + select(x, Cb(h))",
+        "select(x, Cb(h)) + select(x, Cb(g))",
+    ];
+    for (index, selection) in selections.into_iter().enumerate() {
+        let alone = format!("{header} {{\n    {selection}\n}}");
+        let recursive = format!(
+            "{header} {{
+    if n == 0 {{
+        {selection}
+    }} else {{
+        f(x, n - 1, g, h)
+    }}
+}}"
+        );
+        for function in [alone, recursive] {
+            let src = format!("{prelude}\n{function}\n");
+            assert_val_eq!(
+                TestSession::new().run(&format!("{src}f(3, 1, || 1, || idiv(4, 2))")),
+                int(6),
+                "{function}"
+            );
+            if index == 0 {
+                assert_eq!(
+                    signature(&mut TestSession::new(), &src, "f"),
+                    "fn f<T ! E, F>(x: T, n: int, g: () -> int ! E, h: () -> int ! F) -> int \
+                     where Select <Self = T, Other = Cb<() -> int ! E>>, \
+                     Select <Self = T, Other = Cb<() -> int ! F>>",
+                    "{function}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn the_requirements_of_a_group_keep_the_effects_that_other_requirements_determine_apart() {
+    // The two `Select` requirements of `f` differ only by effects that no signature names,
+    // and that the caller's `T` determines, as the outputs of `First` and of `Second`.
+    let prelude = "struct Pair<A, B>(A, B)
+trait Select<Self> {}
+impl<! E> Select for Pair<int, (() -> int ! E)> {}
+trait First<Self |-> ! E>
+where Pair<Self, (() -> int ! E)>: Select {
+    fn first(x: Self) -> int;
+}
+trait Second<Self |-> ! E>
+where Pair<Self, (() -> int ! E)>: Select {
+    fn second(x: Self) -> int;
+}
+impl First for <Self = int |-> ! E = ()> {
+    fn first(x: int) -> int { x }
+}
+impl Second for <Self = int |-> ! E = (fallible)> {
+    fn second(x: int) -> int { x }
+}";
+    let header = "fn f<T, ! Unused>(x: T, n: int) -> int";
+    for sum in ["first(x) + second(x)", "second(x) + first(x)"] {
+        let alone = format!("{header} {{\n    {sum}\n}}");
+        let recursive = format!(
+            "{header} {{
+    if n == 0 {{
+        {sum}
+    }} else {{
+        f(x, n - 1)
+    }}
+}}"
+        );
+        for function in [alone, recursive] {
+            assert_val_eq!(
+                TestSession::new().run(&format!("{prelude}\n{function}\nf(3, 1)")),
+                int(6),
+                "{function}"
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn the_requirements_of_a_group_that_share_an_effect_stand_together() {
+    // `one` and `two` each need `Select` and another trait for a type with one effect, which
+    // the implementation of that other trait determines for the caller's `T`: pure for `one`,
+    // fallible for `two`. The two `Select` requirements of `f` are not copies of one another.
+    let prelude = "struct Pair<A, B>(A, B)
+trait Select<Self> {}
+impl<! E> Select for Pair<int, (() -> int ! E)> {}
+trait Run<Self |-> ! E> {
+    fn run(x: Self) -> int ! E;
+}
+trait Accept<Self |-> ! E> {
+    fn accept(x: Self, g: () -> int ! E) -> int;
+}
+impl Run for <Self = int |-> ! E = (fallible)> {
+    fn run(x: int) -> int { idiv(4, x) }
+}
+impl Accept for <Self = int |-> ! E = ()> {
+    fn accept(x: int, g: () -> int ! ()) -> int { x }
+}
+trait NeedPure<Self> {}
+impl<T, ! E> NeedPure for Pair<T, (() -> int ! E)>
+where T: Accept<! E = E> {}
+trait NeedFall<Self> {}
+impl<T, ! E> NeedFall for Pair<T, (() -> int ! E)>
+where T: Run<! E = E> {}
+fn one<T, ! E>(x: T) -> int
+where Pair<T, (() -> int ! E)>: Select,
+      Pair<T, (() -> int ! E)>: NeedPure { 3 }
+fn two<T, ! E>(x: T) -> int
+where Pair<T, (() -> int ! E)>: Select,
+      Pair<T, (() -> int ! E)>: NeedFall { 3 }";
+    let header = "fn f<T, ! Unused>(x: T, n: int) -> int";
+    for sum in ["one(x) + two(x)", "two(x) + one(x)"] {
+        let alone = format!("{header} {{\n    {sum}\n}}");
+        let recursive = format!(
+            "{header} {{
+    if n == 0 {{
+        {sum}
+    }} else {{
+        f(x, n - 1)
+    }}
+}}"
+        );
+        for function in [alone, recursive] {
+            assert_val_eq!(
+                TestSession::new().run(&format!("{prelude}\n{function}\nf(3, 1)")),
+                int(6),
+                "{function}"
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn an_effect_travels_around_a_long_cycle_in_any_order() {
     // The failure of `f8` reaches `f0` after one round for each function between them.
     let mut functions = vec![

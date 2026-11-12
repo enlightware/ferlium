@@ -186,15 +186,10 @@ pub(super) fn compilation_error_to_data(
             span,
             format!("Cannot find effect `{name}` in this scope"),
         )],
-        RecursiveGroupBodyDoesNotFit {
-            function,
-            reason,
-            span,
-        } => vec![error_data_from_location(
+        RecursiveGroupBodyDoesNotFit { function, span } => vec![error_data_from_location(
             span,
             format!(
-                "Function `{function}` does not fit the signature inferred for its recursive group, as {}: write its signature",
-                reason.message()
+                "Function `{function}` does not fit the signature inferred for its recursive group: write its signature"
             ),
         )],
         EffectVariablesCombined {

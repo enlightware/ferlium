@@ -2321,6 +2321,45 @@ fn exported_recursive_groups_with_an_effect_generic_reduce_private_requirements(
         " }),
         int(2)
     );
+    // The public form names an output that the private requirement did not.
+    for h_first in [false, true] {
+        let f = indoc! { "
+            pub fn f<T, ! E>(x: T, n: int, g: () -> int ! E) -> string {
+                if n == 0 {
+                    g();
+                    hidden([x])
+                } else {
+                    h(x, n - 1, g)
+                }
+            }
+        " };
+        let h = "fn h<T, ! E>(x: T, n: int, g: () -> int ! E) -> string { f(x, n, g) }\n";
+        let functions = if h_first {
+            format!("{h}{f}")
+        } else {
+            format!("{f}{h}")
+        };
+        let src = format!(
+            indoc! { "
+                pub trait Read<Self |-> Out> {{
+                    fn read(x: Self) -> Out;
+                }}
+                trait Hidden<Self> {{
+                    fn hidden(x: Self) -> string ! fallible;
+                }}
+                impl<T, O> Hidden for [T] where T: Read<Out = O>, O: Inspect {{
+                    fn hidden(x: [T]) -> string {{ inspect(read(x[0])) }}
+                }}
+                impl Read for <Self = int |-> Out = int> {{
+                    fn read(x: int) -> int {{ x }}
+                }}
+                {}
+                f(7, 2, || 1)
+            " },
+            functions
+        );
+        assert_val_eq!(TestSession::new().run(&src), string("7"), "{functions}");
+    }
     // A private impl for every type determines the output, and so the type of the result.
     assert_val_eq!(
         TestSession::new().run(indoc! { "

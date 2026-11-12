@@ -92,6 +92,17 @@ impl CompilationError {
         }
     }
 
+    pub fn expect_recursive_group_body_does_not_fit(&self, expected_function: &str) {
+        match self.deref() {
+            CompilationErrorImpl::RecursiveGroupBodyDoesNotFit { function, .. } => {
+                assert_eq!(function.as_str(), expected_function);
+            }
+            _ => panic!(
+                "expect_recursive_group_body_does_not_fit called on non-RecursiveGroupBodyDoesNotFit error {self:?}"
+            ),
+        }
+    }
+
     pub fn expect_unbound_ty_var(&self) {
         use CompilationErrorImpl::*;
         // TODO: once ty_var normalization is implemented, pass the ty_var as parameter

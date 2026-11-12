@@ -1049,7 +1049,6 @@ pub enum CompilationErrorImpl<S: Scope> {
     /// A body of a recursive group does not fit the signature inferred for it.
     RecursiveGroupBodyDoesNotFit {
         function: Ustr,
-        reason: InvalidDefaultMethodKind,
         span: Location,
     },
     TraitNotFound(Location),
@@ -1672,16 +1671,11 @@ impl FormatWith<SourceTable> for CompilationError {
                     fmt_span(span)
                 )
             }
-            RecursiveGroupBodyDoesNotFit {
-                function: _,
-                reason,
-                span,
-            } => {
+            RecursiveGroupBodyDoesNotFit { function: _, span } => {
                 write!(
                     f,
-                    "Function {} does not fit the signature inferred for its recursive group, as {}: write its signature",
-                    fmt_span(span),
-                    reason.message()
+                    "Function {} does not fit the signature inferred for its recursive group: write its signature",
+                    fmt_span(span)
                 )
             }
             TraitNotFound(span) => {
@@ -2634,15 +2628,9 @@ impl CompilationError {
                 second,
                 span
             }),
-            RecursiveGroupBodyDoesNotFit {
-                function,
-                reason,
-                span,
-            } => compilation_error!(RecursiveGroupBodyDoesNotFit {
-                function,
-                reason,
-                span,
-            }),
+            RecursiveGroupBodyDoesNotFit { function, span } => {
+                compilation_error!(RecursiveGroupBodyDoesNotFit { function, span })
+            }
             TraitNotFound(span) => compilation_error!(TraitNotFound(span)),
             AmbiguousTraitMethod {
                 method_name,

@@ -248,17 +248,24 @@ also when the method has a default body: an effect left unwritten there is the e
 is in a type definition.
 
 A recursive group with declared effect variables behaves, for effects, as its unrolling: each
-function calling copies of the others, down to functions that call nothing. It is inferred in three
-steps. Joint inference of the group, in which effects are not related at all, gives the types of
-each signature and the places of the effects left to infer; effects do not decide types, so
-nothing is lost. From the contracts of functions that call nothing, each body is then inferred
-alone against the contracts of the group, by ordinary inference, which gives its next contract,
-until none changes; a contract only gets weaker, so this ends. A body can fail while a contract
-that it uses does not say enough yet, so its error is that of the group only once the contracts
-have settled. Each body is finally checked alone against these fixed contracts, with its declared
-variables rigid, which makes the result sound whatever the previous steps proposed. In the last
-two steps each call in the group instantiates its callee's contract. Only effects are instantiated
-per call in this way; types keep one instance per group.
+function calling copies of the others, down to functions that call nothing. Joint inference of
+the group, in which effects are not related at all, first gives the types of each signature and
+the places of the effects left to infer; effects do not decide types, so nothing is lost. Each
+body is then inferred alone, by ordinary inference, assuming a contract for every function of the
+group, its own included, which gives its next contract; the first contracts are those of
+functions that call nothing. The group is settled when every body gives its contract again:
+this is the rule for typing recursive definitions, so the result is sound however the contracts
+were found. A group that does not settle within a bound on the rounds is rejected. An error in a
+body counts only once the contracts have settled, as a contract may not say enough before. Each
+call in the group instantiates its callee's contract, for effects only; types keep one instance
+per group.
+
+The requirements that a body leaves to its callers would grow at each round, each copy of a
+function bringing those of the copies it calls with effect variables of its own. So a set of
+requirements that is a copy of another, but for the names of effect variables that nothing else
+knows, is dropped. Such variables have no bound and are in no signature, and the requirements
+that share them are compared together, as a caller gives their evidence for one choice of these
+variables.
 
 ### Solving
 

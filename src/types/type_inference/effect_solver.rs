@@ -720,6 +720,34 @@ impl EffectSolver {
         Ok(())
     }
 
+    /// The variable that names the class of `var` whatever the view.
+    pub(super) fn class_root(&mut self, var: EffectVar) -> EffectVar {
+        self.ensure_var(var);
+        self.table.find(var)
+    }
+
+    /// Whether nothing determines `var`: it is solvable, has no bound, is related to no other
+    /// variable, and is equal to none of `observable`. Deferred inclusions must be expanded.
+    pub(super) fn is_undetermined(
+        &mut self,
+        var: EffectVar,
+        observable: &FxHashSet<EffectVar>,
+    ) -> bool {
+        self.ensure_var(var);
+        let root = self.table.find(var);
+        let class = self.class(root);
+        !class.rigid
+            && class.alias.is_none()
+            && class.lower.is_empty()
+            && class.ceiling.is_none()
+            && class.successors.is_empty()
+            && class.predecessors.is_empty()
+            && observable.iter().all(|other| {
+                self.ensure_var(*other);
+                self.table.find(*other) != root
+            })
+    }
+
     /// The names of two declared variables that `row` combines, if any.
     pub(super) fn combined_declared_variables(&mut self, row: &EffType) -> Option<(Ustr, Ustr)> {
         let mut declared = Vec::new();

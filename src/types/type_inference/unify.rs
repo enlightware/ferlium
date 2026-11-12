@@ -3,13 +3,15 @@
 
 use std::{
     borrow::Cow,
-    collections::hash_map::Entry,
+    collections::{BTreeMap, hash_map::Entry},
+    hash::{Hash, Hasher},
     mem,
     ops::{Deref, DerefMut},
 };
 
 use ena::unify::{InPlace, Snapshot};
 use itertools::Itertools;
+use rustc_hash::FxHasher;
 use ustr::Ustr;
 
 use super::{
@@ -38,7 +40,7 @@ use crate::{
     },
     types::{
         effect_polarity::EffectPolarity,
-        effects::{EffType, EffectVar, EffectsInstSubst, no_effects},
+        effects::{EffType, Effect, EffectVar, EffectsInstSubst, no_effects},
         mutability::{MutType, MutVal, MutVar, MutVarKey},
         recursive_equation::{RecursiveEquationError, try_intern_recursive_equation},
         trait_solver::{ConstraintAssumptions, TraitSolver, output_effect_fits},
@@ -224,6 +226,192 @@ impl UnifiedTypeInference {
                 return Ok(());
             }
         }
+    }
+
+    /// As [`Self::coalesce_constraint_outputs`], for the requirements that a function of a
+    /// recursive group leaves to its callers: a copy of some of them is dropped.
+    ///
+    /// An effect variable is free in the requirements if nothing else knows it: it has no
+    /// bound, is related to no other variable, is not a written generic and is not one of
+    /// `signature_effects`, the effect variables of the signatures. The requirements that
+    /// share free variables, directly or through others, stand together: a caller gives their
+    /// evidence for one choice of these variables, which the signature does not show. So two
+    /// such sets that are the same but for the names of their free variables ask the same of
+    /// every caller, and one is enough: their free variables are made equal.
+    ///
+    /// A group has finitely many requirements only so, however many times its functions are
+    /// unrolled: each copy of a function would otherwise bring the requirements of its callees
+    /// with free variables of its own.
+    pub(crate) fn coalesce_requirement_copies(
+        &mut self,
+        constraints: &mut Vec<PubTypeConstraint>,
+        signature_effects: &FxHashSet<EffectVar>,
+        polarities: &dyn Fn(TraitId) -> Vec<EffectPolarity>,
+    ) -> Result<(), InternalCompilationError> {
+        self.effects.expand_deferred_inclusions()?;
+        loop {
+            self.substitute_in_constraints_in_place(constraints);
+            self.deduplicate_constraints_in_place(constraints);
+            if !self.unify_requirement_copies(constraints, signature_effects)? {
+                break;
+            }
+        }
+        self.coalesce_constraint_outputs(constraints, polarities)
+    }
+
+    /// Makes equal the free effect variables of the sets of `constraints` that are copies of
+    /// one another, see [`Self::coalesce_requirement_copies`]. Returns whether any were.
+    fn unify_requirement_copies(
+        &mut self,
+        constraints: &[PubTypeConstraint],
+        signature_effects: &FxHashSet<EffectVar>,
+    ) -> Result<bool, InternalCompilationError> {
+        struct Rows(Vec<EffType>);
+        impl TypeInnerVisitor for Rows {
+            fn visit_eff_ty(&mut self, eff_ty: &EffType) {
+                self.0.push(eff_ty.clone());
+            }
+        }
+        // The free variables of each requirement, by their classes, in the order of their
+        // places.
+        let mut free = Vec::with_capacity(constraints.len());
+        for constraint in constraints {
+            let mut rows = Rows(Vec::new());
+            constraint.visit(&mut rows);
+            let mut vars = Vec::new();
+            for var in rows.0.iter().flat_map(EffType::inner_vars) {
+                if self.effects.is_undetermined(var, signature_effects) {
+                    let root = self.effects.class_root(var);
+                    if !vars.contains(&root) {
+                        vars.push(root);
+                    }
+                }
+            }
+            free.push(vars);
+        }
+        // The sets of requirements that share free variables.
+        let mut set_of_var: FxHashMap<EffectVar, usize> = FxHashMap::default();
+        let mut set_of: Vec<usize> = (0..constraints.len()).collect();
+        fn find(set_of: &mut [usize], mut index: usize) -> usize {
+            while set_of[index] != index {
+                set_of[index] = set_of[set_of[index]];
+                index = set_of[index];
+            }
+            index
+        }
+        for (index, vars) in free.iter().enumerate() {
+            for var in vars {
+                match set_of_var.entry(*var) {
+                    Entry::Occupied(entry) => {
+                        let other = find(&mut set_of, *entry.get());
+                        let own = find(&mut set_of, index);
+                        set_of[own.max(other)] = own.min(other);
+                    }
+                    Entry::Vacant(entry) => {
+                        entry.insert(index);
+                    }
+                }
+            }
+        }
+        let mut sets: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (index, vars) in free.iter().enumerate() {
+            if !vars.is_empty() {
+                sets.entry(find(&mut set_of, index))
+                    .or_default()
+                    .push(index);
+            }
+        }
+        // Each set with its free variables numbered by their first place, its requirements
+        // being in an order that does not depend on these variables. The numbers are beyond
+        // the names of all variables.
+        let base = self.effects.var_count();
+        let mut seen: FxHashMap<Vec<PubTypeConstraint>, Vec<EffectVar>> = FxHashMap::default();
+        let mut unified = false;
+        for members in sets.into_values() {
+            let anonymous = members
+                .iter()
+                .flat_map(|index| &free[*index])
+                .map(|var| (*var, EffectVar::new(base)))
+                .collect();
+            let mut ordered = Vec::with_capacity(members.len());
+            for index in members {
+                let mut hasher = FxHasher::default();
+                self.rename_free_effects(&constraints[index], &anonymous)
+                    .hash(&mut hasher);
+                ordered.push((hasher.finish(), index));
+            }
+            ordered.sort();
+            let mut vars = Vec::new();
+            for (_, index) in &ordered {
+                for var in &free[*index] {
+                    if !vars.contains(var) {
+                        vars.push(*var);
+                    }
+                }
+            }
+            let numbered = vars
+                .iter()
+                .enumerate()
+                .map(|(number, var)| (*var, EffectVar::new(base + number as u32)))
+                .collect();
+            let form = ordered
+                .iter()
+                .map(|(_, index)| self.rename_free_effects(&constraints[*index], &numbered))
+                .collect::<Vec<_>>();
+            match seen.entry(form) {
+                Entry::Occupied(entry) => {
+                    let span = constraints[ordered[0].1].use_site();
+                    for (var, first) in vars.iter().zip(entry.get()) {
+                        self.unify_same_effect(
+                            &EffType::single_variable(*var),
+                            span,
+                            &EffType::single_variable(*first),
+                            span,
+                        )?;
+                    }
+                    unified = true;
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(vars);
+                }
+            }
+        }
+        Ok(unified)
+    }
+
+    /// `constraint` with the effect variables of the classes in `names` replaced by their
+    /// names there.
+    fn rename_free_effects(
+        &mut self,
+        constraint: &PubTypeConstraint,
+        names: &FxHashMap<EffectVar, EffectVar>,
+    ) -> PubTypeConstraint {
+        struct Renaming<'a> {
+            effects: &'a mut EffectSolver,
+            names: &'a FxHashMap<EffectVar, EffectVar>,
+        }
+        impl TypeMapper for Renaming<'_> {
+            fn map_type(&mut self, ty: Type) -> Type {
+                ty
+            }
+
+            fn map_mut_type(&mut self, mut_ty: MutType) -> MutType {
+                mut_ty
+            }
+
+            fn map_effect_type(&mut self, eff_ty: &EffType) -> EffType {
+                let mut row = eff_ty.primitive_effects();
+                for var in eff_ty.inner_vars() {
+                    let root = self.effects.class_root(var);
+                    row.insert(Effect::Variable(*self.names.get(&root).unwrap_or(&var)));
+                }
+                row
+            }
+        }
+        constraint.map(&mut Renaming {
+            effects: &mut self.effects,
+            names,
+        })
     }
 
     /// Reconcile the supplied evidence after signature equalities are known and

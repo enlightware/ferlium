@@ -144,7 +144,7 @@ pub struct TypeInference {
     pub(super) given_constraints: Vec<PubTypeConstraint>,
     /// The type variables standing for generic parameters written by the enclosing declaration.
     pub(super) declared_generics: Vec<Type>,
-    /// For each function of a recursive group checked against contracts, the types its type
+    /// For each function of a recursive group inferred through contracts, the types its type
     /// quantifiers take in this body: the group keeps one type instance, only effects vary.
     group_type_instances: FxHashMap<FunctionId, Vec<Type>>,
     /// The functions of that group that this body uses.
