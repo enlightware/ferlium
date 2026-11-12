@@ -141,6 +141,21 @@ impl Drop for ConstraintOwnerScope<'_> {
     }
 }
 
+/// The variables of the signatures of the functions being inferred.
+#[derive(Default)]
+pub(crate) struct SignatureVariables {
+    pub(crate) types: FxHashSet<TypeVar>,
+    pub(crate) effects: FxHashSet<EffectVar>,
+}
+
+/// A variable that only requirements name, see
+/// [`UnifiedTypeInference::coalesce_requirement_copies`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum FreeVar {
+    Effect(EffectVar),
+    Type(TypeVar),
+}
+
 /// Canonical constraints and same-family indexes for one unification pass.
 /// The outputs of the equal trait applications of one constraint pass.
 struct HaveTraitOutputs {
@@ -231,9 +246,11 @@ impl UnifiedTypeInference {
     /// As [`Self::coalesce_constraint_outputs`], for the requirements that a function of a
     /// recursive group leaves to its callers: a copy of some of them is dropped.
     ///
-    /// An effect variable is free in the requirements if nothing else knows it: it has no
-    /// bound, is related to no other variable, is not a written generic and is not one of
-    /// `signature_effects`, the effect variables of the signatures. The requirements that
+    /// A variable is free in the requirements if nothing else knows it. An effect variable is
+    /// free if it has no bound, is related to no other variable, is not a written generic and
+    /// is not in a signature; a type variable, if nothing determines it yet, it has no bound
+    /// and it is not in a signature, as the output of a requirement that no implementation
+    /// solves yet. `signature` holds the variables of the signatures. The requirements that
     /// share free variables, directly or through others, stand together: a caller gives their
     /// evidence for one choice of these variables, which the signature does not show. So two
     /// such sets that are the same but for the names of their free variables ask the same of
@@ -245,52 +262,90 @@ impl UnifiedTypeInference {
     pub(crate) fn coalesce_requirement_copies(
         &mut self,
         constraints: &mut Vec<PubTypeConstraint>,
-        signature_effects: &FxHashSet<EffectVar>,
+        signature: &SignatureVariables,
         polarities: &dyn Fn(TraitId) -> Vec<EffectPolarity>,
     ) -> Result<(), InternalCompilationError> {
         self.effects.expand_deferred_inclusions()?;
         loop {
             self.substitute_in_constraints_in_place(constraints);
             self.deduplicate_constraints_in_place(constraints);
-            if !self.unify_requirement_copies(constraints, signature_effects)? {
+            if !self.unify_requirement_copies(constraints, signature)? {
                 break;
             }
         }
         self.coalesce_constraint_outputs(constraints, polarities)
     }
 
-    /// Makes equal the free effect variables of the sets of `constraints` that are copies of
-    /// one another, see [`Self::coalesce_requirement_copies`]. Returns whether any were.
+    /// Makes equal the free variables of the sets of `constraints` that are copies of one
+    /// another, see [`Self::coalesce_requirement_copies`]. Returns whether any were.
     fn unify_requirement_copies(
         &mut self,
         constraints: &[PubTypeConstraint],
-        signature_effects: &FxHashSet<EffectVar>,
+        signature: &SignatureVariables,
     ) -> Result<bool, InternalCompilationError> {
-        struct Rows(Vec<EffType>);
-        impl TypeInnerVisitor for Rows {
+        enum Place {
+            Row(EffType),
+            Type(TypeVar),
+        }
+        struct Places(Vec<Place>);
+        impl TypeInnerVisitor for Places {
+            fn visit_ty_kind_end(&mut self, ty: &TypeKind) {
+                if let Some(var) = ty.as_variable() {
+                    self.0.push(Place::Type(*var));
+                }
+            }
+
             fn visit_eff_ty(&mut self, eff_ty: &EffType) {
-                self.0.push(eff_ty.clone());
+                self.0.push(Place::Row(eff_ty.clone()));
             }
         }
-        // The free variables of each requirement, by their classes, in the order of their
-        // places.
+        let bounds = self
+            .bounds
+            .relations()
+            .flat_map(|bound| [bound.lower, bound.upper])
+            .collect::<Vec<_>>();
+        let mut bounded_types = FxHashSet::default();
+        for ty in bounds {
+            bounded_types.extend(self.substitute_in_type(ty).inner_ty_vars());
+        }
+        // The free variables of each requirement, in the order of their places: effect
+        // variables by their classes.
         let mut free = Vec::with_capacity(constraints.len());
         for constraint in constraints {
-            let mut rows = Rows(Vec::new());
-            constraint.visit(&mut rows);
+            let mut places = Places(Vec::new());
+            constraint.visit(&mut places);
             let mut vars = Vec::new();
-            for var in rows.0.iter().flat_map(EffType::inner_vars) {
-                if self.effects.is_undetermined(var, signature_effects) {
-                    let root = self.effects.class_root(var);
-                    if !vars.contains(&root) {
-                        vars.push(root);
+            for place in places.0 {
+                match place {
+                    Place::Row(row) => {
+                        for var in row.inner_vars() {
+                            if self.effects.is_undetermined(var, &signature.effects) {
+                                let var = FreeVar::Effect(self.effects.class_root(var));
+                                if !vars.contains(&var) {
+                                    vars.push(var);
+                                }
+                            }
+                        }
+                    }
+                    Place::Type(var) => {
+                        let ty = self.substitute_in_type(Type::variable(var));
+                        if ty != Type::variable(var)
+                            || signature.types.contains(&var)
+                            || bounded_types.contains(&var)
+                        {
+                            continue;
+                        }
+                        let var = FreeVar::Type(var);
+                        if !vars.contains(&var) {
+                            vars.push(var);
+                        }
                     }
                 }
             }
             free.push(vars);
         }
         // The sets of requirements that share free variables.
-        let mut set_of_var: FxHashMap<EffectVar, usize> = FxHashMap::default();
+        let mut set_of_var: FxHashMap<FreeVar, usize> = FxHashMap::default();
         let mut set_of: Vec<usize> = (0..constraints.len()).collect();
         fn find(set_of: &mut [usize], mut index: usize) -> usize {
             while set_of[index] != index {
@@ -324,19 +379,24 @@ impl UnifiedTypeInference {
         // Each set with its free variables numbered by their first place, its requirements
         // being in an order that does not depend on these variables. The numbers are beyond
         // the names of all variables.
-        let base = self.effects.var_count();
-        let mut seen: FxHashMap<Vec<PubTypeConstraint>, Vec<EffectVar>> = FxHashMap::default();
+        let effect_base = self.effects.var_count();
+        let type_base = self.ty_unification_table.len() as u32;
+        let name = |var: &FreeVar, number: u32| match var {
+            FreeVar::Effect(_) => FreeVar::Effect(EffectVar::new(effect_base + number)),
+            FreeVar::Type(_) => FreeVar::Type(TypeVar::new(type_base + number)),
+        };
+        let mut seen: FxHashMap<Vec<PubTypeConstraint>, Vec<FreeVar>> = FxHashMap::default();
         let mut unified = false;
         for members in sets.into_values() {
             let anonymous = members
                 .iter()
                 .flat_map(|index| &free[*index])
-                .map(|var| (*var, EffectVar::new(base)))
+                .map(|var| (*var, name(var, 0)))
                 .collect();
             let mut ordered = Vec::with_capacity(members.len());
             for index in members {
                 let mut hasher = FxHasher::default();
-                self.rename_free_effects(&constraints[index], &anonymous)
+                self.rename_free_variables(&constraints[index], &anonymous)
                     .hash(&mut hasher);
                 ordered.push((hasher.finish(), index));
             }
@@ -352,22 +412,35 @@ impl UnifiedTypeInference {
             let numbered = vars
                 .iter()
                 .enumerate()
-                .map(|(number, var)| (*var, EffectVar::new(base + number as u32)))
+                .map(|(number, var)| (*var, name(var, number as u32)))
                 .collect();
             let form = ordered
                 .iter()
-                .map(|(_, index)| self.rename_free_effects(&constraints[*index], &numbered))
+                .map(|(_, index)| self.rename_free_variables(&constraints[*index], &numbered))
                 .collect::<Vec<_>>();
             match seen.entry(form) {
                 Entry::Occupied(entry) => {
                     let span = constraints[ordered[0].1].use_site();
                     for (var, first) in vars.iter().zip(entry.get()) {
-                        self.unify_same_effect(
-                            &EffType::single_variable(*var),
-                            span,
-                            &EffType::single_variable(*first),
-                            span,
-                        )?;
+                        match (var, first) {
+                            (FreeVar::Effect(var), FreeVar::Effect(first)) => {
+                                self.unify_same_effect(
+                                    &EffType::single_variable(*var),
+                                    span,
+                                    &EffType::single_variable(*first),
+                                    span,
+                                )?;
+                            }
+                            (FreeVar::Type(var), FreeVar::Type(first)) => {
+                                self.unify_same_type(
+                                    Type::variable(*var),
+                                    span,
+                                    Type::variable(*first),
+                                    span,
+                                )?;
+                            }
+                            _ => unreachable!("equal forms have free variables of equal kinds"),
+                        }
                     }
                     unified = true;
                 }
@@ -379,20 +452,24 @@ impl UnifiedTypeInference {
         Ok(unified)
     }
 
-    /// `constraint` with the effect variables of the classes in `names` replaced by their
-    /// names there.
-    fn rename_free_effects(
+    /// `constraint` with the free variables in `names` replaced by their names there: effect
+    /// variables are looked up by their classes.
+    fn rename_free_variables(
         &mut self,
         constraint: &PubTypeConstraint,
-        names: &FxHashMap<EffectVar, EffectVar>,
+        names: &FxHashMap<FreeVar, FreeVar>,
     ) -> PubTypeConstraint {
         struct Renaming<'a> {
             effects: &'a mut EffectSolver,
-            names: &'a FxHashMap<EffectVar, EffectVar>,
+            names: &'a FxHashMap<FreeVar, FreeVar>,
         }
         impl TypeMapper for Renaming<'_> {
             fn map_type(&mut self, ty: Type) -> Type {
-                ty
+                let var = ty.data().as_variable().copied();
+                match var.and_then(|var| self.names.get(&FreeVar::Type(var))) {
+                    Some(FreeVar::Type(name)) => Type::variable(*name),
+                    _ => ty,
+                }
             }
 
             fn map_mut_type(&mut self, mut_ty: MutType) -> MutType {
@@ -402,8 +479,11 @@ impl UnifiedTypeInference {
             fn map_effect_type(&mut self, eff_ty: &EffType) -> EffType {
                 let mut row = eff_ty.primitive_effects();
                 for var in eff_ty.inner_vars() {
-                    let root = self.effects.class_root(var);
-                    row.insert(Effect::Variable(*self.names.get(&root).unwrap_or(&var)));
+                    let root = FreeVar::Effect(self.effects.class_root(var));
+                    row.insert(Effect::Variable(match self.names.get(&root) {
+                        Some(FreeVar::Effect(name)) => *name,
+                        _ => var,
+                    }));
                 }
                 row
             }

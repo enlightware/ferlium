@@ -247,7 +247,7 @@ joins the effects of `h` only if its body performs it. The signature of a trait 
 also when the method has a default body: an effect left unwritten there is the empty one, as it
 is in a type definition.
 
-A recursive group with declared effect variables behaves, for effects, as its unrolling: each
+A recursive group of functions behaves, for effects, as its unrolling: each
 function calling copies of the others, down to functions that call nothing. Joint inference of
 the group, in which effects are not related at all, first gives the types of each signature and
 the places of the effects left to infer; effects do not decide types, so nothing is lost. Each
@@ -261,11 +261,11 @@ call in the group instantiates its callee's contract, for effects only; types ke
 per group.
 
 The requirements that a body leaves to its callers would grow at each round, each copy of a
-function bringing those of the copies it calls with effect variables of its own. So a set of
-requirements that is a copy of another, but for the names of effect variables that nothing else
-knows, is dropped. Such variables have no bound and are in no signature, and the requirements
-that share them are compared together, as a caller gives their evidence for one choice of these
-variables.
+function bringing those of the copies it calls with variables of its own. So a set of
+requirements that is a copy of another, but for the names of variables that nothing else knows,
+is dropped. Such variables, of effects or of types, have no bound and are in no signature, and
+the requirements that share them are compared together, as a caller gives their evidence for one
+choice of these variables.
 
 ### Solving
 

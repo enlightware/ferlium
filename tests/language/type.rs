@@ -1417,12 +1417,15 @@ fn types_of_signatures_are_not_defaulted() {
             "{group}"
         );
     }
-    // A variable of a sibling's signature is not defaulted in a body that uses it.
+    // A type that nothing determines at a call to a sibling is `never`, as at a call outside
+    // the group.
     let f = "fn f(n: int) -> int { if n > 0 { g(|z| 0, n - 1) } else { 0 } }\n";
     let g = "fn g(h, n: int) -> int { if n > 0 { f(n - 1) } else { 0 } }\n";
     for group in [format!("{f}{g}"), format!("{g}{f}")] {
-        TestSession::new()
-            .fail_compilation(&format!("{group}f(2)"))
-            .expect_unbound_ty_var();
+        assert_val_eq!(
+            TestSession::new().run(&format!("{group}f(2)")),
+            int(0),
+            "{group}"
+        );
     }
 }

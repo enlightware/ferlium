@@ -1498,7 +1498,7 @@ fn concrete_effect_through_an_unannotated_helper_leaves_the_helper_generic() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn group_without_written_generics_lets_inference_choose_the_effect() {
+fn group_without_written_generics_infers_them() {
     let f = "fn f(g, n: int) -> int {
         let a = [1];
         if n > 0 {
@@ -1515,11 +1515,15 @@ fn group_without_written_generics_lets_inference_choose_the_effect() {
         }
     }";
     assert_in_both_orders("", [f, h], "f(|| 1, 2)", 1);
-    assert_signature_in_both_orders(
-        [f, h],
-        "f",
-        "fn f(g: () -> int ! fallible, n: int) -> int ! fallible",
-    );
+    // `h` gets `|| a[0]` from `f` once, but the callback of `f` can be any, as if its effect
+    // were written.
+    for name in ["f", "h"] {
+        assert_signature_in_both_orders(
+            [f, h],
+            name,
+            &format!("fn {name}<! e₀>(g: () -> int ! e₀, n: int) -> int ! (fallible, e₀)"),
+        );
+    }
 }
 
 #[test]
@@ -2060,20 +2064,66 @@ fn the_contracts_of_a_group_do_not_grow_with_its_unrolling() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn a_group_whose_requirements_keep_growing_is_rejected() {
-    // Each use of `f` as a value needs `Conv` for its type, with an effect and a result type
-    // of its own. A copy that also differs by a type is not recognized, so the contract of `f`
-    // grows at each round, until the bound on rounds.
-    TestSession::new()
-        .fail_compilation(
-            "trait Conv<Self |-> O> { fn conv(x: Self) -> O; }
-fn f<! E>(a, g: () -> int ! E) -> int {
-    let u = conv(f);
-    g()
+fn a_group_without_a_finite_contract_is_rejected() {
+    // `step` gives a callback whose effect is the output of `Tr` for the effect of the one it
+    // gets, and `f` passes it to itself: unrolled, `f` needs `Tr` at the effect of `g`, at the
+    // output of that, and so on without end. Its contract grows until the bound on rounds.
+    let prelude = "struct Pair<A, B>(A, B)
+trait Tr<Self |-> ! Out> {
+    fn tr(x: Self) -> int ! Out;
 }
-0",
-        )
+impl<! E> Tr for <Self = Pair<int, (() -> int ! E)> |-> ! Out = E> {
+    fn tr(x: Pair<int, (() -> int ! E)>) -> int { (x.1)() }
+}
+fn step<T, ! E, O>(x: T, g: () -> int ! E) -> (() -> int ! O)
+where Pair<T, (() -> int ! E)>: Tr<! Out = O> {
+    || tr(Pair(x, g))
+}";
+    let body = "{
+    if n == 0 {
+        0
+    } else {
+        f(x, step(x, g), n - 1)
+    }
+}";
+    TestSession::new()
+        .fail_compilation(&format!(
+            "{prelude}\nfn f<T>(x: T, g, n: int) -> int {body}\nf(3, || 1, 2)"
+        ))
         .expect_recursive_group_body_does_not_fit("f");
+    // The requirement written with its output equal to its input is a finite contract.
+    assert_val_eq!(
+        TestSession::new().run(&format!(
+            "{prelude}
+fn f<T, ! E>(x: T, g: () -> int ! E, n: int) -> int
+where Pair<T, (() -> int ! E)>: Tr<! Out = E> {body}
+f(3, || 1, 2)"
+        )),
+        int(0)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn copies_of_requirements_can_differ_by_an_output_type() {
+    // Each use of `f` as a value needs `Conv` for its type, with an effect and an output type
+    // of its own: these requirements are copies of one another.
+    let conv = "struct Wrap<T>(T)
+trait Conv<Self |-> O> { fn conv(x: Self) -> O; }
+impl<! E, F> Conv for <Self = Wrap<((int, () -> int ! E) -> int ! F)> |-> O = int> {
+    fn conv(x: Wrap<((int, () -> int ! E) -> int ! F)>) -> int { 0 }
+}";
+    let f = "fn f<T>(a: T, g: () -> int) -> int {
+    let u = conv(Wrap(f));
+    g()
+}";
+    for src in [format!("{conv}\n{f}"), format!("{f}\n{conv}")] {
+        assert_val_eq!(
+            TestSession::new().run(&format!("{src}\nf(0, || 7)")),
+            int(7),
+            "{src}"
+        );
+    }
 }
 
 #[test]

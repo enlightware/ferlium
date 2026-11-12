@@ -65,7 +65,7 @@ use crate::{
             expr::{AnnotationTypeMapper, TypeInference},
             signature::check_declared_signature,
             substitution::InstSubst,
-            unify::UnifiedTypeInference,
+            unify::{SignatureVariables, UnifiedTypeInference},
         },
         type_like::{TypeLike, instantiate_types_in_place},
         type_mapper::{BitmapInstantiationMapper, TypeMapper},
@@ -576,7 +576,7 @@ fn with_unwritten_requirement_effects<'a>(
     subst
 }
 
-/// The fixed signature of a function of a recursive group with written effect generics.
+/// The fixed signature of a function of a recursive group of functions.
 #[derive(Debug, Clone)]
 pub(super) struct GroupContract {
     scheme: TypeScheme<FnType>,
@@ -667,6 +667,9 @@ pub(super) struct GroupCallees<'a> {
 
 /// How [`emit_functions`] treats a group.
 pub(super) enum GroupMode<'a> {
+    /// Infer the group jointly and emit it: a function that is not recursive, the methods of
+    /// an implementation, or a recursive group with a default method of a trait or a member of
+    /// a subscript.
     Normal,
     /// Infer jointly for types alone, effects being ignored, and only produce the shapes.
     Discover,
@@ -1230,16 +1233,10 @@ fn fit_declared_signature(
     Ok(constraints.into_iter().unique().collect())
 }
 
-/// Whether a group gets contracts: it is recursive and writes an effect generic.
-fn group_needs_contracts<'a, I: Iterator<Item = EmitFunctionInput<'a>>>(inputs: I) -> bool {
-    let mut any = false;
-    for input in inputs {
-        if input.trait_default.is_some() || input.subscript.is_some() {
-            return false;
-        }
-        any |= !input.function.generic_params.effect_params().is_empty();
-    }
-    any
+/// Whether a recursive group gets contracts: it holds functions alone, neither a default method
+/// of a trait, whose signature is declared, nor a member of a subscript.
+fn group_gets_contracts<'a, I: Iterator<Item = EmitFunctionInput<'a>>>(mut inputs: I) -> bool {
+    inputs.all(|input| input.trait_default.is_none() && input.subscript.is_none())
 }
 
 /// The public form of the requirements `constraints` of function `id`: those that name
@@ -1315,7 +1312,7 @@ where
     I: Iterator<Item = EmitFunctionInput<'a>>,
     F: Fn() -> I,
 {
-    if recursive_function_names.is_empty() || !group_needs_contracts(ast_functions()) {
+    if recursive_function_names.is_empty() || !group_gets_contracts(ast_functions()) {
         emit_functions(
             output,
             solver_arena,
@@ -3260,16 +3257,23 @@ where
         };
         if mode.alone().is_some() {
             // A body of a group that gets contracts: a copy of some of its requirements, with
-            // effects of its own that nothing else knows, is dropped, which effects must learn
-            // before they are settled. The effects of the signature are known to callers.
+            // variables of its own that nothing else knows, is dropped, which effects must
+            // learn before they are settled. The variables of the signature are known to
+            // callers.
             let env = ModuleEnv::new(output, others);
             let mut applications = requirements(&mut ty_inf);
-            let mut signature_effects = FxHashSet::default();
-            for id in &local_fns {
+            let mut signature = SignatureVariables::default();
+            for (id, explicit_root_tys) in local_fns.iter().zip(&function_explicit_root_tys) {
                 let fn_ty = &output.functions[id.as_index()].definition.ty_scheme.ty;
-                signature_effects.extend(ty_inf.substitute_in_fn_type(fn_ty).inner_effect_vars());
+                let fn_ty = ty_inf.substitute_in_fn_type(fn_ty);
+                signature.effects.extend(fn_ty.inner_effect_vars());
+                signature.types.extend(fn_ty.inner_ty_vars());
+                for ty in explicit_root_tys {
+                    let ty = ty_inf.substitute_in_type(*ty);
+                    signature.types.extend(ty.inner_ty_vars());
+                }
             }
-            ty_inf.coalesce_requirement_copies(&mut applications, &signature_effects, &|id| {
+            ty_inf.coalesce_requirement_copies(&mut applications, &signature, &|id| {
                 trait_output_effect_polarities(id, &|id| env.trait_def(id))
             })?;
         }
