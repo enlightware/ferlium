@@ -1044,10 +1044,15 @@ fn emit_module_contents(
                     got_span: for_trait.span,
                 }));
             }
+            // A stub is the contract of the impl, published before its bodies are checked. An
+            // output that the header leaves unwritten is inferred from the methods, so such an
+            // impl has no contract yet.
             if output_tys.is_empty() && trait_def.output_type_count() != 0 {
                 continue;
             }
-            let output_effs = trait_def.impl_output_effs_or_pure_defaults(output_effs);
+            if output_effs.is_empty() && trait_def.output_effect_count() != 0 {
+                continue;
+            }
             check_trait_impl(
                 output,
                 others,

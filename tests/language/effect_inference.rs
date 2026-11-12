@@ -529,6 +529,36 @@ fn impl_method_callback_parameter_without_effects_compiles() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_unwritten_output_effect_of_a_concrete_impl_is_inferred_from_its_methods() {
+    // An impl is announced before its methods are checked only if its header is complete: an
+    // output effect that the header leaves unwritten is what the methods perform, also for a
+    // function written before the impl.
+    let function = "fn first() -> int { run(3) + run(\"ab\") }\n";
+    let impls = indoc! { r#"
+        trait Run<Self |-> ! E> { fn run(x: Self) -> int ! E; }
+        impl Run for int {
+            fn run(x) { idiv(6, x) }
+        }
+        impl Run for string {
+            fn run(x) { string_len(x) }
+        }
+        fn pure_only(f: () -> int ! ()) -> int { f() }
+    "# };
+    for declarations in [format!("{impls}{function}"), format!("{function}{impls}")] {
+        let mut session = TestSession::new();
+        assert_val_eq!(session.run(&format!("{declarations}first()")), int(4));
+        assert_val_eq!(
+            session.run(&format!("{declarations}pure_only(|| run(\"abc\"))")),
+            int(3)
+        );
+        TestSession::new()
+            .fail_compilation(&format!("{declarations}pure_only(first)"))
+            .expect_invalid_effect_inclusion(effect(PrimitiveEffect::Fallible), no_effects());
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn mutable_argument_types_are_invariant_in_nested_function_types() {
     let mut session = TestSession::new();
     session.fail_compilation(indoc! { r#"

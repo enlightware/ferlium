@@ -259,6 +259,10 @@ joins the effects of `h` only if its body performs it. The signature of a trait 
 also when the method has a default body: an effect left unwritten there is the empty one, as it
 is in a type definition.
 
+An output effect that the header of an implementation leaves unwritten is inferred from its
+methods, as an output type is. An implementation is announced before its methods are checked,
+so that the module can use it in any order, only if its header writes all its outputs.
+
 A recursive group of functions behaves, for effects, as its unrolling: each
 function calling copies of the others, down to functions that call nothing. Types keep one
 instance per group; effects are instantiated at each reference to a function of the group.
