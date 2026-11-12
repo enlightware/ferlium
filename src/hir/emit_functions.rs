@@ -65,7 +65,7 @@ use crate::{
             expr::{AnnotationTypeMapper, TypeInference},
             signature::check_declared_signature,
             substitution::InstSubst,
-            unify::{SignatureVariables, UnifiedTypeInference},
+            unify::UnifiedTypeInference,
         },
         type_like::{TypeLike, instantiate_types_in_place},
         type_mapper::{BitmapInstantiationMapper, TypeMapper},
@@ -3255,29 +3255,6 @@ where
             applications.extend(ty_inf.remaining_constraints().iter().cloned());
             applications
         };
-        if mode.alone().is_some() {
-            // A body of a group that gets contracts: a copy of some of its requirements, with
-            // variables of its own that nothing else knows, is dropped, which effects must
-            // learn before they are settled. The variables of the signature are known to
-            // callers.
-            let env = ModuleEnv::new(output, others);
-            let mut applications = requirements(&mut ty_inf);
-            let mut signature = SignatureVariables::default();
-            for (id, explicit_root_tys) in local_fns.iter().zip(&function_explicit_root_tys) {
-                let fn_ty = &output.functions[id.as_index()].definition.ty_scheme.ty;
-                let fn_ty = ty_inf.substitute_in_fn_type(fn_ty);
-                signature.effects.extend(fn_ty.inner_effect_vars());
-                signature.types.extend(fn_ty.inner_ty_vars());
-                for ty in explicit_root_tys {
-                    let ty = ty_inf.substitute_in_type(*ty);
-                    signature.types.extend(ty.inner_ty_vars());
-                }
-            }
-            ty_inf.coalesce_requirement_copies(&mut applications, &signature, &|id| {
-                trait_output_effect_polarities(id, &|id| env.trait_def(id))
-            })?;
-        }
-
         minimize_body_effects(output, &local_fns, FxHashSet::default(), &mut ty_inf)?;
         ty_inf.finalize_effects()?;
 

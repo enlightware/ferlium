@@ -260,12 +260,11 @@ body counts only once the contracts have settled, as a contract may not say enou
 call in the group instantiates its callee's contract, for effects only; types keep one instance
 per group.
 
-The requirements that a body leaves to its callers would grow at each round, each copy of a
-function bringing those of the copies it calls with variables of its own. So a set of
-requirements that is a copy of another, but for the names of variables that nothing else knows,
-is dropped. Such variables, of effects or of types, have no bound and are in no signature, and
-the requirements that share them are compared together, as a caller gives their evidence for one
-choice of these variables.
+Each copy of a function brings the requirements of the copies it calls. An effect that only
+inputs of such a requirement name is ambiguous and takes its least solution (see
+[publication](#publication)), so copies that differ only by such effects are one requirement at
+each round. This does not make every group settle: outputs that requirements determine from one
+another can still grow at each round.
 
 ### Solving
 
@@ -304,12 +303,21 @@ constraints. The solution is encoded by substitution, using three documented app
 
 Variables occurring only in effects that the published type performs, never in effects it
 receives, take their least solution, as do the variables of a body that its type cannot observe.
-What is observable depends on what is published: a function's signature and the constraints over
-its type variables; an implementation method's head, as the method is quantified over it alone; a
-top-level expression's type, as it is not generalized. Derived implementations take the effects of
+What is observable depends on what is published: a function's signature and the effects that its
+requirements determine; an implementation method's head, as the method is quantified over it alone;
+a top-level expression's type, as it is not generalized. Derived implementations take the effects of
 the callables in their input types at their least solution, as no derived method calls them.
 Every retained constraint is then checked against the published rows; this validation makes each
 published signature sound.
+
+A requirement determines its outputs when its inputs are determined, as the types of a caller then
+give them; the effect variables of the signature are determined to begin with. A variable that is
+not determined, that an input of a requirement names and that no requirement gives, is ambiguous:
+no call says what it is. Written as a generic, it is an error where the function is defined;
+inferred, it takes its least solution, after which the outputs of its requirement are determined in
+turn. Requirements whose inputs are only given by the outputs of one another, in a circle, determine
+none of these effects, which are all ambiguous. This default is a choice of the language, as the one
+for numbers is: a caller whose implementation needs more for that effect is refused.
 
 ### Design choices
 

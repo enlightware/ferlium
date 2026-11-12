@@ -1046,6 +1046,11 @@ pub enum CompilationErrorImpl<S: Scope> {
         second: Ustr,
         span: Location,
     },
+    /// A written effect generic that neither the signature nor the requirements determine.
+    AmbiguousEffectGeneric {
+        name: Ustr,
+        span: Location,
+    },
     /// A body of a recursive group does not fit the signature inferred for it.
     RecursiveGroupBodyDoesNotFit {
         function: Ustr,
@@ -1668,6 +1673,13 @@ impl FormatWith<SourceTable> for CompilationError {
                 write!(
                     f,
                     "Effect variables `{first}` and `{second}` are combined in {}, but an effect set holds at most one effect variable: use a single effect parameter for both",
+                    fmt_span(span)
+                )
+            }
+            AmbiguousEffectGeneric { name, span } => {
+                write!(
+                    f,
+                    "Effect generic `{name}` in {} is not determined by the signature of the function or by its requirements; connect it to a parameter or to the result, directly or through outputs of traits",
                     fmt_span(span)
                 )
             }
@@ -2628,6 +2640,9 @@ impl CompilationError {
                 second,
                 span
             }),
+            AmbiguousEffectGeneric { name, span } => {
+                compilation_error!(AmbiguousEffectGeneric { name, span })
+            }
             RecursiveGroupBodyDoesNotFit { function, span } => {
                 compilation_error!(RecursiveGroupBodyDoesNotFit { function, span })
             }

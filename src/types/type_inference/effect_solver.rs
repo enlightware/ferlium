@@ -726,26 +726,16 @@ impl EffectSolver {
         self.table.find(var)
     }
 
-    /// Whether nothing determines `var`: it is solvable, has no bound, is related to no other
-    /// variable, and is equal to none of `observable`. Deferred inclusions must be expanded.
-    pub(super) fn is_undetermined(
-        &mut self,
-        var: EffectVar,
-        observable: &FxHashSet<EffectVar>,
-    ) -> bool {
-        self.ensure_var(var);
-        let root = self.table.find(var);
-        let class = self.class(root);
-        !class.rigid
-            && class.alias.is_none()
-            && class.lower.is_empty()
-            && class.ceiling.is_none()
-            && class.successors.is_empty()
-            && class.predecessors.is_empty()
-            && observable.iter().all(|other| {
-                self.ensure_var(*other);
-                self.table.find(*other) != root
-            })
+    /// The written name of `var`, if it is a declared variable that has one.
+    pub(super) fn rigid_name(&mut self, var: EffectVar) -> Option<Ustr> {
+        if !self.is_rigid(var) {
+            return None;
+        }
+        let root = self.class_root(var);
+        self.rigid_names
+            .get(&var)
+            .or_else(|| self.rigid_names.get(&root))
+            .copied()
     }
 
     /// The names of two declared variables that `row` combines, if any.

@@ -92,6 +92,17 @@ impl CompilationError {
         }
     }
 
+    pub fn expect_ambiguous_effect_generic(&self, expected_name: &str) {
+        match self.deref() {
+            CompilationErrorImpl::AmbiguousEffectGeneric { name, .. } => {
+                assert_eq!(name.as_str(), expected_name);
+            }
+            _ => panic!(
+                "expect_ambiguous_effect_generic called on non-AmbiguousEffectGeneric error {self:?}"
+            ),
+        }
+    }
+
     pub fn expect_recursive_group_body_does_not_fit(&self, expected_function: &str) {
         match self.deref() {
             CompilationErrorImpl::RecursiveGroupBodyDoesNotFit { function, .. } => {

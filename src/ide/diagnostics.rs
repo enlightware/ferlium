@@ -186,6 +186,12 @@ pub(super) fn compilation_error_to_data(
             span,
             format!("Cannot find effect `{name}` in this scope"),
         )],
+        AmbiguousEffectGeneric { name, span } => vec![error_data_from_location(
+            span,
+            format!(
+                "Effect generic `{name}` is not determined by the signature of the function or by its requirements; connect it to a parameter or to the result, directly or through outputs of traits"
+            ),
+        )],
         RecursiveGroupBodyDoesNotFit { function, span } => vec![error_data_from_location(
             span,
             format!(

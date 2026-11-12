@@ -2046,9 +2046,10 @@ fn a_type_that_only_requirements_of_a_group_name_is_not_the_body_to_choose() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn the_contracts_of_a_group_do_not_grow_with_its_unrolling() {
-    // Each use of `f` as a value needs `Num` for its type, with an effect of its own that
-    // nothing else knows: these requirements are copies of one another, and one is enough.
-    // Taken apart, each copy of `f` would bring those of the copies that it uses, without end.
+    // Each use of `f` as a value needs `Num` for its type, at an effect that nothing
+    // determines: it takes its least solution, so these requirements are one. With an effect
+    // of its own for each, every copy of `f` would bring those of the copies that it uses,
+    // without end.
     for src in [
         "fn f<! E>(a) { f + 0 == f + 0 }",
         "fn f<! E>(a) { f + 0 == h + 0 }\nfn h(a) { f == f + f }",
@@ -2105,9 +2106,10 @@ f(3, || 1, 2)"
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn copies_of_requirements_can_differ_by_an_output_type() {
-    // Each use of `f` as a value needs `Conv` for its type, with an effect and an output type
-    // of its own: these requirements are copies of one another.
+fn an_effect_that_only_an_inferred_requirement_names_takes_its_least_solution() {
+    // Each use of `f` as a value needs `Conv` for its type, at effects that nothing
+    // determines: they are pure, and the requirement is one however many times `f` is
+    // unrolled.
     let conv = "struct Wrap<T>(T)
 trait Conv<Self |-> O> { fn conv(x: Self) -> O; }
 impl<! E, F> Conv for <Self = Wrap<((int, () -> int ! E) -> int ! F)> |-> O = int> {
@@ -2121,6 +2123,12 @@ impl<! E, F> Conv for <Self = Wrap<((int, () -> int ! E) -> int ! F)> |-> O = in
         assert_val_eq!(
             TestSession::new().run(&format!("{src}\nf(0, || 7)")),
             int(7),
+            "{src}"
+        );
+        assert_eq!(
+            signature(&mut TestSession::new(), &src, "f"),
+            "fn f<T, B ! e₀>(a: T, g: () -> int ! e₀) -> int ! e₀ \
+             where B: Value, Wrap<(T, () -> int) -> int>: Conv <O = B>",
             "{src}"
         );
     }
@@ -2220,56 +2228,59 @@ impl Second for <Self = int |-> ! E = (fallible)> {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn the_requirements_of_a_group_that_share_an_effect_stand_together() {
-    // `one` and `two` each need `Select` and another trait for a type with one effect, which
-    // the implementation of that other trait determines for the caller's `T`: pure for `one`,
-    // fallible for `two`. The two `Select` requirements of `f` are not copies of one another.
+fn an_effect_generic_that_no_call_determines_is_ambiguous() {
     let prelude = "struct Pair<A, B>(A, B)
 trait Select<Self> {}
 impl<! E> Select for Pair<int, (() -> int ! E)> {}
 trait Run<Self |-> ! E> {
     fn run(x: Self) -> int ! E;
 }
-trait Accept<Self |-> ! E> {
-    fn accept(x: Self, g: () -> int ! E) -> int;
-}
 impl Run for <Self = int |-> ! E = (fallible)> {
     fn run(x: int) -> int { idiv(4, x) }
-}
-impl Accept for <Self = int |-> ! E = ()> {
-    fn accept(x: int, g: () -> int ! ()) -> int { x }
-}
-trait NeedPure<Self> {}
-impl<T, ! E> NeedPure for Pair<T, (() -> int ! E)>
-where T: Accept<! E = E> {}
-trait NeedFall<Self> {}
-impl<T, ! E> NeedFall for Pair<T, (() -> int ! E)>
-where T: Run<! E = E> {}
+}";
+    // No parameter of `one` has the effect `E`, and no output of a trait gives it: no call
+    // says what it is.
+    TestSession::new()
+        .fail_compilation(&format!(
+            "{prelude}
 fn one<T, ! E>(x: T) -> int
-where Pair<T, (() -> int ! E)>: Select,
-      Pair<T, (() -> int ! E)>: NeedPure { 3 }
+where Pair<T, (() -> int ! E)>: Select {{ 3 }}
+one(3)"
+        ))
+        .expect_ambiguous_effect_generic("E");
+    // An output of a trait is determined by the types of the caller, and so is what its
+    // effect is an input of.
+    assert_val_eq!(
+        TestSession::new().run(&format!(
+            "{prelude}
 fn two<T, ! E>(x: T) -> int
-where Pair<T, (() -> int ! E)>: Select,
-      Pair<T, (() -> int ! E)>: NeedFall { 3 }";
-    let header = "fn f<T, ! Unused>(x: T, n: int) -> int";
-    for sum in ["one(x) + two(x)", "two(x) + one(x)"] {
-        let alone = format!("{header} {{\n    {sum}\n}}");
-        let recursive = format!(
-            "{header} {{
-    if n == 0 {{
-        {sum}
-    }} else {{
-        f(x, n - 1)
-    }}
-}}"
-        );
-        for function in [alone, recursive] {
-            assert_val_eq!(
-                TestSession::new().run(&format!("{prelude}\n{function}\nf(3, 1)")),
-                int(6),
-                "{function}"
-            );
-        }
+where T: Run<! E = E>, Pair<T, (() -> int ! E)>: Select {{ 3 }}
+two(3)"
+        )),
+        int(3)
+    );
+    // Outputs that only give the inputs of one another, in a circle, determine nothing.
+    // The first requirement written is the one reported.
+    for (requirements, name) in [
+        (
+            "Pair<T, (() -> int ! E)>: R<! O = F>, Pair<T, (() -> int ! F)>: S<! O = E>",
+            "E",
+        ),
+        (
+            "Pair<T, (() -> int ! F)>: S<! O = E>, Pair<T, (() -> int ! E)>: R<! O = F>",
+            "F",
+        ),
+    ] {
+        TestSession::new()
+            .fail_compilation(&format!(
+                "struct Pair<A, B>(A, B)
+trait R<Self |-> ! O> {{}}
+trait S<Self |-> ! O> {{}}
+fn f<T, ! E, F>(x: T) -> int
+where {requirements} {{ 7 }}
+0"
+            ))
+            .expect_ambiguous_effect_generic(name);
     }
 }
 
