@@ -180,7 +180,7 @@ GenericParams {
 }
 
 genericParamList {
-    Identifier (',' Identifier)* '!' Identifier (',' Identifier)*
+    Identifier (',' Identifier)* ','? '!' Identifier (',' Identifier)*
     | Identifier (',' Identifier)*
     | '!' Identifier (',' Identifier)*
 }
