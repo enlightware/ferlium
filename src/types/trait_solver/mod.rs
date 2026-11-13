@@ -41,7 +41,7 @@ use crate::{
     },
     std::{
         STD_MODULE_ID,
-        core_traits_names::TRIVIAL_COPY_TRAIT_NAME,
+        core_traits_names::{REPR_TRAIT_NAME, TRIVIAL_COPY_TRAIT_NAME},
         value::{
             TypeLayoutEnv, is_compiler_provided_value_trait_application, value_layout_for_type,
         },
@@ -359,6 +359,12 @@ fn trait_def_from_parts<'a>(
         .trait_def(id)
 }
 
+/// Whether `id` is the trait of the representation of a type. A match asks it of each trait
+/// that an implementation requires, so it does not search the trait by its name.
+fn is_repr_trait(current: CurrentTypeItems<'_>, others: &Modules, id: TraitId) -> bool {
+    id.module == STD_MODULE_ID && trait_def_from_parts(current, others, id).name == REPR_TRAIT_NAME
+}
+
 fn is_compiler_provided_no_output_trait_application(
     trait_id: TraitId,
     trait_def: &Trait,
@@ -418,6 +424,19 @@ impl<'a> TraitSolver<'a> {
         } else {
             Some(ty)
         })
+    }
+
+    /// As [`Self::repr_of_head`] for an application of `trait_id`, nothing if it is not `Repr`.
+    pub(crate) fn repr_of_head_for(
+        &self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        access_span: Location,
+    ) -> Result<Option<Type>, InternalCompilationError> {
+        if !is_repr_trait(self.current_type_items, self.others, trait_id) {
+            return Ok(None);
+        }
+        self.repr_of_head(input_tys[0], access_span)
     }
 
     pub fn trait_def(&self, id: TraitId) -> &Trait {

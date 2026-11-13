@@ -77,6 +77,9 @@ partly unknown, as a function of an argument to be inferred, does not stand for 
 This also holds while a function is inferred, when the only impl that can apply does so whatever
 its generics are: its output is then known in the function up to these generics, though the
 requirement stays for the caller.
+The representation of a type is told by its head alone, whatever its arguments are, in a match as
+in a body: an impl that reads through a type, or an element of a tuple, applies to that type with a
+generic inside.
 
 The access bodies of a subscript are bodies of one signature, so they are inferred together, also
 when neither names the other, and are published with the same types and requirements. They differ
@@ -101,9 +104,10 @@ Independent variables remain generic, including those occurring only in a functi
 outputs supplied by public prerequisites. A uniformly selected impl may determine its own outputs;
 these substitutions also reach the impl head and bodies. A cycle of output dependencies alone does
 not establish determination.
-What a selected impl requires of a field, an element or a variant of a private type is answered
-there by the type, as a use in a body is, and leaves only what that access takes, such as the
-layout of a generic member.
+What a selected impl requires of the structure of a type whose head is known, its representation,
+a field, an element or a variant, is answered there by the type, as a use in a body is, whether
+the type is private or not, and leaves only what that access takes, such as the layout of a
+generic member.
 
 The compiler records these choices and elaboration replays them without selecting impls again.
 The defining body constructs private dictionaries from the public evidence its caller supplies.

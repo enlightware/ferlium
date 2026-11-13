@@ -22,7 +22,7 @@ use crate::{
 use super::{
     CurrentProjectionSubscriptTypes, TraitSolver,
     improvement::{TraitImprovementKey, TraitImprovementMatch},
-    is_compiler_provided_no_output_trait_application,
+    is_compiler_provided_no_output_trait_application, is_repr_trait,
 };
 
 /// Scratch overlay for running trait-solver queries without mutating a real module.
@@ -44,6 +44,15 @@ pub(super) struct NeverProbe;
 
 impl TraitOutputQuery for NeverProbe {
     fn output_effect_polarities_query(&mut self, _trait_id: TraitId) -> Vec<EffectPolarity> {
+        unreachable!("concrete candidate matching never queries nested trait outputs")
+    }
+
+    fn repr_of_head_query(
+        &mut self,
+        _trait_id: TraitId,
+        _input_tys: &[Type],
+        _fn_span: Location,
+    ) -> Result<Option<Type>, InternalCompilationError> {
         unreachable!("concrete candidate matching never queries nested trait outputs")
     }
 
@@ -151,6 +160,15 @@ pub(super) trait TraitOutputQuery {
     /// The polarity of each output effect of `trait_id`.
     fn output_effect_polarities_query(&mut self, trait_id: TraitId) -> Vec<EffectPolarity>;
 
+    /// The output of `Repr` for `input_tys` if `trait_id` is `Repr` and the head of its input
+    /// tells it; see [`TraitSolver::repr_of_head`].
+    fn repr_of_head_query(
+        &mut self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        fn_span: Location,
+    ) -> Result<Option<Type>, InternalCompilationError>;
+
     /// Attempt to improve a trait application. `output_tys` and `output_effs`
     /// are `None` only for solver queries that intentionally ask for outputs
     /// from inputs alone; stored `HaveTrait` constraints pass full-arity lists.
@@ -195,6 +213,15 @@ impl<'solver, 'a> LazyTraitSolverProbe<'solver, 'a> {
 impl TraitOutputQuery for LazyTraitSolverProbe<'_, '_> {
     fn output_effect_polarities_query(&mut self, trait_id: TraitId) -> Vec<EffectPolarity> {
         self.solver.output_effect_polarities(trait_id)
+    }
+
+    fn repr_of_head_query(
+        &mut self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        fn_span: Location,
+    ) -> Result<Option<Type>, InternalCompilationError> {
+        self.solver.repr_of_head_for(trait_id, input_tys, fn_span)
     }
 
     fn unify_non_trait_constraint_query(
@@ -388,6 +415,19 @@ impl TraitOutputQuery for TraitSolverProbe<'_> {
         self.with_solver(|solver| solver.output_effect_polarities(trait_id))
     }
 
+    fn repr_of_head_query(
+        &mut self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        fn_span: Location,
+    ) -> Result<Option<Type>, InternalCompilationError> {
+        // The solver of the probe is made for `Repr` only.
+        if !is_repr_trait(self.current_type_items, self.others, trait_id) {
+            return Ok(None);
+        }
+        self.with_solver(|solver| solver.repr_of_head_for(trait_id, input_tys, fn_span))
+    }
+
     fn unify_non_trait_constraint_query(
         &mut self,
         ty_inf: &mut UnifiedTypeInference,
@@ -479,6 +519,15 @@ impl TraitOutputQuery for TraitSolverProbe<'_> {
 impl TraitOutputQuery for TraitSolver<'_> {
     fn output_effect_polarities_query(&mut self, trait_id: TraitId) -> Vec<EffectPolarity> {
         self.output_effect_polarities(trait_id)
+    }
+
+    fn repr_of_head_query(
+        &mut self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        fn_span: Location,
+    ) -> Result<Option<Type>, InternalCompilationError> {
+        self.repr_of_head_for(trait_id, input_tys, fn_span)
     }
 
     fn unify_non_trait_constraint_query(

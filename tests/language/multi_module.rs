@@ -3582,3 +3582,102 @@ fn an_exported_function_reads_a_field_of_a_private_type_through_a_private_implem
         .fail_compilation("a::marked(1.5)")
         .expect_trait_impl_not_found("Mark", &["Self = float"]);
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_exported_function_uses_a_private_implementation_that_reads_through_a_representation() {
+    // An implementation that reads an element of a tuple, or goes through a named type, requires
+    // the representation of that type. The head of the type tells it, so the implementation
+    // is selected for a type with a generic inside, and the exported function publishes
+    // neither the representation nor the element.
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    compile_module(
+        &mut session,
+        "a",
+        indoc! { r#"
+            struct Wrapper<T>(T)
+            struct Pair<A> { value: (A, int) }
+            struct Tagged<A>(A, string)
+            struct Deep<A> { inner: Pair<(A, string)> }
+            pub struct Open<A> { value: (A, int) }
+            enum Shape<A> { Dot(A), Box { w: A, h: int } }
+
+            trait Second<Self |-> R> { fn second(x: Self) -> R; }
+            impl<T, R> Second for <Self = Wrapper<T> |-> R = R> {
+                fn second(x) { x.0.1 }
+            }
+            trait First<Self |-> R> { fn first(x: Self) -> R; }
+            impl<T, R> First for <Self = Wrapper<T> |-> R = R> {
+                fn first(x) { x.0.0 }
+            }
+            trait Element<Self |-> R> { fn element(x: Self) -> R; }
+            impl<T, R> Element for <Self = Wrapper<T> |-> R = R> {
+                fn element(x) { x.0.value.0 }
+            }
+            trait Far<Self |-> R> { fn far(x: Self) -> R; }
+            impl<T, R> Far for <Self = Wrapper<T> |-> R = R> {
+                fn far(x) { x.0.inner.value.0.0 }
+            }
+            trait Bump<Self> { fn bump(x: &mut Self); }
+            impl<T> Bump for <Self = Wrapper<T>> {
+                fn bump(x) { x.0.value.1 = x.0.value.1 + 1 }
+            }
+            trait Width<Self |-> R> { fn width(x: Self) -> R; }
+            impl<T, R> Width for <Self = Wrapper<T> |-> R = R> {
+                fn width(x) {
+                    match x.0 {
+                        Dot(a) => a,
+                        Box { w, h } => w,
+                    }
+                }
+            }
+
+            pub fn second_of<A>(a: A) -> A { second(Wrapper((1, a))) }
+            pub fn second_twice<A>(a: A) -> A {
+                second(Wrapper((1, second(Wrapper((2, a))))))
+            }
+            pub fn of_tagged<A>(a: A) -> A { first(Wrapper(Tagged(a, "t"))) }
+            pub fn of_pair<A>(a: A) -> A { element(Wrapper(Pair { value: (a, 1) })) }
+            pub fn of_open<A>(a: A) -> A { element(Wrapper(Open { value: (a, 1) })) }
+            pub fn far_of<A>(a: A) -> A {
+                far(Wrapper(Deep { inner: Pair { value: ((a, "s"), 3) } }))
+            }
+            pub fn written<A>(a: A) -> (A, int) {
+                let mut wrapper = Wrapper(Pair { value: (a, 1) });
+                bump(wrapper);
+                wrapper.0.value
+            }
+            pub fn width_of<A>(a: A, n: int) -> A {
+                if n == 0 {
+                    width(Wrapper(Shape::Box { w: a, h: 2 }))
+                } else {
+                    width_of(width(Wrapper(Shape::Dot(a))), n - 1)
+                }
+            }
+        "# },
+    );
+    compile_module(
+        &mut session,
+        "b",
+        indoc! { r#"
+            struct Mine(int)
+            pub fn all() -> (string, int, int, float, int, int, (int, int), string) {
+                (
+                    a::second_of("x"),
+                    a::second_twice(Mine(4)).0,
+                    a::of_tagged(Mine(1)).0,
+                    a::of_pair(2.5),
+                    a::of_open(3),
+                    a::far_of(Mine(6)).0,
+                    (a::written(Mine(9)).0.0, a::written(9).1),
+                    a::width_of("w", 2),
+                )
+            }
+        "# },
+    );
+    assert_val_eq!(
+        session.run("to_string(b::all())"),
+        string("(x, 4, 1, 2.5, 3, 6, (9, 2), w)")
+    );
+}

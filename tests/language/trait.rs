@@ -2590,6 +2590,43 @@ fn a_generic_function_knows_the_output_of_an_implementation() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_generic_function_knows_the_output_of_an_implementation_that_reads_an_element() {
+    // The implementation reads an element of its type parameter, through the representation
+    // of that type, which its head tells: the implementation applies whatever the generic
+    // inside is, so its output is known in the function.
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            struct Wrapper<T>(T)
+            struct Tagged<A>(A, string)
+            fn inc(x: int) -> int { x + 1 }
+
+            trait First<Self |-> R> { fn first(x: Self) -> R; }
+            impl<T, R> First for <Self = Wrapper<T> |-> R = R> {
+                fn first(x) { x.0.0 }
+            }
+
+            fn part<A>(a: A) -> A { first(Wrapper(((a, 1), 2))).0 }
+            fn named<A>(a: A) -> A { first(Wrapper(Tagged((a, 1), "t"))).0 }
+            fn applied<A>(a: A) -> int { first(Wrapper((inc, a)))(2) }
+            fn bound<A>(a: A) -> A {
+                let mut pair = first(Wrapper(((a, 1), a)));
+                pair.1 = pair.1 + 1;
+                pair.0
+            }
+            fn in_a_lambda<A>(a: A) -> A {
+                let pick = |x| first(Wrapper(((a, x), x))).0;
+                pick(1)
+            }
+
+            to_string((part("p"), named(2.5), applied(true), bound(4), in_a_lambda("l")))
+        "# }),
+        string("(p, 2.5, 3, 4, l)")
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn a_generic_function_keeps_a_requirement_that_two_implementations_can_answer() {
     // Both implementations can apply to the type of the function, which names its generic:
     // each is tried, with the output that it would give, and neither is kept, so the output

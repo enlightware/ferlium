@@ -649,6 +649,31 @@ impl<'a> TraitSolver<'a> {
                 let constraint_inputs = constraint_inputs.clone();
                 let constraint_outputs = constraint_outputs.clone();
                 let constraint_output_effs = constraint_output_effs.clone();
+                // `Repr` is a function of the head of its input, as in inference: the
+                // arguments of the input need not be known, and it has no evidence. A
+                // representation that may not be read here is left to the solver, which
+                // reports it.
+                if let Ok(Some(repr)) =
+                    query.repr_of_head_query(trait_id, &constraint_inputs, fn_span)
+                {
+                    let repr = if structural {
+                        repr.map(&mut EffectErasingMapper)
+                    } else {
+                        repr
+                    };
+                    if ty_inf
+                        .unify_same_type_with_sub_effects(
+                            repr,
+                            fn_span,
+                            constraint_outputs[0],
+                            fn_span,
+                        )
+                        .is_err()
+                    {
+                        return Ok(BlanketImplMatch::No);
+                    }
+                    continue;
+                }
                 if Self::match_assumption(
                     ty_inf,
                     trait_id,

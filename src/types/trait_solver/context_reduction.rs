@@ -97,7 +97,7 @@ pub(crate) enum EvidencePlanSource {
     },
     Ground(TraitImplId),
     /// A requirement on the structure of a type known here, which the type answers: its
-    /// evidence is built here, from that of what the answer requires.
+    /// evidence, if it has one, is built here, from that of what the answer requires.
     Structural {
         members: Vec<usize>,
     },
@@ -891,6 +891,29 @@ impl TraitSolver<'_> {
         check.public
     }
 
+    /// Whether the type that `constraint` is about answers it, as in inference: its
+    /// representation, a field, an element or a variant of it, once its head is known.
+    fn type_answers(
+        &self,
+        constraint: &PubTypeConstraint,
+    ) -> Result<bool, InternalCompilationError> {
+        use PubTypeConstraint::*;
+        let head_known = |ty: Type| !ty.data().is_variable();
+        Ok(match constraint {
+            HaveTrait {
+                trait_id,
+                input_tys,
+                ..
+            } => self
+                .repr_of_head_for(*trait_id, input_tys, constraint.use_site())?
+                .is_some(),
+            TupleAtIndexIs { tuple_ty, .. } => head_known(*tuple_ty),
+            ProjectionSubscriptIs { subscript_ty, .. } => head_known(subscript_ty.receiver_ty()),
+            TypeHasVariant { variant_ty, .. } => head_known(*variant_ty),
+            VariantPayloadLayout { .. } => false,
+        })
+    }
+
     fn reduction_candidates(&self, trait_id: TraitId, inputs: &[Type]) -> Vec<SourceCandidate> {
         let mut candidates = Vec::new();
         let mut collect = |module: ModuleId, impls: &TraitImpls, local: bool| {
@@ -1207,12 +1230,14 @@ impl TraitSolver<'_> {
                 return Err(unresolved(&original));
             }
             evidence.substitute(inference);
-            // An output equality may expose a private type in a formerly public leaf. Reduce
+            // An output equality may expose a private type in a formerly public leaf, or the
+            // head of a type that then answers the leaf. Reduce
             // that same node: incoming edges keep their identity, without a graph-wide redirect.
             for (id, node) in evidence.nodes.iter_mut().enumerate() {
                 if matches!(node.source, EvidencePlanSource::Public)
                     && (!self.requirement_is_public(&node.constraint)
-                        || is_closed_trait_requirement(&node.constraint))
+                        || is_closed_trait_requirement(&node.constraint)
+                        || self.type_answers(&node.constraint)?)
                 {
                     node.source = EvidencePlanSource::Pending;
                     deferred.push(id);
@@ -1236,8 +1261,8 @@ impl TraitSolver<'_> {
         }
     }
 
-    /// Answer a requirement on the structure of a type that is known here: a field, an element
-    /// or a variant. The type answers it, as it does a use in a body, and the node gets what
+    /// Answer a requirement on the structure of a type that is known here: a field, an element,
+    /// a variant or its representation. The type answers it, as it does a use in a body, and the node gets what
     /// the answer requires: the requirements of a subscript that the type declares for the
     /// field, or the layout of the members that an access to a stored one depends on.
     fn reduce_structural_node(
@@ -1333,7 +1358,10 @@ impl TraitSolver<'_> {
         evidence: &mut EvidencePlan,
     ) -> Result<bool, InternalCompilationError> {
         let mut constraint = inference.substitute_in_constraint(&evidence.nodes[id].constraint);
-        if self.requirement_is_public(&constraint) {
+        // What a type whose head is known answers is not a requirement to publish, whatever
+        // the names in it.
+        let by_type = self.type_answers(&constraint)?;
+        if !by_type && self.requirement_is_public(&constraint) {
             evidence.nodes[id].constraint = constraint.clone();
             evidence.nodes[id].source = if is_closed_trait_requirement(&constraint) {
                 let PubTypeConstraint::HaveTrait {
@@ -1412,6 +1440,9 @@ impl TraitSolver<'_> {
         else {
             return self.reduce_structural_node(id, &constraint, inference, arena, work, evidence);
         };
+        if by_type {
+            return self.reduce_structural_node(id, &constraint, inference, arena, work, evidence);
+        }
         if *trait_id == self.std_trait_id(VALUE_TRAIT_NAME)
             && input_tys.len() == 1
             && let Some(types) = generated_value_evidence_types(input_tys[0], self)
