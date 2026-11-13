@@ -61,6 +61,7 @@ use crate::{
         },
         type_constraints::named_type_constraints_in_types,
         type_inference::{
+            GivenId,
             defaulting::{ConstraintBoundary, DefaultingScope},
             effect_solver::EffectConstraintOrigin,
             expr::{AnnotationTypeMapper, TypeInference},
@@ -2027,6 +2028,8 @@ where
     }
 }
 
+/// Infers and emits the functions of a group, or the methods of a trait implementation, pass
+/// by pass: their declarations, their bodies, their types, then what `mode` asks of a group.
 #[allow(clippy::too_many_arguments)]
 fn emit_functions<'a, F, I>(
     output: &mut Module,
@@ -2044,7 +2047,6 @@ where
     I: Iterator<Item = EmitFunctionInput<'a>>,
     F: Fn() -> I,
 {
-    // First pass, populate the function table and allocate fresh mono type variables.
     let mut ty_inf = TypeInference::default();
     if matches!(mode, GroupMode::Discover) {
         // The shapes are types, which effects do not decide: an effect that does not fit is
@@ -2053,244 +2055,394 @@ where
         ty_inf.ignore_effects();
         output.impls.ignores_effects = true;
     }
-    let mut group_declarations = Vec::new();
-    let mut body_tys: Vec<FnType> = Vec::new();
-    // When the bodies of a group are inferred jointly against their shapes: the group's
-    // instance of the type variables of the shapes, the scheme through which each function is
-    // named, and the references that each body makes, as a range of those of the inference.
-    let mut group_instance: FxHashMap<TypeVar, Type> = FxHashMap::default();
-    let mut reference_schemes: Vec<TypeScheme<FnType>> = Vec::new();
-    let mut body_references = Vec::new();
     if matches!(mode, GroupMode::Settle { .. }) {
         ty_inf.track_requirement_owners();
         ty_inf.set_applications_per_function();
     }
-    let mut impl_annotation_subst = None;
-    let mut outer_annotation_var_count = 0;
-    let mut outer_annotation_eff_var_count = 0;
-    let mut explicit_trait_impl = None;
-    let module_env = ModuleEnv::new(output, others);
-
     // If we are emitting a trait implementation, create generics for the trait input and output types
     // and add the constraints from the trait definition to the type inference.
-    let mut self_given = None;
-    let trait_output = if let Some(trait_ctx) = &trait_ctx {
-        let trait_def = &trait_ctx.trait_def;
-        let input_tys = ty_inf.fresh_type_var_tys(trait_def.input_type_count() as usize);
-        let output_tys = ty_inf.fresh_type_var_tys(trait_def.output_type_count() as usize);
-        let output_effs = (0..trait_def.output_effect_count())
-            .map(|_| ty_inf.fresh_effect_var_ty())
-            .collect::<Vec<_>>();
-        let explicit_quantifiers = if !trait_ctx.generic_type_params.is_empty() {
-            (0..trait_ctx.generic_type_params.len())
-                .map(|index| TypeVar::new(index as u32))
-                .collect::<Vec<_>>()
-        } else if let Some(for_trait) = trait_ctx.for_trait {
-            let mut tys = for_trait.input_tys();
-            tys.extend(for_trait.output_tys());
-            collect_ty_vars(&tys)
-        } else {
-            vec![]
+    let impl_head = trait_ctx
+        .as_ref()
+        .map(|trait_ctx| {
+            declare_trait_impl(trait_ctx, &ModuleEnv::new(output, others), &mut ty_inf)
+        })
+        .transpose()?;
+    let declarations = declare_functions(
+        output,
+        others,
+        ast_functions,
+        &trait_ctx,
+        impl_head.as_ref(),
+        capabilities,
+        &mode,
+        &mut ty_inf,
+    )?;
+    let mut bodies = infer_bodies(
+        output,
+        others,
+        ast_functions,
+        desugared_arena,
+        &trait_ctx,
+        impl_head.as_ref().map(|head| &head.trait_output),
+        recursive_function_names,
+        capabilities,
+        warnings,
+        &declarations,
+        &mut ty_inf,
+    )?;
+    let ty_inf = solve_types(
+        output,
+        solver_arena,
+        others,
+        &declarations,
+        &mut bodies,
+        ty_inf,
+    )?;
+    // Fourth pass: default orphan constraints and substitute types.
+    match (trait_ctx, impl_head) {
+        (Some(trait_ctx), Some(impl_head)) => publish_trait_impl(
+            output,
+            solver_arena,
+            ast_functions,
+            others,
+            warnings,
+            trait_ctx,
+            impl_head,
+            declarations,
+            bodies,
+            ty_inf,
+        ),
+        _ => publish_functions(
+            output,
+            solver_arena,
+            ast_functions,
+            others,
+            warnings,
+            mode,
+            declarations,
+            bodies,
+            ty_inf,
+        ),
+    }
+}
+
+/// The functions of a group and what their declarations give, in the order of the group.
+struct GroupDeclarations {
+    local_fns: Vec<LocalFunctionId>,
+    /// For each function, the index of the first body of its definition: itself, but for a body
+    /// of a subscript after the first.
+    units: Vec<usize>,
+    /// The function that the requirements of each body are of.
+    owners: Vec<LocalFunctionId>,
+    /// What the annotations of each function make of its generics.
+    function_annotation_substs: Vec<InstSubst>,
+    /// The signature that its trait declares for a default method.
+    declared_signatures: Vec<Option<TypeScheme<FnType>>>,
+    function_explicit_root_tys: Vec<Vec<Type>>,
+    /// The variable of each written effect generic of each function.
+    function_written_effects: Vec<Vec<EffectVar>>,
+    function_attrs: Vec<FunctionAttributes>,
+    function_kinds: Vec<EmitFunctionKind>,
+    group_declarations: Vec<GroupFunctionDeclaration>,
+    /// The group's instance of each type variable of its shapes.
+    group_instance: FxHashMap<TypeVar, Type>,
+    /// When the bodies of a group are inferred against their shapes: the signature of each
+    /// body, and the scheme through which the bodies name each function.
+    body_tys: Vec<FnType>,
+    reference_schemes: Vec<TypeScheme<FnType>>,
+}
+
+/// The bodies of a group once inferred.
+struct GroupBodies {
+    pending_functions: PendingModuleFunctions,
+    /// The functions emitted for the closures of each function.
+    associated_lambdas: FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
+    /// The references between the functions of the group, by the indices of these functions.
+    group_references: Vec<GroupReferenceIn>,
+    recursive_function_ids: FxHashSet<FunctionId>,
+}
+
+/// What the header of a trait implementation writes: the inputs, the outputs and the output
+/// effects of the trait, and the requirements on the named types that these mention.
+type ExplicitTraitImpl = (Vec<Type>, Vec<Type>, Vec<EffType>, Vec<PubTypeConstraint>);
+
+/// What the header of a trait implementation gives to the inference of its methods.
+struct ImplHead {
+    impl_annotation_subst: Option<InstSubst>,
+    /// The numbers of type and of effect generics that the header writes: those of a method
+    /// come after them.
+    outer_annotation_var_count: usize,
+    outer_annotation_eff_var_count: usize,
+    explicit_trait_impl: Option<ExplicitTraitImpl>,
+    /// The implementation itself, given to its methods.
+    self_given: Option<GivenId>,
+    trait_output: EmitTraitOutput,
+}
+
+/// Starts the inference of the methods of a trait implementation from its header: variables for
+/// the inputs and the outputs of the trait, made the same as what the header writes, and the
+/// requirements of the trait and of the header. The implementation is given to its methods.
+fn declare_trait_impl(
+    trait_ctx: &EmitTraitCtx,
+    module_env: &ModuleEnv<'_>,
+    ty_inf: &mut TypeInference,
+) -> Result<ImplHead, InternalCompilationError> {
+    let mut impl_annotation_subst = None;
+    let trait_def = &trait_ctx.trait_def;
+    let input_tys = ty_inf.fresh_type_var_tys(trait_def.input_type_count() as usize);
+    let output_tys = ty_inf.fresh_type_var_tys(trait_def.output_type_count() as usize);
+    let output_effs = (0..trait_def.output_effect_count())
+        .map(|_| ty_inf.fresh_effect_var_ty())
+        .collect::<Vec<_>>();
+    let explicit_quantifiers = if !trait_ctx.generic_type_params.is_empty() {
+        (0..trait_ctx.generic_type_params.len())
+            .map(|index| TypeVar::new(index as u32))
+            .collect::<Vec<_>>()
+    } else if let Some(for_trait) = trait_ctx.for_trait {
+        let mut tys = for_trait.input_tys();
+        tys.extend(for_trait.output_tys());
+        collect_ty_vars(&tys)
+    } else {
+        vec![]
+    };
+    // Reserve the leading annotation placeholder indices for explicit impl-level generics,
+    // so any function-level generics in this shared path start after them.
+    let outer_annotation_var_count = explicit_quantifiers.len();
+    let explicit_eff_quantifiers = &trait_ctx.generic_effect_param_names;
+    let outer_annotation_eff_var_count = explicit_eff_quantifiers.len();
+    if !explicit_quantifiers.is_empty() || !explicit_eff_quantifiers.is_empty() {
+        let eff_subst = explicit_eff_quantifiers
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                (
+                    EffectVar::new(index as u32),
+                    ty_inf.fresh_rigid_effect_var_ty(Some(*name)),
+                )
+            })
+            .collect();
+        let ty_subst = ty_inf.fresh_type_var_subst(&explicit_quantifiers);
+        // Variables of a header without generic parameters are holes to infer.
+        if !trait_ctx.generic_type_params.is_empty() {
+            ty_inf.add_declared_generics(ty_subst.values().copied());
+        }
+        impl_annotation_subst = Some((ty_subst, eff_subst));
+    }
+    let explicit_trait_impl = trait_ctx.for_trait.map(|for_trait| {
+        let mut mapper = impl_annotation_subst
+            .as_ref()
+            .map(BitmapInstantiationMapper::new);
+        let mut instantiate = |ty: Type| match &mut mapper {
+            Some(m) => ty.map(m),
+            None => ty,
         };
-        // Reserve the leading annotation placeholder indices for explicit impl-level generics,
-        // so any function-level generics in this shared path start after them.
-        outer_annotation_var_count = explicit_quantifiers.len();
-        let explicit_eff_quantifiers = &trait_ctx.generic_effect_param_names;
-        outer_annotation_eff_var_count = explicit_eff_quantifiers.len();
-        if !explicit_quantifiers.is_empty() || !explicit_eff_quantifiers.is_empty() {
-            let eff_subst = explicit_eff_quantifiers
-                .iter()
-                .enumerate()
-                .map(|(index, name)| {
-                    (
-                        EffectVar::new(index as u32),
-                        ty_inf.fresh_rigid_effect_var_ty(Some(*name)),
-                    )
-                })
-                .collect();
-            let ty_subst = ty_inf.fresh_type_var_subst(&explicit_quantifiers);
-            // Variables of a header without generic parameters are holes to infer.
-            if !trait_ctx.generic_type_params.is_empty() {
-                ty_inf.add_declared_generics(ty_subst.values().copied());
-            }
-            impl_annotation_subst = Some((ty_subst, eff_subst));
+        let input_tys: Vec<_> = for_trait
+            .input_tys()
+            .into_iter()
+            .map(&mut instantiate)
+            .collect();
+        let output_tys: Vec<_> = for_trait
+            .output_tys()
+            .into_iter()
+            .map(&mut instantiate)
+            .collect();
+        let output_effs: Vec<_> = for_trait
+            .output_effs()
+            .into_iter()
+            .map(|eff| match &mut mapper {
+                Some(m) => m.map_effect_type(&eff),
+                None => eff,
+            })
+            .collect();
+        let mut explicit_tys = input_tys.clone();
+        explicit_tys.extend(output_tys.iter().copied());
+        let explicit_constraints =
+            named_type_constraints_in_types(explicit_tys, trait_ctx.span, module_env);
+        (input_tys, output_tys, output_effs, explicit_constraints)
+    });
+    if let Some((
+        explicit_input_tys,
+        explicit_output_tys,
+        explicit_output_effs,
+        explicit_constraints,
+    )) = &explicit_trait_impl
+    {
+        if explicit_input_tys.len() != input_tys.len() {
+            return Err(internal_compilation_error!(WrongNumberOfArguments {
+                expected: input_tys.len(),
+                expected_span: trait_ctx.span,
+                got: explicit_input_tys.len(),
+                got_span: trait_ctx.span,
+            }));
         }
-        explicit_trait_impl = trait_ctx.for_trait.map(|for_trait| {
-            let mut mapper = impl_annotation_subst
-                .as_ref()
-                .map(BitmapInstantiationMapper::new);
-            let mut instantiate = |ty: Type| match &mut mapper {
-                Some(m) => ty.map(m),
-                None => ty,
-            };
-            let input_tys: Vec<_> = for_trait
-                .input_tys()
-                .into_iter()
-                .map(&mut instantiate)
-                .collect();
-            let output_tys: Vec<_> = for_trait
-                .output_tys()
-                .into_iter()
-                .map(&mut instantiate)
-                .collect();
-            let output_effs: Vec<_> = for_trait
-                .output_effs()
-                .into_iter()
-                .map(|eff| match &mut mapper {
-                    Some(m) => m.map_effect_type(&eff),
-                    None => eff,
-                })
-                .collect();
-            let mut explicit_tys = input_tys.clone();
-            explicit_tys.extend(output_tys.iter().copied());
-            let explicit_constraints =
-                named_type_constraints_in_types(explicit_tys, trait_ctx.span, &module_env);
-            (input_tys, output_tys, output_effs, explicit_constraints)
-        });
-        if let Some((
-            explicit_input_tys,
-            explicit_output_tys,
-            explicit_output_effs,
-            explicit_constraints,
-        )) = &explicit_trait_impl
-        {
-            if explicit_input_tys.len() != input_tys.len() {
-                return Err(internal_compilation_error!(WrongNumberOfArguments {
-                    expected: input_tys.len(),
-                    expected_span: trait_ctx.span,
-                    got: explicit_input_tys.len(),
-                    got_span: trait_ctx.span,
-                }));
-            }
-            if !explicit_output_tys.is_empty() && explicit_output_tys.len() != output_tys.len() {
-                return Err(internal_compilation_error!(WrongNumberOfArguments {
-                    expected: output_tys.len(),
-                    expected_span: trait_ctx.span,
-                    got: explicit_output_tys.len(),
-                    got_span: trait_ctx.span,
-                }));
-            }
-            if !explicit_output_effs.is_empty() && explicit_output_effs.len() != output_effs.len() {
-                return Err(internal_compilation_error!(WrongNumberOfArguments {
-                    expected: output_effs.len(),
-                    expected_span: trait_ctx.span,
-                    got: explicit_output_effs.len(),
-                    got_span: trait_ctx.span,
-                }));
-            }
-            for constraint in explicit_constraints {
-                ty_inf.add_pub_constraint(constraint.clone());
-            }
-            for (input_ty, explicit_ty) in input_tys.iter().zip(explicit_input_tys.iter()) {
-                ty_inf.add_same_type_with_sub_effects_constraint(
-                    *input_ty,
-                    trait_ctx.span,
-                    *explicit_ty,
-                    trait_ctx.span,
-                );
-            }
-            for (output_ty, explicit_ty) in output_tys.iter().zip(explicit_output_tys.iter()) {
-                ty_inf.add_same_type_with_sub_effects_constraint(
-                    *output_ty,
-                    trait_ctx.span,
-                    *explicit_ty,
-                    trait_ctx.span,
-                );
-            }
-            for (output_eff, explicit_eff) in output_effs.iter().zip(explicit_output_effs.iter()) {
-                ty_inf.add_same_effect_constraint(
-                    output_eff,
-                    trait_ctx.span,
-                    explicit_eff,
-                    trait_ctx.span,
-                );
-            }
-        } else if let Some(stub_data) = trait_ctx.stub_data {
-            // For a stub implementation, equate the fresh input types with the concrete types from the impl annotation.
-            assert_eq!(input_tys.len(), stub_data.input_tys.len());
-            for (ty_var, concrete_ty) in input_tys.iter().zip(stub_data.input_tys.iter()) {
-                ty_inf.add_same_type_with_sub_effects_constraint(
-                    *ty_var,
-                    trait_ctx.span,
-                    *concrete_ty,
-                    trait_ctx.span,
-                );
-            }
+        if !explicit_output_tys.is_empty() && explicit_output_tys.len() != output_tys.len() {
+            return Err(internal_compilation_error!(WrongNumberOfArguments {
+                expected: output_tys.len(),
+                expected_span: trait_ctx.span,
+                got: explicit_output_tys.len(),
+                got_span: trait_ctx.span,
+            }));
         }
-        let mut trait_subst = trait_def.param_subst_for(&input_tys, &output_tys, &output_effs);
-        for constraint in trait_def
-            .parent_constraints
-            .iter()
-            .chain(&trait_def.constraints)
-        {
-            for var in constraint.inner_ty_vars() {
-                trait_subst
-                    .0
-                    .entry(var)
-                    .or_insert_with(|| ty_inf.fresh_type_var_ty());
-            }
-            for var in constraint.inner_effect_vars().into_iter().sorted() {
-                trait_subst
-                    .1
-                    .entry(var)
-                    .or_insert_with(|| ty_inf.fresh_effect_var_ty());
-            }
+        if !explicit_output_effs.is_empty() && explicit_output_effs.len() != output_effs.len() {
+            return Err(internal_compilation_error!(WrongNumberOfArguments {
+                expected: output_effs.len(),
+                expected_span: trait_ctx.span,
+                got: explicit_output_effs.len(),
+                got_span: trait_ctx.span,
+            }));
         }
-        for constraint in trait_def
-            .parent_constraints
-            .iter()
-            .chain(&trait_def.constraints)
-        {
-            ty_inf.add_pub_constraint(
-                constraint
-                    .instantiate_simple(&trait_subst)
-                    .instantiate_location_cloned(trait_ctx.span),
+        for constraint in explicit_constraints {
+            ty_inf.add_pub_constraint(constraint.clone());
+        }
+        for (input_ty, explicit_ty) in input_tys.iter().zip(explicit_input_tys.iter()) {
+            ty_inf.add_same_type_with_sub_effects_constraint(
+                *input_ty,
+                trait_ctx.span,
+                *explicit_ty,
+                trait_ctx.span,
             );
         }
-        let subst = with_unwritten_requirement_effects(
-            impl_annotation_subst
-                .as_ref()
-                .map_or_else(Default::default, Cow::Borrowed),
-            trait_ctx.impl_constraints,
-            &mut ty_inf,
-        );
-        let mut mapper = BitmapInstantiationMapper::new(&subst);
-        for constraint in trait_ctx.impl_constraints {
-            ty_inf.add_pub_constraint(constraint.map(&mut mapper));
-        }
-        self_given = Some(
-            ty_inf.add_given_constraint(PubTypeConstraint::new_have_trait(
-                trait_ctx.trait_id,
-                input_tys.clone(),
-                output_tys.clone(),
-                output_effs.clone(),
+        for (output_ty, explicit_ty) in output_tys.iter().zip(explicit_output_tys.iter()) {
+            ty_inf.add_same_type_with_sub_effects_constraint(
+                *output_ty,
                 trait_ctx.span,
-            )),
+                *explicit_ty,
+                trait_ctx.span,
+            );
+        }
+        for (output_eff, explicit_eff) in output_effs.iter().zip(explicit_output_effs.iter()) {
+            ty_inf.add_same_effect_constraint(
+                output_eff,
+                trait_ctx.span,
+                explicit_eff,
+                trait_ctx.span,
+            );
+        }
+    } else if let Some(stub_data) = trait_ctx.stub_data {
+        // For a stub implementation, equate the fresh input types with the concrete types from the impl annotation.
+        assert_eq!(input_tys.len(), stub_data.input_tys.len());
+        for (ty_var, concrete_ty) in input_tys.iter().zip(stub_data.input_tys.iter()) {
+            ty_inf.add_same_type_with_sub_effects_constraint(
+                *ty_var,
+                trait_ctx.span,
+                *concrete_ty,
+                trait_ctx.span,
+            );
+        }
+    }
+    let mut trait_subst = trait_def.param_subst_for(&input_tys, &output_tys, &output_effs);
+    for constraint in trait_def
+        .parent_constraints
+        .iter()
+        .chain(&trait_def.constraints)
+    {
+        for var in constraint.inner_ty_vars() {
+            trait_subst
+                .0
+                .entry(var)
+                .or_insert_with(|| ty_inf.fresh_type_var_ty());
+        }
+        for var in constraint.inner_effect_vars().into_iter().sorted() {
+            trait_subst
+                .1
+                .entry(var)
+                .or_insert_with(|| ty_inf.fresh_effect_var_ty());
+        }
+    }
+    for constraint in trait_def
+        .parent_constraints
+        .iter()
+        .chain(&trait_def.constraints)
+    {
+        ty_inf.add_pub_constraint(
+            constraint
+                .instantiate_simple(&trait_subst)
+                .instantiate_location_cloned(trait_ctx.span),
         );
-        Some(EmitTraitOutput {
-            evidence_plan: Default::default(),
-            input_tys,
-            output_tys,
-            output_effs,
-            ty_var_count: 0,
-            eff_var_count: 0,
-            constraints: vec![],
-            functions: vec![],
-            method_requirements: vec![],
-            generic_names: ImplGenericNames::default(),
-        })
-    } else {
-        None
+    }
+    let subst = with_unwritten_requirement_effects(
+        impl_annotation_subst
+            .as_ref()
+            .map_or_else(Default::default, Cow::Borrowed),
+        trait_ctx.impl_constraints,
+        ty_inf,
+    );
+    let mut mapper = BitmapInstantiationMapper::new(&subst);
+    for constraint in trait_ctx.impl_constraints {
+        ty_inf.add_pub_constraint(constraint.map(&mut mapper));
+    }
+    let self_given = Some(
+        ty_inf.add_given_constraint(PubTypeConstraint::new_have_trait(
+            trait_ctx.trait_id,
+            input_tys.clone(),
+            output_tys.clone(),
+            output_effs.clone(),
+            trait_ctx.span,
+        )),
+    );
+    let trait_output = EmitTraitOutput {
+        evidence_plan: Default::default(),
+        input_tys,
+        output_tys,
+        output_effs,
+        ty_var_count: 0,
+        eff_var_count: 0,
+        constraints: vec![],
+        functions: vec![],
+        method_requirements: vec![],
+        generic_names: ImplGenericNames::default(),
     };
-    let instantiated_trait_method_defs = match (&trait_ctx, &trait_output) {
-        (Some(trait_ctx), Some(trait_output)) => Some(trait_ctx.trait_def.instantiate_for_tys(
-            &trait_output.input_tys,
-            &trait_output.output_tys,
-            &trait_output.output_effs,
+    Ok(ImplHead {
+        impl_annotation_subst,
+        outer_annotation_var_count,
+        outer_annotation_eff_var_count,
+        explicit_trait_impl,
+        self_given,
+        trait_output,
+    })
+}
+
+/// The first pass over a group: gives each function its place in the module and the variables
+/// of its signature, from its annotations, from the method that it implements, or from its
+/// shape when the group has its shapes. The bodies of a subscript get one signature.
+#[allow(clippy::too_many_arguments)]
+fn declare_functions<'a, F, I>(
+    output: &mut Module,
+    others: &Modules,
+    ast_functions: &F,
+    trait_ctx: &Option<EmitTraitCtx>,
+    impl_head: Option<&ImplHead>,
+    capabilities: CompilationCapabilities,
+    mode: &GroupMode<'_>,
+    ty_inf: &mut TypeInference,
+) -> Result<GroupDeclarations, InternalCompilationError>
+where
+    I: Iterator<Item = EmitFunctionInput<'a>>,
+    F: Fn() -> I,
+{
+    let impl_annotation_subst = impl_head.and_then(|head| head.impl_annotation_subst.as_ref());
+    let (outer_annotation_var_count, outer_annotation_eff_var_count) =
+        impl_head.map_or((0, 0), |head| {
+            (
+                head.outer_annotation_var_count,
+                head.outer_annotation_eff_var_count,
+            )
+        });
+    let instantiated_trait_method_defs = match (trait_ctx, impl_head) {
+        (Some(trait_ctx), Some(head)) => Some(trait_ctx.trait_def.instantiate_for_tys(
+            &head.trait_output.input_tys,
+            &head.trait_output.output_tys,
+            &head.trait_output.output_effs,
         )),
         _ => None,
     };
-
+    let mut group_declarations = Vec::new();
+    let mut body_tys: Vec<FnType> = Vec::new();
+    // When the bodies of a group are inferred jointly against their shapes: the group's
+    // instance of the type variables of the shapes, and the scheme through which each function
+    // is named.
+    let mut group_instance: FxHashMap<TypeVar, Type> = FxHashMap::default();
+    let mut reference_schemes: Vec<TypeScheme<FnType>> = Vec::new();
     // Populate the function table
     let mut local_fns = Vec::new();
     let mut function_annotation_substs = Vec::new();
@@ -2325,7 +2477,7 @@ where
         // Note: the type quantifiers and constraints are left empty.
         // They will be filled in the second pass.
         // The effect quantifiers are filled with the output effect variable.
-        if let Some(trait_ctx) = &trait_ctx {
+        if let Some(trait_ctx) = trait_ctx {
             if !generic_params.is_empty() {
                 let generic_span = generic_params
                     .type_params()
@@ -2361,7 +2513,7 @@ where
         let unit = cached_subscript_signature.map_or(local_fns.len(), |shared| shared.first);
         let mut annotation_subst = cached_subscript_signature
             .map(|shared| shared.annotation_subst.clone())
-            .unwrap_or_else(|| impl_annotation_subst.clone().unwrap_or_default());
+            .unwrap_or_else(|| impl_annotation_subst.cloned().unwrap_or_default());
         let mut explicit_root_tys = if let Some(shared) = cached_subscript_signature {
             group_declarations.push(shared.declaration.clone());
             shared.explicit_root_tys.clone()
@@ -2395,8 +2547,7 @@ where
             .iter()
             .map(|arg| {
                 if let Some((mut_ty, ty, _)) = &arg.ty {
-                    let mut mapper =
-                        AnnotationTypeMapper::new(&mut ty_inf, Some(&annotation_subst));
+                    let mut mapper = AnnotationTypeMapper::new(ty_inf, Some(&annotation_subst));
                     let mut_ty = match mut_ty {
                         Some(mut_ty) => mapper.map_mut_type(*mut_ty),
                         None => MutType::constant(),
@@ -2410,7 +2561,7 @@ where
             .collect();
         let mut ret_ty_ty = if let Some((ret_ty, _)) = ret_ty {
             ret_ty.map(&mut AnnotationTypeMapper::new(
-                &mut ty_inf,
+                ty_inf,
                 Some(&annotation_subst),
             ))
         } else {
@@ -2428,7 +2579,7 @@ where
                 .expect("subscript member emission should carry its source bundle");
             let shared_signature = subscript_signatures.entry(subscript_id).or_insert_with(|| {
                 let signature =
-                    subscript_signature_from_source(&mut ty_inf, subscript, &annotation_subst);
+                    subscript_signature_from_source(ty_inf, subscript, &annotation_subst);
                 SharedSubscriptSignature {
                     signature,
                     annotation_subst: annotation_subst.clone(),
@@ -2456,14 +2607,14 @@ where
         let subst = with_unwritten_requirement_effects(
             Cow::Borrowed(&annotation_subst),
             where_clause,
-            &mut ty_inf,
+            ty_inf,
         );
         let mut mapper = BitmapInstantiationMapper::new(&subst);
         let declared_requirements = ty_inf.constraint_scope_start();
         for constraint in where_clause {
             ty_inf.add_pub_constraint(constraint.map(&mut mapper));
         }
-        if let GroupMode::Settle { slots, .. } = &mode {
+        if let GroupMode::Settle { slots, .. } = mode {
             // A declared requirement is of its function, as those that its body makes.
             ty_inf.own_constraints_since(declared_requirements, slots[unit]);
         }
@@ -2484,7 +2635,7 @@ where
                     .expect("a written effect generic maps to a variable")
             })
             .collect();
-        if let GroupMode::Settle { shapes, .. } = &mode {
+        if let GroupMode::Settle { shapes, .. } = mode {
             // The shape gives the types, and the places of the effects to infer.
             let shape = &shapes[local_fns.len()];
             let shared = match kind {
@@ -2503,7 +2654,7 @@ where
                         &explicit_root_tys,
                         &written_effects,
                         *span,
-                        &mut ty_inf,
+                        ty_inf,
                     );
                     (signature.args, signature.ret)
                 }
@@ -2564,7 +2715,7 @@ where
         declared_signatures.push(declared_signature);
 
         // If we are emitting a trait implementation, make sure this function conforms to it.
-        if let Some(trait_ctx) = &trait_ctx {
+        if let Some(trait_ctx) = trait_ctx {
             let index = trait_ctx.trait_def.method_index(name.0).unwrap();
             let (method_name, raw_method_def) = trait_ctx.trait_def.method(index);
             let instantiated_method_def =
@@ -2610,7 +2761,7 @@ where
         )
         .with_result_convention(return_convention);
         let descr = ModuleFunction::placeholder(definition, Some(spans));
-        let id = if let GroupMode::Settle { slots, .. } = &mode {
+        let id = if let GroupMode::Settle { slots, .. } = mode {
             let id = slots[local_fns.len()];
             output.functions[id.as_index()] = descr;
             id
@@ -2651,7 +2802,7 @@ where
         .map(|unit| local_fns[*unit])
         .collect::<Vec<_>>();
 
-    if let GroupMode::Settle { shapes, .. } = &mode {
+    if let GroupMode::Settle { shapes, .. } = mode {
         // Every reference to a function of the group has the group's instance of its types.
         let instances = local_fns
             .iter()
@@ -2722,6 +2873,57 @@ where
         ty_inf.set_group_subscripts(group_subscripts);
     }
 
+    Ok(GroupDeclarations {
+        local_fns,
+        units,
+        owners,
+        function_annotation_substs,
+        declared_signatures,
+        function_explicit_root_tys,
+        function_written_effects,
+        function_attrs,
+        function_kinds,
+        group_declarations,
+        group_instance,
+        body_tys,
+        reference_schemes,
+    })
+}
+
+/// The second pass over a group: infers the body of each function against its signature, and
+/// relates the effect that it performs to the one that its trait declares for it.
+#[allow(clippy::too_many_arguments)]
+fn infer_bodies<'a, F, I>(
+    output: &mut Module,
+    others: &Modules,
+    ast_functions: &F,
+    desugared_arena: &DExprArena,
+    trait_ctx: &Option<EmitTraitCtx>,
+    trait_output: Option<&EmitTraitOutput>,
+    recursive_function_names: &FxHashSet<Ustr>,
+    capabilities: CompilationCapabilities,
+    warnings: &mut Vec<CompilationWarning>,
+    declarations: &GroupDeclarations,
+    ty_inf: &mut TypeInference,
+) -> Result<GroupBodies, InternalCompilationError>
+where
+    I: Iterator<Item = EmitFunctionInput<'a>>,
+    F: Fn() -> I,
+{
+    let GroupDeclarations {
+        local_fns,
+        owners,
+        function_annotation_substs,
+        declared_signatures,
+        function_attrs,
+        function_kinds,
+        body_tys,
+        reference_schemes,
+        ..
+    } = declarations;
+    // The references that each body makes to the functions of the group, as a range of those
+    // of the inference.
+    let mut body_references = Vec::new();
     // Associated lambdas for functions emitted while lowering closure expressions.
     let mut associated_lambdas: FxHashMap<LocalFunctionId, Vec<LocalFunctionId>> =
         FxHashMap::default();
@@ -2809,7 +3011,7 @@ where
                 .functions[default_id.function.as_index()]
             .definition;
             let (ty, inst_data, _) = default.ty_scheme.instantiate_with_fresh_vars(
-                &mut ty_inf,
+                ty_inf,
                 function.span,
                 None,
                 module_env,
@@ -2977,14 +3179,14 @@ where
         })
         .collect::<Vec<GroupReferenceIn>>();
     // From here on, each function is its body's rigid instance, as in ordinary emission.
-    for (id, ty) in local_fns.iter().zip(&body_tys) {
+    for (id, ty) in local_fns.iter().zip(body_tys) {
         output.functions[id.as_index()].definition.ty_scheme =
             TypeScheme::new_just_type(ty.clone());
     }
     let module_env = ModuleEnv::new(output, others);
     ty_inf.log_debug_constraints(module_env);
 
-    if let (Some(trait_ctx), Some(trait_output)) = (&trait_ctx, &trait_output) {
+    if let (Some(trait_ctx), Some(trait_output)) = (trait_ctx, trait_output) {
         let trait_effect_subst = trait_ctx
             .trait_def
             .effect_param_subst_for_effs(&trait_output.output_effs);
@@ -3016,7 +3218,7 @@ where
         }
     }
 
-    for ((input, id), declared) in ast_functions().zip(&local_fns).zip(&declared_signatures) {
+    for ((input, id), declared) in ast_functions().zip(local_fns).zip(declared_signatures) {
         if let (Some(declared), Some((trait_id, index))) = (declared, input.trait_default) {
             ty_inf.add_effect_inclusion_constraint_with_origin(
                 &output.functions[id.as_index()]
@@ -3036,6 +3238,35 @@ where
         }
     }
 
+    Ok(GroupBodies {
+        pending_functions,
+        associated_lambdas,
+        group_references,
+        recursive_function_ids,
+    })
+}
+
+/// The third pass over a group: solves the types of its bodies, and decides the storage of
+/// their locals, which activates the `Value` requirements. Returns the solved inference.
+fn solve_types(
+    output: &mut Module,
+    solver_arena: &mut NodeArena,
+    others: &Modules,
+    declarations: &GroupDeclarations,
+    bodies: &mut GroupBodies,
+    ty_inf: TypeInference,
+) -> Result<UnifiedTypeInference, InternalCompilationError> {
+    let GroupDeclarations {
+        local_fns,
+        owners,
+        function_explicit_root_tys,
+        ..
+    } = declarations;
+    let GroupBodies {
+        pending_functions,
+        associated_lambdas,
+        ..
+    } = bodies;
     // Third pass, perform the unification.
     let mut solver = trait_solver_from_module!(output, others);
     let mut ty_inf = ty_inf.unify(&mut solver, solver_arena)?;
@@ -3057,18 +3288,18 @@ where
     let generated = solver.finish().commit(
         &mut output.functions,
         &mut output.def_table,
-        &mut pending_functions,
+        pending_functions,
     );
-    elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
+    elaborate_generated_functions(output, others, pending_functions, generated)?;
     let module_env = ModuleEnv::new(output, others);
     ty_inf.log_debug_substitution_tables(module_env);
     ty_inf.log_debug_constraints(module_env);
 
     // Resolve local-storage decisions before defaulting so only finalized ownership semantics add `Value`.
     let value_trait_id = module_env.expect_std_trait_id(VALUE_TRAIT_NAME);
-    for (id, owner) in local_fns.iter().zip(&owners) {
+    for (id, owner) in local_fns.iter().zip(owners) {
         let mut ty_inf = ty_inf.constraint_owner_scope(*owner);
-        for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
+        for function_id in function_and_associated_lambdas(id, associated_lambdas) {
             let descr = pending_functions
                 .get_mut(&function_id)
                 .expect("expected pending function body");
@@ -3082,680 +3313,107 @@ where
         }
     }
 
-    // Fourth pass: default orphan constraints and substitute types.
-    if let Some(mut trait_output) = trait_output {
-        // Default orphan constraints for the trait implementation into the unification tables.
-        {
-            let input_tys = ty_inf.substitute_in_types(&trait_output.input_tys);
-            let output_tys = ty_inf.substitute_in_types(&trait_output.output_tys);
-            let mut head_tys = input_tys.clone();
-            head_tys.extend(output_tys.iter().copied());
-            let head_quantifiers = collect_ty_vars(&head_tys);
-            ty_inf.normalize_remaining_constraints();
-            let head_boundary = ty_inf.constraint_boundary(head_quantifiers.iter().copied());
-            let orphan_constraints =
-                head_boundary.owned_inaccessible_constraints(ty_inf.remaining_constraints());
-            let scope = DefaultingScope::from_constraints(&orphan_constraints);
-            let mut solver = trait_solver_from_module!(output, others);
-            ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, solver_arena)?;
-            ty_inf.finalize_type_bounds(&mut solver, solver_arena)?;
-            let generated = solver.finish().commit(
-                &mut output.functions,
-                &mut output.def_table,
-                &mut pending_functions,
-            );
-            elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
-            // Publication can reveal product layouts that were unknown during
-            // the pre-defaulting ownership pass. Activate their evidence now.
-            let module_env = ModuleEnv::new(output, others);
-            for (id, owner) in local_fns.iter().zip(&owners) {
-                let mut ty_inf = ty_inf.constraint_owner_scope(*owner);
-                for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
-                    let descr = pending_functions
-                        .get_mut(&function_id)
-                        .expect("pending function body");
-                    ty_inf.resolve_local_storage_and_activate_value_constraints(
-                        &descr.code.arena,
-                        descr.code.entry_node_id,
-                        &mut descr.locals,
-                        value_trait_id,
-                        module_env,
-                    );
-                }
-            }
-            let mut solver = trait_solver_from_module!(output, others);
-            ty_inf.finalize_type_bounds(&mut solver, solver_arena)?;
-            ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, solver_arena)?;
-            ty_inf.finalize_type_bounds(&mut solver, solver_arena)?;
-            let generated = solver.finish().commit(
-                &mut output.functions,
-                &mut output.def_table,
-                &mut pending_functions,
-            );
-            elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
+    Ok(ty_inf)
+}
 
-            // A type variable of the methods that nothing determines defaults to `never`; the head
-            // and the method types are protected.
-            let mut protected = Vec::new();
-            for ty in trait_output
-                .input_tys
-                .iter()
-                .chain(&trait_output.output_tys)
-            {
-                protected.extend(ty_inf.substitute_in_type(*ty).inner_ty_vars());
-            }
-            for id in &local_fns {
-                let fn_ty = &output.functions[id.as_index()].definition.ty_scheme.ty;
-                protected.extend(ty_inf.substitute_in_fn_type(fn_ty).inner_ty_vars());
-            }
-            default_unconstrained_types_to_never(
-                &mut ty_inf,
-                function_bodies(&local_fns, &associated_lambdas, &pending_functions),
-                protected,
-                ModuleEnv::new(output, others),
-            )?;
-
-            let mut head_effect_vars = trait_output
-                .input_tys
-                .iter()
-                .chain(&trait_output.output_tys)
-                .flat_map(|ty| ty_inf.substitute_in_type(*ty).inner_effect_vars())
-                .collect::<FxHashSet<_>>();
-            for eff in &trait_output.output_effs {
-                ty_inf
-                    .substitute_in_effect_type(eff)
-                    .fill_with_inner_effect_vars(&mut head_effect_vars);
-            }
-            // Implementation methods are quantified over the head only, so their own effect
-            // variables, such as that of a callback parameter written without effects, are fixed.
-            minimize_body_effects(output, &[], head_effect_vars, &mut ty_inf)?;
-            ty_inf.finalize_effects()?;
-
-            // Body inference may not specialize written generics. Context reduction below may
-            // determine output-only variables from functional dependencies; its input roots
-            // remain rigid throughout.
-            let impl_ctx = trait_ctx.as_ref().expect("impl context");
-            let resolved_roots = (0..impl_ctx.generic_type_params.len())
-                .map(|index| {
-                    let ty = impl_annotation_subst
-                        .as_ref()
-                        .and_then(|(subst, _)| subst.get(&TypeVar::new(index as u32)))
-                        .expect("a written impl generic has a type variable");
-                    ty_inf.substitute_in_type(*ty)
-                })
-                .collect::<Vec<_>>();
-            distinct_written_type_vars(impl_ctx.generic_type_params, resolved_roots, || {
-                GenericParamsOwner::TraitImpl {
-                    trait_name: impl_ctx.trait_def.name,
-                }
-            })?;
-
-            let input_tys = ty_inf.substitute_in_types(&trait_output.input_tys);
-            if output.is_trait_impl_exportable(
-                trait_ctx.as_ref().expect("impl context").trait_id,
-                &input_tys,
-                others,
-            ) {
-                ty_inf.normalize_remaining_constraints();
-                let constraints = ty_inf.remaining_constraints().to_vec();
-                let mut solver = trait_solver_from_module!(output, others);
-                let constraints = solver
-                    .reduce_public_requirements(constraints, &input_tys, &mut ty_inf, solver_arena)
-                    .map_err(|error| {
-                        error.with_private_requirement_names(
-                            impl_ctx.generic_type_params.iter().enumerate().filter_map(
-                                |(index, name)| {
-                                    let root = *impl_annotation_subst
-                                        .as_ref()?
-                                        .0
-                                        .get(&TypeVar::new(index as u32))?;
-                                    let root = ty_inf.substitute_in_type(root);
-                                    Some((*root.data().as_variable()?, name.0))
-                                },
-                            ),
-                        )
-                    })?;
-                trait_output.evidence_plan = constraints.evidence;
-                for id in &local_fns {
-                    for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
-                        pending_functions
-                            .get_mut(&function_id)
-                            .expect("pending impl body")
-                            .evidence_plan = trait_output.evidence_plan.clone();
-                    }
-                }
-                ty_inf.replace_remaining_constraints(constraints.requirements);
-                ty_inf.finalize_effects()?;
-                let generated = solver.finish().commit(
-                    &mut output.functions,
-                    &mut output.def_table,
-                    &mut pending_functions,
-                );
-                elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
-            }
-
-            // Check for remaining orphans.
-            ty_inf.normalize_remaining_constraints();
-            let input_tys = ty_inf.substitute_in_types(&trait_output.input_tys);
-            let output_tys = ty_inf.substitute_in_types(&trait_output.output_tys);
-            let mut head_tys = input_tys.clone();
-            head_tys.extend(output_tys.iter().copied());
-            let head_quantifiers = collect_ty_vars(&head_tys);
-            let head_boundary =
-                ConstraintBoundary::from_seed_ty_vars(head_quantifiers.iter().copied());
-            let module_env = ModuleEnv::new(output, others);
-            let remaining_orphans: Vec<_> = head_boundary
-                .inaccessible_constraints(ty_inf.remaining_constraints())
-                .into_iter()
-                .filter(|c| !c.is_type_has_variant())
-                .filter(|c| !is_compiler_provided_value_constraint(c, module_env))
-                .collect();
-            if !remaining_orphans.is_empty() {
-                return Err(internal_compilation_error!(UnresolvedConstraints {
-                    constraints: remaining_orphans.iter().map(|c| (*c).clone()).collect(),
-                    span: remaining_orphans[0].use_site(),
-                }));
-            }
-        }
-
-        // Substitute everything using ty_inf (single pass, includes all defaults).
-        substitute_and_canonicalize_functions(
-            output,
-            &mut pending_functions,
-            &associated_lambdas,
-            &local_fns,
-            &mut ty_inf,
-        );
-        check_declared_effects_not_combined(output, &associated_lambdas, &local_fns, &mut ty_inf)?;
-        // The impl constraints are not yet part of the method schemes, but they determine the
-        // effects of the methods' calls to their evidence, so these effects must be retained.
-        let impl_constraint_effect_vars = {
-            ty_inf.normalize_remaining_constraints();
-            let mut head_tys = ty_inf.substitute_in_types(&trait_output.input_tys);
-            head_tys.extend(ty_inf.substitute_in_types(&trait_output.output_tys));
-            let head_boundary = ConstraintBoundary::from_seed_ty_vars(collect_ty_vars(&head_tys));
-            let mut vars = FxHashSet::default();
-            for constraint in head_boundary.accessible_constraints(ty_inf.remaining_constraints()) {
-                constraint.fill_with_inner_effect_vars(&mut vars);
-            }
-            vars
-        };
-        default_output_effects_in_functions(
-            output,
-            &mut pending_functions,
-            &associated_lambdas,
-            &local_fns,
-            &impl_constraint_effect_vars,
-        );
-
-        // Resolve input and output types and output effects.
-        ty_inf.substitute_in_types_in_place(&mut trait_output.input_tys);
-        ty_inf.substitute_in_types_in_place(&mut trait_output.output_tys);
-        let output_eff_slot_roots = trait_output
-            .output_effs
-            .iter()
-            .map(|eff| {
-                eff.to_single_variable()
-                    .map(|var| ty_inf.effect_var_root(var))
-            })
-            .collect::<Vec<_>>();
-        ty_inf.substitute_in_effect_types_in_place(&mut trait_output.output_effs);
-        match explicit_trait_impl
-            .as_ref()
-            .map(|(_, _, explicit_output_effs, _)| explicit_output_effs.as_slice())
-        {
-            Some(explicit_output_effs) if !explicit_output_effs.is_empty() => {
-                let explicit_output_effs = ty_inf.substitute_in_effect_types(explicit_output_effs);
-                trait_output.output_effs = trait_output
-                    .output_effs
-                    .iter()
-                    .zip(explicit_output_effs)
-                    .zip(output_eff_slot_roots)
-                    .map(|((slot_eff, mut explicit_eff), slot_root)| {
-                        // The explicit associated output-effect expression is
-                        // the impl head. Trait output slots are inference
-                        // placeholders used while checking method bodies; keep
-                        // real inferred lower bounds, but do not leak the slot
-                        // placeholder itself into the public impl output.
-                        for effect in slot_eff.iter() {
-                            if matches!(effect, Effect::Variable(var) if Some(var) == slot_root) {
-                                continue;
-                            }
-                            explicit_eff.insert(effect);
-                        }
-                        explicit_eff
-                    })
-                    .collect();
-            }
-            _ => {
-                // Without explicit output-effect bindings, any output effect
-                // slot left unconstrained by the methods resolves to empty.
-                for eff in &mut trait_output.output_effs {
-                    *eff = EffType::multiple_primitive(&eff.inner_non_vars());
-                }
-            }
-        }
-
-        trait_output.evidence_plan.substitute(&mut ty_inf);
-        // Take final substituted constraints.
+/// Determines the types that the methods of a trait implementation leave open, publishes the
+/// implementation with its methods, and emits them.
+#[allow(clippy::too_many_arguments)]
+fn publish_trait_impl<'a, F, I>(
+    output: &mut Module,
+    solver_arena: &mut NodeArena,
+    ast_functions: &F,
+    others: &Modules,
+    warnings: &mut Vec<CompilationWarning>,
+    trait_ctx: EmitTraitCtx,
+    head: ImplHead,
+    declarations: GroupDeclarations,
+    bodies: GroupBodies,
+    mut ty_inf: UnifiedTypeInference,
+) -> Result<Emitted, InternalCompilationError>
+where
+    I: Iterator<Item = EmitFunctionInput<'a>>,
+    F: Fn() -> I,
+{
+    let ImplHead {
+        impl_annotation_subst,
+        explicit_trait_impl,
+        self_given,
+        mut trait_output,
+        ..
+    } = head;
+    let GroupDeclarations {
+        local_fns, owners, ..
+    } = declarations;
+    let GroupBodies {
+        mut pending_functions,
+        associated_lambdas,
+        ..
+    } = bodies;
+    let value_trait_id = ModuleEnv::new(output, others).expect_std_trait_id(VALUE_TRAIT_NAME);
+    // Default orphan constraints for the trait implementation into the unification tables.
+    {
+        let input_tys = ty_inf.substitute_in_types(&trait_output.input_tys);
+        let output_tys = ty_inf.substitute_in_types(&trait_output.output_tys);
+        let mut head_tys = input_tys.clone();
+        head_tys.extend(output_tys.iter().copied());
+        let head_quantifiers = collect_ty_vars(&head_tys);
         ty_inf.normalize_remaining_constraints();
-        let all_constraints = ty_inf.take_constraints();
-
-        // Validate that each method's effects are a subset of the trait definition's effects,
-        // and override them with the trait's effects.
-        // This ensures ABI consistency: the calling convention is determined by the trait definition.
-        let trait_ctx = trait_ctx.unwrap();
-        let trait_id = trait_ctx.trait_id;
-        let trait_def = &trait_ctx.trait_def;
-        let trait_effect_subst = trait_def.effect_param_subst_for_effs(&trait_output.output_effs);
-        for (i, id) in local_fns.iter().enumerate() {
-            let i = TraitMethodIndex::from_index(i);
-            let descr = &mut output.functions[id.as_index()];
-            let (_, trait_method_def) = trait_def.method(i);
-            let trait_effects = &trait_method_def
-                .ty_scheme
-                .ty
-                .effects
-                .instantiate(&trait_effect_subst);
-            // Override the function's effects with the trait's effects for ABI consistency.
-            descr.definition.ty_scheme.ty.effects = trait_effects.clone();
-        }
-
-        // Store the functions in the trait output.
-        trait_output.functions = local_fns.clone();
-
-        // Compute quantifiers from input types and constraints.
-        let mut head_tys = trait_output.input_tys.clone();
-        head_tys.extend(trait_output.output_tys.iter().copied());
-        let input_quantifiers = collect_ty_vars(&head_tys);
-        let head_boundary =
-            ConstraintBoundary::from_seed_ty_vars(input_quantifiers.iter().copied());
-        let related_constraints = head_boundary.accessible_constraints(&all_constraints);
-        let mut quantifiers = input_quantifiers.to_vec();
-        let mut collector = TyVarsCollector(&mut quantifiers);
-        for constraint in related_constraints.iter() {
-            constraint.visit(&mut collector);
-        }
-        quantifiers = quantifiers.into_iter().unique().collect();
-
-        // Detect unbound type variables in the code and return error if not in unused variants only.
-        let mut unbound_subst = FxHashMap::default();
-        for id in local_fns.iter() {
-            let unbound = hir::all_unbound_ty_vars(function_bodies(
-                slice::from_ref(id),
-                &associated_lambdas,
-                &pending_functions,
-            ));
-            let env = ModuleEnv::new(output, others);
-            let uninstantiated_unbound = check_unbounds(unbound, &quantifiers, &env)?;
-            unbound_subst.extend(
-                uninstantiated_unbound
-                    .into_iter()
-                    .map(|ty_var| (ty_var, Type::never())),
-            );
-        }
-
-        // Update quantifiers and constraints with unbound substitution.
-        quantifiers.retain(|ty_var| !unbound_subst.contains_key(ty_var));
-        trait_output.ty_var_count = quantifiers.len() as u32;
-        let mut subst = (unbound_subst, FxHashMap::default());
-        let subst_size = subst.0.len();
+        let head_boundary = ty_inf.constraint_boundary(head_quantifiers.iter().copied());
+        let orphan_constraints =
+            head_boundary.owned_inaccessible_constraints(ty_inf.remaining_constraints());
+        let scope = DefaultingScope::from_constraints(&orphan_constraints);
         let mut solver = trait_solver_from_module!(output, others);
-        trait_output.constraints = all_constraints
-            .iter()
-            .filter_map(|constraint| {
-                constraint
-                    .instantiate_and_drop_if_solved(&mut subst, &mut solver, solver_arena)
-                    .transpose()
-            })
-            .collect::<Result<_, _>>()?;
+        ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, solver_arena)?;
+        ty_inf.finalize_type_bounds(&mut solver, solver_arena)?;
         let generated = solver.finish().commit(
             &mut output.functions,
             &mut output.def_table,
             &mut pending_functions,
         );
         elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
-        // Make sure substitution is not due to constraint processing.
-        assert_eq!(subst_size, subst.0.len());
-
-        // Apply unbound substitution to code and types.
-        if !subst.0.is_empty() {
-            let mut mapper = BitmapInstantiationMapper::new(&subst);
-            trait_output.evidence_plan.instantiate_in_place(&mut mapper);
-            instantiate_types_in_place(&mut trait_output.input_tys, &mut mapper);
-            instantiate_types_in_place(&mut trait_output.output_tys, &mut mapper);
-            for id in local_fns.iter() {
-                for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
-                    let descr = &mut output.functions[function_id.as_index()];
-                    descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
-                    let pending = pending_functions
-                        .get_mut(&function_id)
-                        .expect("expected pending function body");
-                    pending.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.clone();
-                    instantiate_function_descr_in_place(pending, &mut mapper);
-                }
-            }
-        }
-
-        // Effect variables are quantified like type variables: those occurring only in the impl
-        // constraints are determined by those constraints' output effects.
-        let mut effect_quantifiers = FxHashSet::default();
-        for ty in &trait_output.input_tys {
-            ty.fill_with_inner_effect_vars(&mut effect_quantifiers);
-        }
-        for ty in &trait_output.output_tys {
-            ty.fill_with_inner_effect_vars(&mut effect_quantifiers);
-        }
-        for eff in &trait_output.output_effs {
-            eff.fill_with_inner_effect_vars(&mut effect_quantifiers);
-        }
-        trait_output
-            .constraints
-            .fill_with_inner_effect_vars(&mut effect_quantifiers);
-        let mut effect_quantifiers = effect_quantifiers.into_iter().sorted().collect::<Vec<_>>();
-        trait_output.eff_var_count = effect_quantifiers.len() as u32;
-
-        // Evidence belongs to the method that uses it, including its nested lambdas.
-        // Leaf methods keep their original ABI even when another slot uses a default.
-        let methods_use_self = local_fns
-            .iter()
-            .map(|id| ty_inf.given_used_by(*id, self_given.expect("impl self evidence")))
-            .collect::<Vec<_>>();
-        let method_self_constraint = PubTypeConstraint::new_have_trait(
-            trait_id,
-            trait_output.input_tys.clone(),
-            trait_output.output_tys.clone(),
-            trait_output.output_effs.clone(),
-            trait_ctx.span,
-        );
-
-        // The written name of each impl variable, at the position normalization gives it.
-        if let Some((ty_subst, eff_subst)) = &impl_annotation_subst {
-            for (index, (name, _)) in trait_ctx.generic_type_params.iter().enumerate() {
-                let position = ty_subst
-                    .get(&TypeVar::new(index as u32))
-                    .map(|root| ty_inf.substitute_in_type(*root))
-                    .and_then(|root| root.data().as_variable().copied())
-                    .and_then(|var| quantifiers.iter().position(|quantifier| *quantifier == var));
-                if let Some(position) = position {
-                    trait_output
-                        .generic_names
-                        .tys
-                        .insert(TypeVar::new(position as u32), *name);
-                }
-            }
-            for (index, name) in trait_ctx.generic_effect_param_names.iter().enumerate() {
-                let position = eff_subst
-                    .get(&EffectVar::new(index as u32))
-                    .and_then(|row| ty_inf.substitute_in_effect_type(row).to_single_variable())
-                    .and_then(|var| {
-                        effect_quantifiers
-                            .iter()
-                            .position(|quantifier| *quantifier == var)
-                    });
-                if let Some(position) = position {
-                    trait_output
-                        .generic_names
-                        .effs
-                        .insert(EffectVar::new(position as u32), *name);
-                }
-            }
-        }
-
-        // Fifth pass, normalize the input types/effects, substitute the types in the functions and input/output types.
-        let ty_origins = quantifiers.clone();
-        let effect_origins = effect_quantifiers.clone();
-        let subst = (
-            normalize_types(&mut quantifiers),
-            normalize_effect_vars(&mut effect_quantifiers),
-        );
-        let mut mapper = BitmapInstantiationMapper::new(&subst);
-        instantiate_types_in_place(&mut trait_output.input_tys, &mut mapper);
-        instantiate_types_in_place(&mut trait_output.output_tys, &mut mapper);
-        for eff in &mut trait_output.output_effs {
-            *eff = mapper.map_effect_type(eff);
-        }
-        instantiate_types_in_place(&mut trait_output.constraints, &mut mapper);
-        trait_output.evidence_plan.instantiate_in_place(&mut mapper);
-        for (method_index, id) in local_fns.iter().enumerate() {
-            let uses_self = methods_use_self[method_index];
-            let method_index = TraitMethodIndex::from_index(method_index);
+        // Publication can reveal product layouts that were unknown during
+        // the pre-defaulting ownership pass. Activate their evidence now.
+        let module_env = ModuleEnv::new(output, others);
+        for (id, owner) in local_fns.iter().zip(&owners) {
+            let mut ty_inf = ty_inf.constraint_owner_scope(*owner);
             for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
-                let descr = &mut output.functions[function_id.as_index()];
-                descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
-                descr.definition.ty_scheme.ty_quantifiers = quantifiers.clone();
-                descr.definition.ty_scheme.eff_quantifiers =
-                    effect_quantifiers.iter().copied().collect();
-                descr.definition.ty_scheme.constraints = trait_output.constraints.clone();
-                if uses_self {
-                    descr
-                        .definition
-                        .ty_scheme
-                        .constraints
-                        .push(method_self_constraint.map(&mut mapper));
-                }
-                debug_assert!(
-                    TypeScheme::<FnType>::list_eff_vars(
-                        &descr.definition.ty_scheme.ty,
-                        descr.definition.ty_scheme.constraints.iter(),
-                    )
-                    .is_subset(&descr.definition.ty_scheme.eff_quantifiers),
-                    "impl method mentions an effect variable the impl does not quantify"
-                );
-                let pending = pending_functions
+                let descr = pending_functions
                     .get_mut(&function_id)
-                    .expect("expected pending function body");
-                pending.definition = descr.definition.clone();
-                instantiate_function_descr_in_place(pending, &mut mapper);
-            }
-
-            // Name the function
-            let qualified_name_env = QualifiedNameEnv::new_from_module(output, others);
-            let name = qualified_name_env
-                .disambiguated_impl_method_name(
-                    trait_id,
-                    trait_def,
-                    method_index,
-                    &trait_output.input_tys,
-                    &trait_output.output_tys,
-                    &trait_output.output_effs,
-                    trait_output.ty_var_count,
-                    trait_output.eff_var_count,
-                    &trait_output.constraints,
-                )
-                .into();
-            output.name_function(*id, name);
-        }
-
-        // Sixth pass, run the borrow checker and elaborate into the final HIR arena.
-        let method_dicts = local_fns
-            .iter()
-            .map(|id| {
-                extra_parameters_from_constraints(
-                    &output.functions[id.as_index()]
-                        .definition
-                        .ty_scheme
-                        .constraints,
-                    ModuleEnv::new(output, others),
-                )
-            })
-            .collect::<Vec<_>>();
-        trait_output.method_requirements = method_dicts
-            .iter()
-            .map(|dicts| DictionaryEntryRequirements::from_callable(dicts.requirements.clone()))
-            .collect();
-        let mut module_inst_data = ModuleInstData::default();
-        for (id, dicts) in local_fns.iter().zip(&method_dicts) {
-            // The methods of an implementation have its quantifiers, and are inferred jointly.
-            insert_inst_data_for_function_and_lambdas(
-                &mut module_inst_data,
-                &associated_lambdas,
-                *id,
-                LateFunctionInstData {
-                    requirements: dicts.clone(),
-                    ty_origins: ty_origins.clone(),
-                    effect_origins: effect_origins.clone(),
-                    effects_per_reference: false,
-                    reference_effects: FxHashMap::default(),
-                },
-            );
-        }
-        for (id, dicts) in local_fns.iter().zip(&method_dicts) {
-            borrow_check_and_elaborate_dict(
-                output,
-                others,
-                &mut pending_functions,
-                &associated_lambdas,
-                dicts,
-                &module_inst_data,
-                id,
-                warnings,
-            )?;
-        }
-
-        refresh_debug_info_for_functions(output, &associated_lambdas, &local_fns);
-        for (input, id) in ast_functions().zip(&local_fns) {
-            if input.forward_default.is_some() {
-                output.functions[id.as_index()].spans = None;
-            }
-        }
-        Ok(Emitted::TraitImpl(Box::new(trait_output)))
-    } else {
-        // We are emitting normal module functions.
-
-        // Default orphan constraints for each function into the unification tables.
-        for (id, explicit_root_tys) in local_fns.iter().zip(function_explicit_root_tys.iter()) {
-            let scope = function_defaulting_scope(
-                &mut ty_inf,
-                &output.functions[id.as_index()].definition.ty_scheme.ty,
-                pending_functions.get(id),
-                explicit_root_tys,
-            );
-            let mut solver = trait_solver_from_module!(output, others);
-            ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, solver_arena)?;
-            let generated = solver.finish().commit(
-                &mut output.functions,
-                &mut output.def_table,
-                &mut pending_functions,
-            );
-            elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
-        }
-        // All function scopes have had their eligible defaults applied before
-        // any pending output component is conservatively published.
-        {
-            let mut solver = trait_solver_from_module!(output, others);
-            ty_inf.finalize_type_bounds(&mut solver, solver_arena)?;
-            let generated = solver.finish().commit(
-                &mut output.functions,
-                &mut output.def_table,
-                &mut pending_functions,
-            );
-            elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
-            // Publication can reveal product layouts that were unknown during
-            // the pre-defaulting ownership pass. Activate their evidence now.
-            let module_env = ModuleEnv::new(output, others);
-            for (id, owner) in local_fns.iter().zip(&owners) {
-                let mut ty_inf = ty_inf.constraint_owner_scope(*owner);
-                for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
-                    let descr = pending_functions
-                        .get_mut(&function_id)
-                        .expect("pending function body");
-                    ty_inf.resolve_local_storage_and_activate_value_constraints(
-                        &descr.code.arena,
-                        descr.code.entry_node_id,
-                        &mut descr.locals,
-                        value_trait_id,
-                        module_env,
-                    );
-                }
-            }
-            let mut solver = trait_solver_from_module!(output, others);
-            ty_inf.finalize_type_bounds(&mut solver, solver_arena)?;
-            // Publication can identify a pending output with its own input,
-            // making an already-local numeric or unit default eligible. Retry
-            // using current signature boundaries, then validate the choices.
-            for (id, explicit_root_tys) in local_fns.iter().zip(&function_explicit_root_tys) {
-                let scope = function_defaulting_scope(
-                    &mut ty_inf,
-                    &output.functions[id.as_index()].definition.ty_scheme.ty,
-                    pending_functions.get(id),
-                    explicit_root_tys,
+                    .expect("pending function body");
+                ty_inf.resolve_local_storage_and_activate_value_constraints(
+                    &descr.code.arena,
+                    descr.code.entry_node_id,
+                    &mut descr.locals,
+                    value_trait_id,
+                    module_env,
                 );
-                if !scope.is_empty() {
-                    ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, solver_arena)?;
-                }
-            }
-            ty_inf.finalize_type_bounds(&mut solver, solver_arena)?;
-            let generated = solver.finish().commit(
-                &mut output.functions,
-                &mut output.def_table,
-                &mut pending_functions,
-            );
-            elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
-        }
-        for (id, explicit_root_tys) in local_fns.iter().zip(function_explicit_root_tys.iter()) {
-            let descr = &output.functions[id.as_index()];
-            let fn_ty = ty_inf.substitute_in_fn_type(&descr.definition.ty_scheme.ty);
-            let mut sig_ty_vars = fn_ty.inner_ty_vars();
-            sig_ty_vars.extend(
-                explicit_root_tys
-                    .iter()
-                    .flat_map(|ty| ty_inf.substitute_in_type(*ty).inner_ty_vars().into_iter())
-                    .collect::<Vec<_>>(),
-            );
-            sig_ty_vars = sig_ty_vars.into_iter().unique().collect();
-            ty_inf.normalize_remaining_constraints();
-            let sig_boundary = ConstraintBoundary::from_seed_ty_vars(sig_ty_vars.iter().copied());
-            let module_env = ModuleEnv::new(output, others);
-            let remaining_orphans: Vec<_> = sig_boundary
-                .inaccessible_constraints(ty_inf.remaining_constraints())
-                .into_iter()
-                .filter(|c| !c.is_type_has_variant())
-                .filter(|c| !is_compiler_provided_value_constraint(c, module_env))
-                .collect();
-            if !remaining_orphans.is_empty() {
-                if let Some((ty_var, ty, span)) =
-                    first_unbound_type_in_constraints(remaining_orphans.iter().copied())
-                {
-                    return Err(internal_compilation_error!(UnboundTypeVar {
-                        ty_var,
-                        ty,
-                        span
-                    }));
-                }
-                return Err(internal_compilation_error!(Internal {
-                    error: format!(
-                        "Orphan constraints found in module fn: {}",
-                        remaining_orphans.format_with(&module_env)
-                    ),
-                    span: remaining_orphans[0].use_site(),
-                }));
             }
         }
+        let mut solver = trait_solver_from_module!(output, others);
+        ty_inf.finalize_type_bounds(&mut solver, solver_arena)?;
+        ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, solver_arena)?;
+        ty_inf.finalize_type_bounds(&mut solver, solver_arena)?;
+        let generated = solver.finish().commit(
+            &mut output.functions,
+            &mut output.def_table,
+            &mut pending_functions,
+        );
+        elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
 
-        if matches!(mode, GroupMode::Discover) {
-            let shapes = discovered_shapes(
-                output,
-                &mut ty_inf,
-                ast_functions(),
-                &local_fns,
-                &function_explicit_root_tys,
-                &recursive_function_ids,
-                &pending_functions,
-                &group_declarations,
-            )?;
-            return Ok(Emitted::Shapes(shapes));
-        }
-
-        // A type variable of the bodies that nothing determines defaults to `never`; the
-        // signatures of all functions of the group are protected.
+        // A type variable of the methods that nothing determines defaults to `never`; the head
+        // and the method types are protected.
         let mut protected = Vec::new();
-        for (id, explicit_root_tys) in local_fns.iter().zip(&function_explicit_root_tys) {
+        for ty in trait_output
+            .input_tys
+            .iter()
+            .chain(&trait_output.output_tys)
+        {
+            protected.extend(ty_inf.substitute_in_type(*ty).inner_ty_vars());
+        }
+        for id in &local_fns {
             let fn_ty = &output.functions[id.as_index()].definition.ty_scheme.ty;
             protected.extend(ty_inf.substitute_in_fn_type(fn_ty).inner_ty_vars());
-            for ty in explicit_root_tys {
-                protected.extend(ty_inf.substitute_in_type(*ty).inner_ty_vars());
-            }
         }
         default_unconstrained_types_to_never(
             &mut ty_inf,
@@ -3764,802 +3422,1573 @@ where
             ModuleEnv::new(output, others),
         )?;
 
-        // Types are determined. The contracts of a group settle from here, over copies of this
-        // state: the first round takes the contracts of functions that call nothing.
-        let mut settlement = if let GroupMode::Settle {
-            shapes, exported, ..
-        } = &mode
-        {
-            let contracts = shapes
-                .iter()
-                .map(|shape| {
-                    let mut bottom = GroupContract::bottom(shape);
-                    let subst = (
-                        shape
-                            .scheme
-                            .ty_quantifiers
-                            .iter()
-                            .map(|var| (*var, ty_inf.substitute_in_type(group_instance[var])))
-                            .collect::<TypeInstSubst>(),
-                        EffectsInstSubst::default(),
-                    );
-                    bottom.scheme.ty = bottom
-                        .scheme
-                        .ty
-                        .map(&mut BitmapInstantiationMapper::new(&subst));
-                    bottom.scheme.ty_quantifiers = Vec::new();
-                    bottom
-                })
-                .collect();
-            let (signatures, own_requirements) = baseline_requirements(
-                output,
-                others,
-                ast_functions(),
-                &local_fns,
-                &units,
-                &function_explicit_root_tys,
-                *exported,
-                &mut pending_functions,
-                &associated_lambdas,
-                &mut ty_inf,
-                solver_arena,
-            )?;
-            Some(Settlement {
-                signatures,
-                own_requirements,
-                requirements: Vec::new(),
-                requirement_ranks: Vec::new(),
-                baseline: ty_inf.clone(),
-                pending_functions: pending_functions.clone(),
-                written_functions: local_fns
-                    .iter()
-                    .flat_map(|id| function_and_associated_lambdas(id, &associated_lambdas))
-                    .collect(),
-                warning_count: warnings.len(),
-                contracts,
-                references: group_references.clone(),
-                rounds_done: 0,
-                round_bound: max_refinement_rounds(shapes),
-                checkpoint: None,
-                units: units.clone(),
-                left_out: local_fns.iter().map(|_| None).collect(),
-                written_types: ast_functions()
-                    .zip(&function_explicit_root_tys)
-                    .map(|(input, roots)| {
-                        let params = input.function.generic_params.type_params().to_vec();
-                        (input.item_name(), params, roots.clone())
-                    })
-                    .collect(),
-                reference_effects: Vec::new(),
-                answered_applications: ty_inf.answered_applications(),
-                alike: FxHashMap::default(),
-            })
-        } else {
-            None
-        };
-        let function_leading_effects = loop {
-            if let Some(settlement) = &mut settlement {
-                let started = settlement.start_round(
-                    &mut ty_inf,
-                    &mut pending_functions,
-                    output,
-                    others,
-                    warnings,
-                    &local_fns,
-                    solver_arena,
-                )?;
-                if !started {
-                    continue;
-                }
-            }
+        let mut head_effect_vars = trait_output
+            .input_tys
+            .iter()
+            .chain(&trait_output.output_tys)
+            .flat_map(|ty| ty_inf.substitute_in_type(*ty).inner_effect_vars())
+            .collect::<FxHashSet<_>>();
+        for eff in &trait_output.output_effs {
+            ty_inf
+                .substitute_in_effect_type(eff)
+                .fill_with_inner_effect_vars(&mut head_effect_vars);
+        }
+        // Implementation methods are quantified over the head only, so their own effect
+        // variables, such as that of a callback parameter written without effects, are fixed.
+        minimize_body_effects(output, &[], head_effect_vars, &mut ty_inf)?;
+        ty_inf.finalize_effects()?;
 
-            // The applications of traits that the bodies leave to their callers, with those that
-            // a declaration gives.
-            let requirements = |ty_inf: &mut UnifiedTypeInference| {
-                ty_inf.normalize_remaining_constraints();
-                let mut applications = declared_signatures
-                    .iter()
-                    .flatten()
-                    .flat_map(|declared| declared.constraints.iter())
-                    .map(|constraint| ty_inf.substitute_in_constraint(constraint))
-                    .collect::<Vec<_>>();
-                applications.extend(ty_inf.remaining_constraints().iter().cloned());
-                applications
-            };
-            // The written effect generics of a function that the round leaves out are not
-            // judged: they are as its signature has them.
-            let mut observable = FxHashSet::default();
-            if let Some(settlement) = &settlement {
-                for (index, written) in function_written_effects.iter().enumerate() {
-                    if settlement.is_left_out(index) {
-                        observable.extend(written.iter().copied());
-                    }
-                }
-            }
-            if let Err(error) = minimize_body_effects(output, &local_fns, observable, &mut ty_inf) {
-                // A written effect generic that no requirement determines in this round may be
-                // determined by one that a later contract brings: its function is left out.
-                let function = match &*error {
-                    CompilationErrorImpl::AmbiguousEffectGeneric { span, .. } => ast_functions()
-                        .position(|input| {
-                            let function = input.function.span;
-                            function.source_id() == span.source_id()
-                                && function.start() <= span.start()
-                                && span.end() <= function.end()
-                        }),
-                    _ => None,
-                };
-                match (&mut settlement, function) {
-                    (Some(settlement), Some(index)) if !settlement.is_left_out(index) => {
-                        settlement.leave_out(index, error);
-                        continue;
-                    }
-                    _ => return Err(error),
-                }
-            }
-            ty_inf.finalize_effects()?;
-
-            // Effects are final: two applications of a trait that differed by an effect still to
-            // infer, as the one a callback gets when it is passed on, may now be the same, and
-            // then so are their outputs. This holds too between an application that a body needs
-            // and one that its declaration gives.
-            //
-            // In a group that settles, the effects of a round are provisional: callees that
-            // still look pure can make two applications one that later rounds keep apart. So
-            // what follows from them is checked function by function, and a function for which
-            // it fails keeps its contract for this round, see [`Settlement::end_round`].
-            let mut round_errors: Vec<Option<InternalCompilationError>> =
-                local_fns.iter().map(|_| None).collect();
-            let is_left_out = |settlement: &Option<Settlement>, index: usize| {
-                settlement
+        // Body inference may not specialize written generics. Context reduction below may
+        // determine output-only variables from functional dependencies; its input roots
+        // remain rigid throughout.
+        let impl_ctx = &trait_ctx;
+        let resolved_roots = (0..impl_ctx.generic_type_params.len())
+            .map(|index| {
+                let ty = impl_annotation_subst
                     .as_ref()
-                    .is_some_and(|settlement| settlement.is_left_out(index))
-            };
-            {
-                let env = ModuleEnv::new(output, others);
-                let polarities =
-                    |id: TraitId| trait_output_effect_polarities(id, &|id| env.trait_def(id));
-                if let Some(settlement) = &mut settlement {
-                    // A function whose applications cannot be made one, or for which this
-                    // changes a type of the group, is left out, and the round starts again:
-                    // the group has one instance of its types, so the other functions would
-                    // fail with it.
-                    let mut left_out = None;
-                    for (index, owner) in owners.iter().enumerate() {
-                        if settlement.is_left_out(index) {
-                            continue;
-                        }
-                        let mut applications = requirements(&mut ty_inf)
-                            .into_iter()
-                            .filter(|application| {
-                                !ty_inf.is_requirement_of_others(application, *owner)
-                            })
-                            .collect::<Vec<_>>();
-                        let mut coalesced =
-                            ty_inf.coalesce_constraint_outputs(&mut applications, &polarities);
-                        if coalesced.is_ok() {
-                            coalesced = settlement.keeps_types(&mut ty_inf);
-                        }
-                        if let Err(error) = coalesced {
-                            left_out = Some((index, error));
-                            break;
-                        }
-                    }
-                    if let Some((index, error)) = left_out {
-                        settlement.leave_out(index, error);
-                        continue;
-                    }
-                } else {
-                    let mut applications = requirements(&mut ty_inf);
-                    ty_inf.coalesce_constraint_outputs(&mut applications, &polarities)?;
-                }
+                    .and_then(|(subst, _)| subst.get(&TypeVar::new(index as u32)))
+                    .expect("a written impl generic has a type variable");
+                ty_inf.substitute_in_type(*ty)
+            })
+            .collect::<Vec<_>>();
+        distinct_written_type_vars(impl_ctx.generic_type_params, resolved_roots, || {
+            GenericParamsOwner::TraitImpl {
+                trait_name: impl_ctx.trait_def.name,
             }
+        })?;
 
-            // Substitute everything using ty_inf (single pass, includes all defaults).
-            substitute_and_canonicalize_functions(
-                output,
-                &mut pending_functions,
-                &associated_lambdas,
-                &local_fns,
-                &mut ty_inf,
-            );
-            for (index, (id, round_error)) in local_fns.iter().zip(&mut round_errors).enumerate() {
-                if is_left_out(&settlement, index) {
-                    continue;
-                }
-                let checked = check_declared_effects_not_combined(
-                    output,
-                    &associated_lambdas,
-                    slice::from_ref(id),
-                    &mut ty_inf,
-                );
-                match checked {
-                    Err(error) if settlement.is_some() => {
-                        round_error.get_or_insert(error);
-                    }
-                    checked => checked?,
-                }
-            }
-
-            // Recursive-return defaulting inspects the final constraints. A contract already says
-            // what its function returns.
+        let input_tys = ty_inf.substitute_in_types(&trait_output.input_tys);
+        if output.is_trait_impl_exportable(trait_ctx.trait_id, &input_tys, others) {
             ty_inf.normalize_remaining_constraints();
-            if !mode.has_fixed_types() {
-                default_unconstrained_diverging_returns_to_never(
-                    output,
-                    &mut ty_inf,
-                    DivergingReturnDefaultingInputs {
-                        ast_functions: ast_functions(),
-                        local_fns: &local_fns,
-                        function_explicit_root_tys: &function_explicit_root_tys,
-                        recursive_function_ids: &recursive_function_ids,
-                        associated_lambdas: &associated_lambdas,
-                        pending_functions: &mut pending_functions,
-                    },
-                );
-            }
-            // In a group that settles, a requirement that bodies make is of these bodies: each
-            // function has its own instances of what the functions it names require.
-            let requirements_of_others = owners
-                .iter()
-                .map(|owner| {
-                    ty_inf
-                        .remaining_constraints()
-                        .iter()
-                        .map(|constraint| {
-                            settlement.is_some()
-                                && ty_inf.is_requirement_of_others(constraint, *owner)
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>();
-            // Take final substituted constraints.
-            let all_constraints = ty_inf.take_constraints();
-            let requirements_of_others = requirements_of_others
-                .into_iter()
-                .map(|of_others| {
-                    all_constraints
-                        .iter()
-                        .zip(of_others)
-                        .filter(|(_, of_others)| *of_others)
-                        .map(|(constraint, _)| constraint_ptr(constraint))
-                        .collect::<FxHashSet<PubTypeConstraintPtr>>()
-                })
-                .collect::<Vec<_>>();
-
-            // The type variables of the signatures of the group.
-            let group_signature_vars = local_fns
-                .iter()
-                .flat_map(|id| {
-                    output.functions[id.as_index()]
-                        .definition
-                        .ty_scheme
-                        .ty
-                        .inner_ty_vars()
-                })
-                .collect::<FxHashSet<_>>();
-            // For each function: filter constraints, check unbounds, finalize type scheme.
-            let mut used_constraints: FxHashSet<PubTypeConstraintPtr> = FxHashSet::default();
-            for (index, (((((input, id), explicit_root_tys), declared), of_others), round_error)) in
-                ast_functions()
-                    .zip(local_fns.iter())
-                    .zip(function_explicit_root_tys.iter())
-                    .zip(&declared_signatures)
-                    .zip(&requirements_of_others)
-                    .zip(&mut round_errors)
-                    .enumerate()
-            {
-                if round_error.is_some() || is_left_out(&settlement, index) {
-                    continue;
-                }
-                let published = (|| -> Result<(), InternalCompilationError> {
-                    let function = input.function;
-                    let descr = &output.functions[id.as_index()];
-                    if declared.is_none() {
-                        let resolved_roots = explicit_root_tys
-                            .iter()
-                            .map(|root| ty_inf.substitute_in_type(*root))
-                            .collect::<Vec<_>>();
-                        distinct_written_type_vars(
-                            function.generic_params.type_params(),
-                            resolved_roots,
-                            || GenericParamsOwner::Function {
-                                name: function.name.0,
+            let constraints = ty_inf.remaining_constraints().to_vec();
+            let mut solver = trait_solver_from_module!(output, others);
+            let constraints = solver
+                .reduce_public_requirements(constraints, &input_tys, &mut ty_inf, solver_arena)
+                .map_err(|error| {
+                    error.with_private_requirement_names(
+                        impl_ctx.generic_type_params.iter().enumerate().filter_map(
+                            |(index, name)| {
+                                let root = *impl_annotation_subst
+                                    .as_ref()?
+                                    .0
+                                    .get(&TypeVar::new(index as u32))?;
+                                let root = ty_inf.substitute_in_type(root);
+                                Some((*root.data().as_variable()?, name.0))
                             },
-                        )?;
-                    }
-                    // Find constraints related to this function's signature.
-                    let mut sig_ty_vars = descr.definition.ty_scheme.ty.inner_ty_vars();
-                    let explicit_ty_vars = explicit_root_tys
-                        .iter()
-                        .flat_map(|ty| ty_inf.substitute_in_type(*ty).inner_ty_vars().into_iter())
-                        .collect::<Vec<_>>();
-                    sig_ty_vars.extend(explicit_ty_vars.iter().copied());
-                    sig_ty_vars = sig_ty_vars.into_iter().unique().collect();
-                    let sig_boundary =
-                        ConstraintBoundary::from_seed_ty_vars(sig_ty_vars.iter().copied());
-                    let related_constraints = sig_boundary
-                        .accessible_constraints(&all_constraints)
-                        .into_iter()
-                        .filter(|constraint| !of_others.contains(&constraint_ptr(constraint)))
-                        .collect::<Vec<_>>();
-                    let related_ptrs: FxHashSet<PubTypeConstraintPtr> = related_constraints
-                        .iter()
-                        .map(|c| constraint_ptr(c))
-                        .collect();
-                    for ptr in &related_ptrs {
-                        used_constraints.insert(*ptr);
-                    }
-
-                    // Compute quantifiers.
-                    let mut quantifiers = TypeScheme::list_ty_vars(
-                        &descr.definition.ty_scheme.ty,
-                        related_constraints.iter().copied(),
-                    );
-                    quantifiers.extend(explicit_ty_vars.iter().copied());
-                    quantifiers = quantifiers.into_iter().unique().collect();
-
-                    // Check for unbound type variables, including in the function's lambdas.
-                    let unbound = hir::all_unbound_ty_vars(function_bodies(
-                        slice::from_ref(id),
-                        &associated_lambdas,
-                        &pending_functions,
-                    ));
-                    let env = ModuleEnv::new(output, others);
-                    let uninstantiated_unbound = if settlement.is_some() {
-                        // A type that the body does not observe and that is of the signature of
-                        // another function of the group is `never` in this body, as it is at a
-                        // call outside the group that does not determine it.
-                        let (of_others, own): (IndexMap<_, _>, IndexMap<_, _>) =
-                            unbound.into_iter().partition(|(ty_var, _)| {
-                                !quantifiers.contains(ty_var)
-                                    && group_signature_vars.contains(ty_var)
-                            });
-                        let mut unobserved = check_unbounds(own, &quantifiers, &env)?;
-                        unobserved.extend(of_others.into_keys());
-                        unobserved
-                    } else {
-                        check_unbounds(unbound, &quantifiers, &env)?
-                    };
-
-                    // Apply unbound→Never fixup if needed.
-                    if !uninstantiated_unbound.is_empty() {
-                        let fixup_subst: (TypeInstSubst, FxHashMap<_, _>) = (
-                            uninstantiated_unbound
-                                .iter()
-                                .map(|v| (*v, Type::never()))
-                                .collect(),
-                            FxHashMap::default(),
-                        );
-                        let mut mapper = BitmapInstantiationMapper::new(&fixup_subst);
-                        for function_id in function_and_associated_lambdas(id, &associated_lambdas)
-                        {
-                            let pending = pending_functions
-                                .get_mut(&function_id)
-                                .expect("expected pending function body");
-                            instantiate_function_descr_in_place(pending, &mut mapper);
-                        }
-                        quantifiers.retain(|v| !uninstantiated_unbound.contains(v));
-                    }
-
-                    // Filter and finalize constraints.
-                    let mut solver = trait_solver_from_module!(output, others);
-                    let mut drop_subst = (FxHashMap::default(), FxHashMap::default());
-                    let constraints: Vec<_> = all_constraints
-                        .iter()
-                        .filter(|c| related_ptrs.contains(&constraint_ptr(c)))
-                        .filter_map(|constraint| {
-                            constraint
-                                .instantiate_and_drop_if_solved(
-                                    &mut drop_subst,
-                                    &mut solver,
-                                    solver_arena,
-                                )
-                                .transpose()
-                        })
-                        .collect::<Result<_, _>>()?;
-                    let generated = solver.finish().commit(
-                        &mut output.functions,
-                        &mut output.def_table,
-                        &mut pending_functions,
-                    );
-                    elaborate_generated_functions(
-                        output,
-                        others,
-                        &mut pending_functions,
-                        generated,
-                    )?;
-
-                    let mut constraints = constraints;
-                    if let Some(declared) = declared {
-                        constraints = fit_declared_signature(
-                            declared,
-                            constraints,
-                            input,
-                            output,
-                            others,
-                            &mut ty_inf,
-                        )?;
-                        let declared_ty = ty_inf.substitute_in_fn_type(&declared.ty);
-                        output.functions[id.as_index()].definition.ty_scheme.ty = declared_ty;
-                    }
-
-                    // Write the final type scheme.
-                    let explicit_ty_vars = explicit_ty_vars
-                        .iter()
-                        .copied()
-                        .unique()
-                        .collect::<Vec<_>>();
-                    quantifiers = explicit_ty_vars
-                        .iter()
-                        .copied()
-                        .chain(
-                            quantifiers
-                                .into_iter()
-                                .filter(|ty_var| !explicit_ty_vars.contains(ty_var)),
-                        )
-                        .collect();
-                    for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
-                        let descr = &mut output.functions[function_id.as_index()];
-                        descr.definition.ty_scheme.ty_quantifiers = quantifiers.clone();
-                        descr.definition.ty_scheme.eff_quantifiers =
-                            descr.definition.ty_scheme.ty.input_effect_vars();
-                        descr.definition.ty_scheme.constraints = constraints.clone();
-                        if declared.is_some() {
-                            descr.definition.ty_scheme.eff_quantifiers =
-                                TypeScheme::<FnType>::list_eff_vars(
-                                    &descr.definition.ty_scheme.ty,
-                                    constraints.iter(),
-                                );
-                        }
-                        descr.definition.generic_params =
-                            function.generic_params.type_params().to_vec();
-                        descr.definition.generic_effect_params =
-                            function.generic_params.effect_params().to_vec();
-                        pending_functions
-                            .get_mut(&function_id)
-                            .expect("expected pending function body")
-                            .definition = descr.definition.clone();
-                    }
-
-                    // Log dropped constraints.
-                    if log_enabled!(log::Level::Trace) {
-                        let module_env = ModuleEnv::new(output, others);
-                        let retained_ptrs: FxHashSet<PubTypeConstraintPtr> =
-                            constraints.iter().map(constraint_ptr).collect();
-                        log_dropped_constraints_module(
-                            function.name.0,
-                            &all_constraints,
-                            &related_ptrs,
-                            &retained_ptrs,
-                            module_env,
-                        );
-                    }
-                    Ok(())
-                })();
-                match published {
-                    Err(error) if settlement.is_some() => *round_error = Some(error),
-                    published => published?,
-                }
-            }
-
-            default_output_effects_in_functions(
-                output,
-                &mut pending_functions,
-                &associated_lambdas,
-                &local_fns,
-                &FxHashSet::default(),
-            );
-
-            // Safety check: make sure that there are no unused constraints.
-            let module_env = ModuleEnv::new(output, others);
-            let unused_constraints = all_constraints
-                .iter()
-                .filter(|c| {
-                    !used_constraints.contains(&constraint_ptr(c))
-                        && !c.is_type_has_variant()
-                        && !is_compiler_provided_value_constraint(c, module_env)
-                })
-                .collect::<Vec<_>>();
-            // A function that failed in this round did not take its requirements.
-            let all_published = round_errors.iter().all(Option::is_none)
-                && (0..local_fns.len()).all(|index| !is_left_out(&settlement, index));
-            if !unused_constraints.is_empty() && all_published {
-                let module_env = ModuleEnv::new(output, others);
-                let constraints = unused_constraints
-                    .iter()
-                    .map(|c| c.format_with(&module_env))
-                    .join(" ∧ ");
-                return Err(internal_compilation_error!(Internal {
-                    error: format!("Unused constraints in module compilation: {}", constraints),
-                    span: unused_constraints[0].use_site(),
-                }));
-            }
-
-            // Every member of an exported recursive group needs the public leaves of its
-            // requirements: a private member cannot recover them backwards from a dictionary for the
-            // unreduced private requirement. A group that settles has them already.
-            let exports_group = group_is_exported(ast_functions());
-            let mut published_requirements_changed = false;
-            for ((input, id), explicit_roots) in ast_functions()
-                .zip(&local_fns)
-                .zip(&function_explicit_root_tys)
-            {
-                // A group that settles has the public form of its requirements already.
-                if !exports_group || input.trait_default.is_some() || settlement.is_some() {
-                    continue;
-                }
-                let scheme = output.functions[id.as_index()].definition.ty_scheme.clone();
-                let rigid = scheme
-                    .ty
-                    .args
-                    .iter()
-                    .map(|arg| arg.ty)
-                    .chain(explicit_roots.iter().copied())
-                    .collect::<Vec<_>>();
-                let Some(constraints) = public_requirements(
-                    &scheme.constraints,
-                    &rigid,
-                    input.function,
-                    explicit_roots,
-                    *id,
-                    output,
-                    others,
-                    &mut pending_functions,
-                    &associated_lambdas,
-                    &mut ty_inf,
-                    solver_arena,
-                )?
-                else {
-                    continue;
-                };
-                published_requirements_changed = true;
+                        ),
+                    )
+                })?;
+            trait_output.evidence_plan = constraints.evidence;
+            for id in &local_fns {
                 for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
-                    output.functions[function_id.as_index()]
-                        .definition
-                        .ty_scheme
-                        .constraints = constraints.clone();
                     pending_functions
                         .get_mut(&function_id)
-                        .expect("pending function body")
-                        .definition
-                        .ty_scheme
-                        .constraints = constraints.clone();
+                        .expect("pending impl body")
+                        .evidence_plan = trait_output.evidence_plan.clone();
                 }
             }
-            if published_requirements_changed {
-                ty_inf.finalize_effects()?;
-                substitute_and_canonicalize_functions(
-                    output,
-                    &mut pending_functions,
-                    &associated_lambdas,
-                    &local_fns,
-                    &mut ty_inf,
-                );
-                for id in &local_fns {
-                    let scheme = &output.functions[id.as_index()].definition.ty_scheme;
-                    let quantifiers = scheme
-                        .ty_quantifiers
-                        .iter()
-                        .filter_map(|var| {
-                            ty_inf
-                                .substitute_in_type(Type::variable(*var))
-                                .data()
-                                .as_variable()
-                                .copied()
-                        })
-                        .chain(TypeScheme::list_ty_vars(
-                            &scheme.ty,
-                            scheme.constraints.iter(),
-                        ))
-                        .unique()
-                        .collect::<Vec<_>>();
-                    for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
-                        output.functions[function_id.as_index()]
-                            .definition
-                            .ty_scheme
-                            .ty_quantifiers = quantifiers.clone();
-                        pending_functions
-                            .get_mut(&function_id)
-                            .expect("pending function body")
-                            .definition
-                            .ty_scheme
-                            .ty_quantifiers = quantifiers.clone();
-                    }
-                }
-            }
-
-            // The effect variables that each published signature numbers first: its written generics.
-            let mut function_leading_effects = function_written_effects.clone();
-            if let Some(settlement) = &mut settlement {
-                let first = ast_functions()
-                    .next()
-                    .expect("a group has a function")
-                    .item_name();
-                // The signatures number their effects as the contracts do.
-                match settlement.end_round(
-                    &mut ty_inf,
-                    &function_written_effects,
-                    first,
-                    round_errors,
-                )? {
-                    Some(numbered) => function_leading_effects = numbered,
-                    None => continue,
-                }
-            }
-            break function_leading_effects;
-        };
-
-        // Fifth pass, normalize the type schemes, substitute the types in the functions.
-        let mut function_ty_origins = Vec::new();
-        let mut published_subscripts = FxHashMap::default();
-        let mut function_effect_substs = Vec::new();
-        let mut function_effect_origins = Vec::new();
-        for (((input, id), written_effects), unit) in ast_functions()
-            .zip(local_fns.iter())
-            .zip(&function_written_effects)
-            .zip(&units)
-        {
-            // The bodies of a definition number their effects as the first does.
-            let leading_effects = &function_leading_effects[*unit];
-            let descr = &mut output.functions[id.as_index()];
-            function_ty_origins.push(descr.definition.ty_scheme.ty_quantifiers.clone());
-            let subst = descr
-                .definition
-                .ty_scheme
-                .normalize_with_leading_effects(leading_effects);
-            function_effect_substs.push(subst.1.clone());
-            function_effect_origins.push(
-                subst
-                    .1
-                    .iter()
-                    .filter_map(|(origin, row)| Some((row.to_single_variable()?, *origin)))
-                    .sorted()
-                    .map(|(_, origin)| origin)
-                    .collect::<Vec<_>>(),
+            ty_inf.replace_remaining_constraints(constraints.requirements);
+            ty_inf.finalize_effects()?;
+            let generated = solver.finish().commit(
+                &mut output.functions,
+                &mut output.def_table,
+                &mut pending_functions,
             );
-            let normalized_scheme = descr.definition.ty_scheme.clone();
-            // A written generic that the scheme does not retain leaves no name behind, so that
-            // the retained ones keep theirs by position.
-            let retained_effect_params = written_effects
+            elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
+        }
+
+        // Check for remaining orphans.
+        ty_inf.normalize_remaining_constraints();
+        let input_tys = ty_inf.substitute_in_types(&trait_output.input_tys);
+        let output_tys = ty_inf.substitute_in_types(&trait_output.output_tys);
+        let mut head_tys = input_tys.clone();
+        head_tys.extend(output_tys.iter().copied());
+        let head_quantifiers = collect_ty_vars(&head_tys);
+        let head_boundary = ConstraintBoundary::from_seed_ty_vars(head_quantifiers.iter().copied());
+        let module_env = ModuleEnv::new(output, others);
+        let remaining_orphans: Vec<_> = head_boundary
+            .inaccessible_constraints(ty_inf.remaining_constraints())
+            .into_iter()
+            .filter(|c| !c.is_type_has_variant())
+            .filter(|c| !is_compiler_provided_value_constraint(c, module_env))
+            .collect();
+        if !remaining_orphans.is_empty() {
+            return Err(internal_compilation_error!(UnresolvedConstraints {
+                constraints: remaining_orphans.iter().map(|c| (*c).clone()).collect(),
+                span: remaining_orphans[0].use_site(),
+            }));
+        }
+    }
+
+    // Substitute everything using ty_inf (single pass, includes all defaults).
+    substitute_and_canonicalize_functions(
+        output,
+        &mut pending_functions,
+        &associated_lambdas,
+        &local_fns,
+        &mut ty_inf,
+    );
+    check_declared_effects_not_combined(output, &associated_lambdas, &local_fns, &mut ty_inf)?;
+    // The impl constraints are not yet part of the method schemes, but they determine the
+    // effects of the methods' calls to their evidence, so these effects must be retained.
+    let impl_constraint_effect_vars = {
+        ty_inf.normalize_remaining_constraints();
+        let mut head_tys = ty_inf.substitute_in_types(&trait_output.input_tys);
+        head_tys.extend(ty_inf.substitute_in_types(&trait_output.output_tys));
+        let head_boundary = ConstraintBoundary::from_seed_ty_vars(collect_ty_vars(&head_tys));
+        let mut vars = FxHashSet::default();
+        for constraint in head_boundary.accessible_constraints(ty_inf.remaining_constraints()) {
+            constraint.fill_with_inner_effect_vars(&mut vars);
+        }
+        vars
+    };
+    default_output_effects_in_functions(
+        output,
+        &mut pending_functions,
+        &associated_lambdas,
+        &local_fns,
+        &impl_constraint_effect_vars,
+    );
+
+    // Resolve input and output types and output effects.
+    ty_inf.substitute_in_types_in_place(&mut trait_output.input_tys);
+    ty_inf.substitute_in_types_in_place(&mut trait_output.output_tys);
+    let output_eff_slot_roots = trait_output
+        .output_effs
+        .iter()
+        .map(|eff| {
+            eff.to_single_variable()
+                .map(|var| ty_inf.effect_var_root(var))
+        })
+        .collect::<Vec<_>>();
+    ty_inf.substitute_in_effect_types_in_place(&mut trait_output.output_effs);
+    match explicit_trait_impl
+        .as_ref()
+        .map(|(_, _, explicit_output_effs, _)| explicit_output_effs.as_slice())
+    {
+        Some(explicit_output_effs) if !explicit_output_effs.is_empty() => {
+            let explicit_output_effs = ty_inf.substitute_in_effect_types(explicit_output_effs);
+            trait_output.output_effs = trait_output
+                .output_effs
                 .iter()
-                .zip(input.function.generic_params.effect_params())
-                .filter(|(var, _)| subst.1.get(var).is_some_and(|row| !row.is_empty()))
-                .map(|(_, name)| *name)
-                .collect::<Vec<_>>();
+                .zip(explicit_output_effs)
+                .zip(output_eff_slot_roots)
+                .map(|((slot_eff, mut explicit_eff), slot_root)| {
+                    // The explicit associated output-effect expression is
+                    // the impl head. Trait output slots are inference
+                    // placeholders used while checking method bodies; keep
+                    // real inferred lower bounds, but do not leak the slot
+                    // placeholder itself into the public impl output.
+                    for effect in slot_eff.iter() {
+                        if matches!(effect, Effect::Variable(var) if Some(var) == slot_root) {
+                            continue;
+                        }
+                        explicit_eff.insert(effect);
+                    }
+                    explicit_eff
+                })
+                .collect();
+        }
+        _ => {
+            // Without explicit output-effect bindings, any output effect
+            // slot left unconstrained by the methods resolves to empty.
+            for eff in &mut trait_output.output_effs {
+                *eff = EffType::multiple_primitive(&eff.inner_non_vars());
+            }
+        }
+    }
+
+    trait_output.evidence_plan.substitute(&mut ty_inf);
+    // Take final substituted constraints.
+    ty_inf.normalize_remaining_constraints();
+    let all_constraints = ty_inf.take_constraints();
+
+    // Validate that each method's effects are a subset of the trait definition's effects,
+    // and override them with the trait's effects.
+    // This ensures ABI consistency: the calling convention is determined by the trait definition.
+    let trait_id = trait_ctx.trait_id;
+    let trait_def = &trait_ctx.trait_def;
+    let trait_effect_subst = trait_def.effect_param_subst_for_effs(&trait_output.output_effs);
+    for (i, id) in local_fns.iter().enumerate() {
+        let i = TraitMethodIndex::from_index(i);
+        let descr = &mut output.functions[id.as_index()];
+        let (_, trait_method_def) = trait_def.method(i);
+        let trait_effects = &trait_method_def
+            .ty_scheme
+            .ty
+            .effects
+            .instantiate(&trait_effect_subst);
+        // Override the function's effects with the trait's effects for ABI consistency.
+        descr.definition.ty_scheme.ty.effects = trait_effects.clone();
+    }
+
+    // Store the functions in the trait output.
+    trait_output.functions = local_fns.clone();
+
+    // Compute quantifiers from input types and constraints.
+    let mut head_tys = trait_output.input_tys.clone();
+    head_tys.extend(trait_output.output_tys.iter().copied());
+    let input_quantifiers = collect_ty_vars(&head_tys);
+    let head_boundary = ConstraintBoundary::from_seed_ty_vars(input_quantifiers.iter().copied());
+    let related_constraints = head_boundary.accessible_constraints(&all_constraints);
+    let mut quantifiers = input_quantifiers.to_vec();
+    let mut collector = TyVarsCollector(&mut quantifiers);
+    for constraint in related_constraints.iter() {
+        constraint.visit(&mut collector);
+    }
+    quantifiers = quantifiers.into_iter().unique().collect();
+
+    // Detect unbound type variables in the code and return error if not in unused variants only.
+    let mut unbound_subst = FxHashMap::default();
+    for id in local_fns.iter() {
+        let unbound = hir::all_unbound_ty_vars(function_bodies(
+            slice::from_ref(id),
+            &associated_lambdas,
+            &pending_functions,
+        ));
+        let env = ModuleEnv::new(output, others);
+        let uninstantiated_unbound = check_unbounds(unbound, &quantifiers, &env)?;
+        unbound_subst.extend(
+            uninstantiated_unbound
+                .into_iter()
+                .map(|ty_var| (ty_var, Type::never())),
+        );
+    }
+
+    // Update quantifiers and constraints with unbound substitution.
+    quantifiers.retain(|ty_var| !unbound_subst.contains_key(ty_var));
+    trait_output.ty_var_count = quantifiers.len() as u32;
+    let mut subst = (unbound_subst, FxHashMap::default());
+    let subst_size = subst.0.len();
+    let mut solver = trait_solver_from_module!(output, others);
+    trait_output.constraints = all_constraints
+        .iter()
+        .filter_map(|constraint| {
+            constraint
+                .instantiate_and_drop_if_solved(&mut subst, &mut solver, solver_arena)
+                .transpose()
+        })
+        .collect::<Result<_, _>>()?;
+    let generated = solver.finish().commit(
+        &mut output.functions,
+        &mut output.def_table,
+        &mut pending_functions,
+    );
+    elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
+    // Make sure substitution is not due to constraint processing.
+    assert_eq!(subst_size, subst.0.len());
+
+    // Apply unbound substitution to code and types.
+    if !subst.0.is_empty() {
+        let mut mapper = BitmapInstantiationMapper::new(&subst);
+        trait_output.evidence_plan.instantiate_in_place(&mut mapper);
+        instantiate_types_in_place(&mut trait_output.input_tys, &mut mapper);
+        instantiate_types_in_place(&mut trait_output.output_tys, &mut mapper);
+        for id in local_fns.iter() {
             for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
                 let descr = &mut output.functions[function_id.as_index()];
-                let mut mapper = BitmapInstantiationMapper::new(&subst);
-                assert_eq!(
-                    written_effects.len(),
-                    descr.definition.generic_effect_params.len(),
-                    "each written effect generic has its variable"
-                );
-                descr.definition.generic_effect_params = retained_effect_params.clone();
-                if function_id != *id {
-                    descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
-                    descr.definition.ty_scheme.ty_quantifiers =
-                        normalized_scheme.ty_quantifiers.clone();
-                    descr.definition.ty_scheme.eff_quantifiers =
-                        normalized_scheme.eff_quantifiers.clone();
-                    descr.definition.ty_scheme.constraints = normalized_scheme.constraints.clone();
-                }
+                descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
                 let pending = pending_functions
                     .get_mut(&function_id)
                     .expect("expected pending function body");
-                pending.definition = descr.definition.clone();
+                pending.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.clone();
                 instantiate_function_descr_in_place(pending, &mut mapper);
-                default_body_only_effects_in_function_descr(pending);
             }
-            if let EmitFunctionKind::SubscriptMember {
-                subscript_id,
-                subscript_name,
-                projection_key,
-                member_function_kind,
-                provenance,
-                ..
-            } = input.kind
-            {
-                let definition = output.functions[id.as_index()].definition.clone();
-                let generated_name = {
-                    let qualified_name_env = QualifiedNameEnv::new_from_module(output, others);
-                    let readable_subscript_name = projection_key.map_or_else(
-                        || {
-                            qualified_name_env
-                                .qualified_named_subscript_name(output.module_id(), subscript_name)
-                        },
-                        |key| qualified_name_env.qualified_projection_subscript_name(key),
-                    );
-                    qualified_name_env.disambiguated_subscript_member_name(
-                        &readable_subscript_name,
-                        member_function_kind,
-                        &definition,
-                        provenance,
-                    )
-                };
-                output.name_function_with_visibility(
-                    *id,
-                    generated_name.into(),
-                    Visibility::Module,
-                );
-                update_subscript_signature_from_member_definition(
-                    output,
-                    subscript_id,
-                    projection_key.is_some(),
-                    &definition,
-                    &mut published_subscripts,
-                    input.function.span,
-                )?;
+        }
+    }
+
+    // Effect variables are quantified like type variables: those occurring only in the impl
+    // constraints are determined by those constraints' output effects.
+    let mut effect_quantifiers = FxHashSet::default();
+    for ty in &trait_output.input_tys {
+        ty.fill_with_inner_effect_vars(&mut effect_quantifiers);
+    }
+    for ty in &trait_output.output_tys {
+        ty.fill_with_inner_effect_vars(&mut effect_quantifiers);
+    }
+    for eff in &trait_output.output_effs {
+        eff.fill_with_inner_effect_vars(&mut effect_quantifiers);
+    }
+    trait_output
+        .constraints
+        .fill_with_inner_effect_vars(&mut effect_quantifiers);
+    let mut effect_quantifiers = effect_quantifiers.into_iter().sorted().collect::<Vec<_>>();
+    trait_output.eff_var_count = effect_quantifiers.len() as u32;
+
+    // Evidence belongs to the method that uses it, including its nested lambdas.
+    // Leaf methods keep their original ABI even when another slot uses a default.
+    let methods_use_self = local_fns
+        .iter()
+        .map(|id| ty_inf.given_used_by(*id, self_given.expect("impl self evidence")))
+        .collect::<Vec<_>>();
+    let method_self_constraint = PubTypeConstraint::new_have_trait(
+        trait_id,
+        trait_output.input_tys.clone(),
+        trait_output.output_tys.clone(),
+        trait_output.output_effs.clone(),
+        trait_ctx.span,
+    );
+
+    // The written name of each impl variable, at the position normalization gives it.
+    if let Some((ty_subst, eff_subst)) = &impl_annotation_subst {
+        for (index, (name, _)) in trait_ctx.generic_type_params.iter().enumerate() {
+            let position = ty_subst
+                .get(&TypeVar::new(index as u32))
+                .map(|root| ty_inf.substitute_in_type(*root))
+                .and_then(|root| root.data().as_variable().copied())
+                .and_then(|var| quantifiers.iter().position(|quantifier| *quantifier == var));
+            if let Some(position) = position {
+                trait_output
+                    .generic_names
+                    .tys
+                    .insert(TypeVar::new(position as u32), *name);
             }
+        }
+        for (index, name) in trait_ctx.generic_effect_param_names.iter().enumerate() {
+            let position = eff_subst
+                .get(&EffectVar::new(index as u32))
+                .and_then(|row| ty_inf.substitute_in_effect_type(row).to_single_variable())
+                .and_then(|var| {
+                    effect_quantifiers
+                        .iter()
+                        .position(|quantifier| *quantifier == var)
+                });
+            if let Some(position) = position {
+                trait_output
+                    .generic_names
+                    .effs
+                    .insert(EffectVar::new(position as u32), *name);
+            }
+        }
+    }
+
+    // Fifth pass, normalize the input types/effects, substitute the types in the functions and input/output types.
+    let ty_origins = quantifiers.clone();
+    let effect_origins = effect_quantifiers.clone();
+    let subst = (
+        normalize_types(&mut quantifiers),
+        normalize_effect_vars(&mut effect_quantifiers),
+    );
+    let mut mapper = BitmapInstantiationMapper::new(&subst);
+    instantiate_types_in_place(&mut trait_output.input_tys, &mut mapper);
+    instantiate_types_in_place(&mut trait_output.output_tys, &mut mapper);
+    for eff in &mut trait_output.output_effs {
+        *eff = mapper.map_effect_type(eff);
+    }
+    instantiate_types_in_place(&mut trait_output.constraints, &mut mapper);
+    trait_output.evidence_plan.instantiate_in_place(&mut mapper);
+    for (method_index, id) in local_fns.iter().enumerate() {
+        let uses_self = methods_use_self[method_index];
+        let method_index = TraitMethodIndex::from_index(method_index);
+        for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
+            let descr = &mut output.functions[function_id.as_index()];
+            descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
+            descr.definition.ty_scheme.ty_quantifiers = quantifiers.clone();
+            descr.definition.ty_scheme.eff_quantifiers =
+                effect_quantifiers.iter().copied().collect();
+            descr.definition.ty_scheme.constraints = trait_output.constraints.clone();
+            if uses_self {
+                descr
+                    .definition
+                    .ty_scheme
+                    .constraints
+                    .push(method_self_constraint.map(&mut mapper));
+            }
+            debug_assert!(
+                TypeScheme::<FnType>::list_eff_vars(
+                    &descr.definition.ty_scheme.ty,
+                    descr.definition.ty_scheme.constraints.iter(),
+                )
+                .is_subset(&descr.definition.ty_scheme.eff_quantifiers),
+                "impl method mentions an effect variable the impl does not quantify"
+            );
+            let pending = pending_functions
+                .get_mut(&function_id)
+                .expect("expected pending function body");
+            pending.definition = descr.definition.clone();
+            instantiate_function_descr_in_place(pending, &mut mapper);
         }
 
-        // Sixth pass, run the borrow checker and elaborate into the final HIR arena.
-        // A group that settled knows the effects of each of its references.
-        let reference_effects = match &settlement {
-            Some(settlement) => {
-                let quantifier_counts = local_fns
-                    .iter()
-                    .map(|id| {
-                        let scheme = &output.functions[id.as_index()].definition.ty_scheme;
-                        scheme.eff_quantifiers.len()
-                    })
-                    .collect::<Vec<_>>();
-                settlement.recorded_reference_effects(
-                    &function_leading_effects,
-                    &function_effect_substs,
-                    &quantifier_counts,
-                    &mut ty_inf,
-                )
-            }
-            None => vec![FxHashMap::default(); local_fns.len()],
-        };
-        let mut module_inst_data = ModuleInstData::default();
-        for (((id, ty_origins), effect_origins), reference_effects) in local_fns
+        // Name the function
+        let qualified_name_env = QualifiedNameEnv::new_from_module(output, others);
+        let name = qualified_name_env
+            .disambiguated_impl_method_name(
+                trait_id,
+                trait_def,
+                method_index,
+                &trait_output.input_tys,
+                &trait_output.output_tys,
+                &trait_output.output_effs,
+                trait_output.ty_var_count,
+                trait_output.eff_var_count,
+                &trait_output.constraints,
+            )
+            .into();
+        output.name_function(*id, name);
+    }
+
+    // Sixth pass, run the borrow checker and elaborate into the final HIR arena.
+    let method_dicts = local_fns
+        .iter()
+        .map(|id| {
+            extra_parameters_from_constraints(
+                &output.functions[id.as_index()]
+                    .definition
+                    .ty_scheme
+                    .constraints,
+                ModuleEnv::new(output, others),
+            )
+        })
+        .collect::<Vec<_>>();
+    trait_output.method_requirements = method_dicts
+        .iter()
+        .map(|dicts| DictionaryEntryRequirements::from_callable(dicts.requirements.clone()))
+        .collect();
+    let mut module_inst_data = ModuleInstData::default();
+    for (id, dicts) in local_fns.iter().zip(&method_dicts) {
+        // The methods of an implementation have its quantifiers, and are inferred jointly.
+        insert_inst_data_for_function_and_lambdas(
+            &mut module_inst_data,
+            &associated_lambdas,
+            *id,
+            LateFunctionInstData {
+                requirements: dicts.clone(),
+                ty_origins: ty_origins.clone(),
+                effect_origins: effect_origins.clone(),
+                effects_per_reference: false,
+                reference_effects: FxHashMap::default(),
+            },
+        );
+    }
+    for (id, dicts) in local_fns.iter().zip(&method_dicts) {
+        borrow_check_and_elaborate_dict(
+            output,
+            others,
+            &mut pending_functions,
+            &associated_lambdas,
+            dicts,
+            &module_inst_data,
+            id,
+            warnings,
+        )?;
+    }
+
+    refresh_debug_info_for_functions(output, &associated_lambdas, &local_fns);
+    for (input, id) in ast_functions().zip(&local_fns) {
+        if input.forward_default.is_some() {
+            output.functions[id.as_index()].spans = None;
+        }
+    }
+    Ok(Emitted::TraitImpl(Box::new(trait_output)))
+}
+
+/// Determines the types that the functions of a group leave open, then, as `mode` says, reads
+/// their shapes, or finds their effects, publishes their schemes and emits them.
+#[allow(clippy::too_many_arguments)]
+fn publish_functions<'a, F, I>(
+    output: &mut Module,
+    solver_arena: &mut NodeArena,
+    ast_functions: &F,
+    others: &Modules,
+    warnings: &mut Vec<CompilationWarning>,
+    mode: GroupMode<'_>,
+    declarations: GroupDeclarations,
+    bodies: GroupBodies,
+    mut ty_inf: UnifiedTypeInference,
+) -> Result<Emitted, InternalCompilationError>
+where
+    I: Iterator<Item = EmitFunctionInput<'a>>,
+    F: Fn() -> I,
+{
+    let GroupDeclarations {
+        local_fns,
+        units,
+        owners,
+        function_explicit_root_tys,
+        function_written_effects,
+        function_kinds,
+        group_declarations,
+        group_instance,
+        ..
+    } = &declarations;
+    let GroupBodies {
+        mut pending_functions,
+        associated_lambdas,
+        group_references,
+        recursive_function_ids,
+    } = bodies;
+    determine_function_types(
+        output,
+        solver_arena,
+        others,
+        local_fns,
+        owners,
+        function_explicit_root_tys,
+        &mut pending_functions,
+        &associated_lambdas,
+        &mut ty_inf,
+    )?;
+    if matches!(mode, GroupMode::Discover) {
+        let shapes = discovered_shapes(
+            output,
+            &mut ty_inf,
+            ast_functions(),
+            local_fns,
+            function_explicit_root_tys,
+            &recursive_function_ids,
+            &pending_functions,
+            group_declarations,
+        )?;
+        return Ok(Emitted::Shapes(shapes));
+    }
+
+    // A type variable of the bodies that nothing determines defaults to `never`; the
+    // signatures of all functions of the group are protected.
+    let mut protected = Vec::new();
+    for (id, explicit_root_tys) in local_fns.iter().zip(function_explicit_root_tys) {
+        let fn_ty = &output.functions[id.as_index()].definition.ty_scheme.ty;
+        protected.extend(ty_inf.substitute_in_fn_type(fn_ty).inner_ty_vars());
+        for ty in explicit_root_tys {
+            protected.extend(ty_inf.substitute_in_type(*ty).inner_ty_vars());
+        }
+    }
+    default_unconstrained_types_to_never(
+        &mut ty_inf,
+        function_bodies(local_fns, &associated_lambdas, &pending_functions),
+        protected,
+        ModuleEnv::new(output, others),
+    )?;
+
+    // Types are determined. The contracts of a group settle from here, over copies of this
+    // state: the first round takes the contracts of functions that call nothing.
+    let mut settlement = if let GroupMode::Settle {
+        shapes, exported, ..
+    } = &mode
+    {
+        let contracts = shapes
             .iter()
-            .zip(function_ty_origins)
-            .zip(function_effect_origins)
-            .zip(reference_effects)
-        {
-            let descr = &output.functions[id.as_index()];
-            let requirements = descr
-                .definition
-                .ty_scheme
-                .extra_parameters(ModuleEnv::new(output, others));
-            insert_inst_data_for_function_and_lambdas(
-                &mut module_inst_data,
-                &associated_lambdas,
-                *id,
-                LateFunctionInstData {
-                    requirements,
-                    ty_origins,
-                    effect_origins,
-                    effects_per_reference: settlement.is_some(),
-                    reference_effects,
-                },
-            );
-        }
-        for (id, kind) in local_fns.iter().zip(&function_kinds) {
-            if let EmitFunctionKind::SubscriptMember { subscript_id, .. } = kind {
-                module_inst_data.subscripts.insert(*subscript_id, *id);
-            }
-        }
-        for id in local_fns.iter() {
-            let dicts = &module_inst_data.functions[id].requirements;
-            borrow_check_and_elaborate_dict(
+            .map(|shape| {
+                let mut bottom = GroupContract::bottom(shape);
+                let subst = (
+                    shape
+                        .scheme
+                        .ty_quantifiers
+                        .iter()
+                        .map(|var| (*var, ty_inf.substitute_in_type(group_instance[var])))
+                        .collect::<TypeInstSubst>(),
+                    EffectsInstSubst::default(),
+                );
+                bottom.scheme.ty = bottom
+                    .scheme
+                    .ty
+                    .map(&mut BitmapInstantiationMapper::new(&subst));
+                bottom.scheme.ty_quantifiers = Vec::new();
+                bottom
+            })
+            .collect();
+        let (signatures, own_requirements) = baseline_requirements(
+            output,
+            others,
+            ast_functions(),
+            local_fns,
+            units,
+            function_explicit_root_tys,
+            *exported,
+            &mut pending_functions,
+            &associated_lambdas,
+            &mut ty_inf,
+            solver_arena,
+        )?;
+        Some(Settlement {
+            signatures,
+            own_requirements,
+            requirements: Vec::new(),
+            requirement_ranks: Vec::new(),
+            baseline: ty_inf.clone(),
+            pending_functions: pending_functions.clone(),
+            written_functions: local_fns
+                .iter()
+                .flat_map(|id| function_and_associated_lambdas(id, &associated_lambdas))
+                .collect(),
+            warning_count: warnings.len(),
+            contracts,
+            references: group_references.clone(),
+            rounds_done: 0,
+            round_bound: max_refinement_rounds(shapes),
+            checkpoint: None,
+            units: units.clone(),
+            left_out: local_fns.iter().map(|_| None).collect(),
+            written_types: ast_functions()
+                .zip(function_explicit_root_tys)
+                .map(|(input, roots)| {
+                    let params = input.function.generic_params.type_params().to_vec();
+                    (input.item_name(), params, roots.clone())
+                })
+                .collect(),
+            reference_effects: Vec::new(),
+            answered_applications: ty_inf.answered_applications(),
+            alike: FxHashMap::default(),
+        })
+    } else {
+        None
+    };
+    let function_leading_effects = loop {
+        if let Some(settlement) = &mut settlement {
+            let started = settlement.start_round(
+                &mut ty_inf,
+                &mut pending_functions,
                 output,
                 others,
-                &mut pending_functions,
-                &associated_lambdas,
-                dicts,
-                &module_inst_data,
-                id,
                 warnings,
+                local_fns,
+                solver_arena,
             )?;
+            if !started {
+                continue;
+            }
         }
 
-        refresh_debug_info_for_functions(output, &associated_lambdas, &local_fns);
-        Ok(Emitted::Functions)
+        let Some(round_errors) = find_effects_and_publish(
+            output,
+            solver_arena,
+            others,
+            ast_functions,
+            &mode,
+            &mut settlement,
+            &declarations,
+            &mut pending_functions,
+            &associated_lambdas,
+            &recursive_function_ids,
+            &mut ty_inf,
+        )?
+        else {
+            continue;
+        };
+        // The effect variables that each published signature numbers first: its written generics.
+        let mut function_leading_effects = function_written_effects.clone();
+        if let Some(settlement) = &mut settlement {
+            let first = ast_functions()
+                .next()
+                .expect("a group has a function")
+                .item_name();
+            // The signatures number their effects as the contracts do.
+            match settlement.end_round(
+                &mut ty_inf,
+                function_written_effects,
+                first,
+                round_errors,
+            )? {
+                Some(numbered) => function_leading_effects = numbered,
+                None => continue,
+            }
+        }
+        break function_leading_effects;
+    };
+
+    // Fifth pass, normalize the type schemes, substitute the types in the functions.
+    let (function_ty_origins, function_effect_substs, function_effect_origins) = number_schemes(
+        output,
+        others,
+        ast_functions,
+        local_fns,
+        units,
+        function_written_effects,
+        &function_leading_effects,
+        &mut pending_functions,
+        &associated_lambdas,
+    )?;
+    // Sixth pass, run the borrow checker and elaborate into the final HIR arena.
+    // A group that settled knows the effects of each of its references.
+    let reference_effects = match &settlement {
+        Some(settlement) => {
+            let quantifier_counts = local_fns
+                .iter()
+                .map(|id| {
+                    let scheme = &output.functions[id.as_index()].definition.ty_scheme;
+                    scheme.eff_quantifiers.len()
+                })
+                .collect::<Vec<_>>();
+            settlement.recorded_reference_effects(
+                &function_leading_effects,
+                &function_effect_substs,
+                &quantifier_counts,
+                &mut ty_inf,
+            )
+        }
+        None => vec![FxHashMap::default(); local_fns.len()],
+    };
+    elaborate_functions(
+        output,
+        others,
+        warnings,
+        local_fns,
+        function_kinds,
+        &mut pending_functions,
+        &associated_lambdas,
+        function_ty_origins,
+        function_effect_origins,
+        reference_effects,
+        settlement.is_some(),
+    )?;
+    Ok(Emitted::Functions)
+}
+
+/// Determines the types that the bodies of the functions of a group leave open: the defaults of
+/// each function, then the bounds, and what these reveal about the storage of locals. A
+/// requirement that no signature reaches is then an error.
+#[allow(clippy::too_many_arguments)]
+fn determine_function_types(
+    output: &mut Module,
+    solver_arena: &mut NodeArena,
+    others: &Modules,
+    local_fns: &[LocalFunctionId],
+    owners: &[LocalFunctionId],
+    function_explicit_root_tys: &[Vec<Type>],
+    pending_functions: &mut PendingModuleFunctions,
+    associated_lambdas: &FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
+    ty_inf: &mut UnifiedTypeInference,
+) -> Result<(), InternalCompilationError> {
+    let value_trait_id = ModuleEnv::new(output, others).expect_std_trait_id(VALUE_TRAIT_NAME);
+    // Default orphan constraints for each function into the unification tables.
+    for (id, explicit_root_tys) in local_fns.iter().zip(function_explicit_root_tys.iter()) {
+        let scope = function_defaulting_scope(
+            ty_inf,
+            &output.functions[id.as_index()].definition.ty_scheme.ty,
+            pending_functions.get(id),
+            explicit_root_tys,
+        );
+        let mut solver = trait_solver_from_module!(output, others);
+        ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, solver_arena)?;
+        let generated = solver.finish().commit(
+            &mut output.functions,
+            &mut output.def_table,
+            pending_functions,
+        );
+        elaborate_generated_functions(output, others, pending_functions, generated)?;
     }
+    // All function scopes have had their eligible defaults applied before
+    // any pending output component is conservatively published.
+    {
+        let mut solver = trait_solver_from_module!(output, others);
+        ty_inf.finalize_type_bounds(&mut solver, solver_arena)?;
+        let generated = solver.finish().commit(
+            &mut output.functions,
+            &mut output.def_table,
+            pending_functions,
+        );
+        elaborate_generated_functions(output, others, pending_functions, generated)?;
+        // Publication can reveal product layouts that were unknown during
+        // the pre-defaulting ownership pass. Activate their evidence now.
+        let module_env = ModuleEnv::new(output, others);
+        for (id, owner) in local_fns.iter().zip(owners) {
+            let mut ty_inf = ty_inf.constraint_owner_scope(*owner);
+            for function_id in function_and_associated_lambdas(id, associated_lambdas) {
+                let descr = pending_functions
+                    .get_mut(&function_id)
+                    .expect("pending function body");
+                ty_inf.resolve_local_storage_and_activate_value_constraints(
+                    &descr.code.arena,
+                    descr.code.entry_node_id,
+                    &mut descr.locals,
+                    value_trait_id,
+                    module_env,
+                );
+            }
+        }
+        let mut solver = trait_solver_from_module!(output, others);
+        ty_inf.finalize_type_bounds(&mut solver, solver_arena)?;
+        // Publication can identify a pending output with its own input,
+        // making an already-local numeric or unit default eligible. Retry
+        // using current signature boundaries, then validate the choices.
+        for (id, explicit_root_tys) in local_fns.iter().zip(function_explicit_root_tys) {
+            let scope = function_defaulting_scope(
+                ty_inf,
+                &output.functions[id.as_index()].definition.ty_scheme.ty,
+                pending_functions.get(id),
+                explicit_root_tys,
+            );
+            if !scope.is_empty() {
+                ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, solver_arena)?;
+            }
+        }
+        ty_inf.finalize_type_bounds(&mut solver, solver_arena)?;
+        let generated = solver.finish().commit(
+            &mut output.functions,
+            &mut output.def_table,
+            pending_functions,
+        );
+        elaborate_generated_functions(output, others, pending_functions, generated)?;
+    }
+    for (id, explicit_root_tys) in local_fns.iter().zip(function_explicit_root_tys.iter()) {
+        let descr = &output.functions[id.as_index()];
+        let fn_ty = ty_inf.substitute_in_fn_type(&descr.definition.ty_scheme.ty);
+        let mut sig_ty_vars = fn_ty.inner_ty_vars();
+        sig_ty_vars.extend(
+            explicit_root_tys
+                .iter()
+                .flat_map(|ty| ty_inf.substitute_in_type(*ty).inner_ty_vars().into_iter())
+                .collect::<Vec<_>>(),
+        );
+        sig_ty_vars = sig_ty_vars.into_iter().unique().collect();
+        ty_inf.normalize_remaining_constraints();
+        let sig_boundary = ConstraintBoundary::from_seed_ty_vars(sig_ty_vars.iter().copied());
+        let module_env = ModuleEnv::new(output, others);
+        let remaining_orphans: Vec<_> = sig_boundary
+            .inaccessible_constraints(ty_inf.remaining_constraints())
+            .into_iter()
+            .filter(|c| !c.is_type_has_variant())
+            .filter(|c| !is_compiler_provided_value_constraint(c, module_env))
+            .collect();
+        if !remaining_orphans.is_empty() {
+            if let Some((ty_var, ty, span)) =
+                first_unbound_type_in_constraints(remaining_orphans.iter().copied())
+            {
+                return Err(internal_compilation_error!(UnboundTypeVar {
+                    ty_var,
+                    ty,
+                    span
+                }));
+            }
+            return Err(internal_compilation_error!(Internal {
+                error: format!(
+                    "Orphan constraints found in module fn: {}",
+                    remaining_orphans.format_with(&module_env)
+                ),
+                span: remaining_orphans[0].use_site(),
+            }));
+        }
+    }
+
+    Ok(())
+}
+
+/// Finds the effects of the functions of a group, and publishes the scheme of each function:
+/// its type, its quantifiers and its requirements, in its body too.
+///
+/// With a `settlement`, this is one round of it, on the instances that the round gave: an error
+/// of one function is kept for the end of the round, and returned with those of the others. If
+/// the round has to leave a function out, it has to start again, and `None` is returned.
+#[allow(clippy::too_many_arguments)]
+fn find_effects_and_publish<'a, F, I>(
+    output: &mut Module,
+    solver_arena: &mut NodeArena,
+    others: &Modules,
+    ast_functions: &F,
+    mode: &GroupMode<'_>,
+    settlement: &mut Option<Settlement>,
+    declarations: &GroupDeclarations,
+    pending_functions: &mut PendingModuleFunctions,
+    associated_lambdas: &FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
+    recursive_function_ids: &FxHashSet<FunctionId>,
+    ty_inf: &mut UnifiedTypeInference,
+) -> Result<Option<Vec<Option<InternalCompilationError>>>, InternalCompilationError>
+where
+    I: Iterator<Item = EmitFunctionInput<'a>>,
+    F: Fn() -> I,
+{
+    let GroupDeclarations {
+        local_fns,
+        owners,
+        declared_signatures,
+        function_explicit_root_tys,
+        function_written_effects,
+        ..
+    } = declarations;
+    // The applications of traits that the bodies leave to their callers, with those that
+    // a declaration gives.
+    let requirements = |ty_inf: &mut UnifiedTypeInference| {
+        ty_inf.normalize_remaining_constraints();
+        let mut applications = declared_signatures
+            .iter()
+            .flatten()
+            .flat_map(|declared| declared.constraints.iter())
+            .map(|constraint| ty_inf.substitute_in_constraint(constraint))
+            .collect::<Vec<_>>();
+        applications.extend(ty_inf.remaining_constraints().iter().cloned());
+        applications
+    };
+    // The written effect generics of a function that the round leaves out are not
+    // judged: they are as its signature has them.
+    let mut observable = FxHashSet::default();
+    if let Some(settlement) = &*settlement {
+        for (index, written) in function_written_effects.iter().enumerate() {
+            if settlement.is_left_out(index) {
+                observable.extend(written.iter().copied());
+            }
+        }
+    }
+    if let Err(error) = minimize_body_effects(output, local_fns, observable, ty_inf) {
+        // A written effect generic that no requirement determines in this round may be
+        // determined by one that a later contract brings: its function is left out.
+        let function = match &*error {
+            CompilationErrorImpl::AmbiguousEffectGeneric { span, .. } => {
+                ast_functions().position(|input| {
+                    let function = input.function.span;
+                    function.source_id() == span.source_id()
+                        && function.start() <= span.start()
+                        && span.end() <= function.end()
+                })
+            }
+            _ => None,
+        };
+        match (&mut *settlement, function) {
+            (Some(settlement), Some(index)) if !settlement.is_left_out(index) => {
+                settlement.leave_out(index, error);
+                return Ok(None);
+            }
+            _ => return Err(error),
+        }
+    }
+    ty_inf.finalize_effects()?;
+
+    // Effects are final: two applications of a trait that differed by an effect still to
+    // infer, as the one a callback gets when it is passed on, may now be the same, and
+    // then so are their outputs. This holds too between an application that a body needs
+    // and one that its declaration gives.
+    //
+    // In a group that settles, the effects of a round are provisional: callees that
+    // still look pure can make two applications one that later rounds keep apart. So
+    // what follows from them is checked function by function, and a function for which
+    // it fails keeps its contract for this round, see [`Settlement::end_round`].
+    let mut round_errors: Vec<Option<InternalCompilationError>> =
+        local_fns.iter().map(|_| None).collect();
+    let is_left_out = |settlement: &Option<Settlement>, index: usize| {
+        settlement
+            .as_ref()
+            .is_some_and(|settlement| settlement.is_left_out(index))
+    };
+    {
+        let env = ModuleEnv::new(output, others);
+        let polarities = |id: TraitId| trait_output_effect_polarities(id, &|id| env.trait_def(id));
+        if let Some(settlement) = &mut *settlement {
+            // A function whose applications cannot be made one, or for which this
+            // changes a type of the group, is left out, and the round starts again:
+            // the group has one instance of its types, so the other functions would
+            // fail with it.
+            let mut left_out = None;
+            for (index, owner) in owners.iter().enumerate() {
+                if settlement.is_left_out(index) {
+                    continue;
+                }
+                let mut applications = requirements(ty_inf)
+                    .into_iter()
+                    .filter(|application| !ty_inf.is_requirement_of_others(application, *owner))
+                    .collect::<Vec<_>>();
+                let mut coalesced =
+                    ty_inf.coalesce_constraint_outputs(&mut applications, &polarities);
+                if coalesced.is_ok() {
+                    coalesced = settlement.keeps_types(ty_inf);
+                }
+                if let Err(error) = coalesced {
+                    left_out = Some((index, error));
+                    break;
+                }
+            }
+            if let Some((index, error)) = left_out {
+                settlement.leave_out(index, error);
+                return Ok(None);
+            }
+        } else {
+            let mut applications = requirements(ty_inf);
+            ty_inf.coalesce_constraint_outputs(&mut applications, &polarities)?;
+        }
+    }
+
+    // Substitute everything using ty_inf (single pass, includes all defaults).
+    substitute_and_canonicalize_functions(
+        output,
+        pending_functions,
+        associated_lambdas,
+        local_fns,
+        ty_inf,
+    );
+    for (index, (id, round_error)) in local_fns.iter().zip(&mut round_errors).enumerate() {
+        if is_left_out(&*settlement, index) {
+            continue;
+        }
+        let checked = check_declared_effects_not_combined(
+            output,
+            associated_lambdas,
+            slice::from_ref(id),
+            ty_inf,
+        );
+        match checked {
+            Err(error) if settlement.is_some() => {
+                round_error.get_or_insert(error);
+            }
+            checked => checked?,
+        }
+    }
+
+    // Recursive-return defaulting inspects the final constraints. A contract already says
+    // what its function returns.
+    ty_inf.normalize_remaining_constraints();
+    if !mode.has_fixed_types() {
+        default_unconstrained_diverging_returns_to_never(
+            output,
+            ty_inf,
+            DivergingReturnDefaultingInputs {
+                ast_functions: ast_functions(),
+                local_fns: local_fns,
+                function_explicit_root_tys: function_explicit_root_tys,
+                recursive_function_ids: recursive_function_ids,
+                associated_lambdas: associated_lambdas,
+                pending_functions: pending_functions,
+            },
+        );
+    }
+    // In a group that settles, a requirement that bodies make is of these bodies: each
+    // function has its own instances of what the functions it names require.
+    let requirements_of_others = owners
+        .iter()
+        .map(|owner| {
+            ty_inf
+                .remaining_constraints()
+                .iter()
+                .map(|constraint| {
+                    settlement.is_some() && ty_inf.is_requirement_of_others(constraint, *owner)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    // Take final substituted constraints.
+    let all_constraints = ty_inf.take_constraints();
+    let requirements_of_others = requirements_of_others
+        .into_iter()
+        .map(|of_others| {
+            all_constraints
+                .iter()
+                .zip(of_others)
+                .filter(|(_, of_others)| *of_others)
+                .map(|(constraint, _)| constraint_ptr(constraint))
+                .collect::<FxHashSet<PubTypeConstraintPtr>>()
+        })
+        .collect::<Vec<_>>();
+
+    // The type variables of the signatures of the group.
+    let group_signature_vars = local_fns
+        .iter()
+        .flat_map(|id| {
+            output.functions[id.as_index()]
+                .definition
+                .ty_scheme
+                .ty
+                .inner_ty_vars()
+        })
+        .collect::<FxHashSet<_>>();
+    // For each function: filter constraints, check unbounds, finalize type scheme.
+    let mut used_constraints: FxHashSet<PubTypeConstraintPtr> = FxHashSet::default();
+    for (index, (((((input, id), explicit_root_tys), declared), of_others), round_error)) in
+        ast_functions()
+            .zip(local_fns.iter())
+            .zip(function_explicit_root_tys.iter())
+            .zip(declared_signatures)
+            .zip(&requirements_of_others)
+            .zip(&mut round_errors)
+            .enumerate()
+    {
+        if round_error.is_some() || is_left_out(&*settlement, index) {
+            continue;
+        }
+        let published = (|| -> Result<(), InternalCompilationError> {
+            let function = input.function;
+            let descr = &output.functions[id.as_index()];
+            if declared.is_none() {
+                let resolved_roots = explicit_root_tys
+                    .iter()
+                    .map(|root| ty_inf.substitute_in_type(*root))
+                    .collect::<Vec<_>>();
+                distinct_written_type_vars(
+                    function.generic_params.type_params(),
+                    resolved_roots,
+                    || GenericParamsOwner::Function {
+                        name: function.name.0,
+                    },
+                )?;
+            }
+            // Find constraints related to this function's signature.
+            let mut sig_ty_vars = descr.definition.ty_scheme.ty.inner_ty_vars();
+            let explicit_ty_vars = explicit_root_tys
+                .iter()
+                .flat_map(|ty| ty_inf.substitute_in_type(*ty).inner_ty_vars().into_iter())
+                .collect::<Vec<_>>();
+            sig_ty_vars.extend(explicit_ty_vars.iter().copied());
+            sig_ty_vars = sig_ty_vars.into_iter().unique().collect();
+            let sig_boundary = ConstraintBoundary::from_seed_ty_vars(sig_ty_vars.iter().copied());
+            let related_constraints = sig_boundary
+                .accessible_constraints(&all_constraints)
+                .into_iter()
+                .filter(|constraint| !of_others.contains(&constraint_ptr(constraint)))
+                .collect::<Vec<_>>();
+            let related_ptrs: FxHashSet<PubTypeConstraintPtr> = related_constraints
+                .iter()
+                .map(|c| constraint_ptr(c))
+                .collect();
+            for ptr in &related_ptrs {
+                used_constraints.insert(*ptr);
+            }
+
+            // Compute quantifiers.
+            let mut quantifiers = TypeScheme::list_ty_vars(
+                &descr.definition.ty_scheme.ty,
+                related_constraints.iter().copied(),
+            );
+            quantifiers.extend(explicit_ty_vars.iter().copied());
+            quantifiers = quantifiers.into_iter().unique().collect();
+
+            // Check for unbound type variables, including in the function's lambdas.
+            let unbound = hir::all_unbound_ty_vars(function_bodies(
+                slice::from_ref(id),
+                associated_lambdas,
+                pending_functions,
+            ));
+            let env = ModuleEnv::new(output, others);
+            let uninstantiated_unbound = if settlement.is_some() {
+                // A type that the body does not observe and that is of the signature of
+                // another function of the group is `never` in this body, as it is at a
+                // call outside the group that does not determine it.
+                let (of_others, own): (IndexMap<_, _>, IndexMap<_, _>) =
+                    unbound.into_iter().partition(|(ty_var, _)| {
+                        !quantifiers.contains(ty_var) && group_signature_vars.contains(ty_var)
+                    });
+                let mut unobserved = check_unbounds(own, &quantifiers, &env)?;
+                unobserved.extend(of_others.into_keys());
+                unobserved
+            } else {
+                check_unbounds(unbound, &quantifiers, &env)?
+            };
+
+            // Apply unbound→Never fixup if needed.
+            if !uninstantiated_unbound.is_empty() {
+                let fixup_subst: (TypeInstSubst, FxHashMap<_, _>) = (
+                    uninstantiated_unbound
+                        .iter()
+                        .map(|v| (*v, Type::never()))
+                        .collect(),
+                    FxHashMap::default(),
+                );
+                let mut mapper = BitmapInstantiationMapper::new(&fixup_subst);
+                for function_id in function_and_associated_lambdas(id, associated_lambdas) {
+                    let pending = pending_functions
+                        .get_mut(&function_id)
+                        .expect("expected pending function body");
+                    instantiate_function_descr_in_place(pending, &mut mapper);
+                }
+                quantifiers.retain(|v| !uninstantiated_unbound.contains(v));
+            }
+
+            // Filter and finalize constraints.
+            let mut solver = trait_solver_from_module!(output, others);
+            let mut drop_subst = (FxHashMap::default(), FxHashMap::default());
+            let constraints: Vec<_> = all_constraints
+                .iter()
+                .filter(|c| related_ptrs.contains(&constraint_ptr(c)))
+                .filter_map(|constraint| {
+                    constraint
+                        .instantiate_and_drop_if_solved(&mut drop_subst, &mut solver, solver_arena)
+                        .transpose()
+                })
+                .collect::<Result<_, _>>()?;
+            let generated = solver.finish().commit(
+                &mut output.functions,
+                &mut output.def_table,
+                pending_functions,
+            );
+            elaborate_generated_functions(output, others, pending_functions, generated)?;
+
+            let mut constraints = constraints;
+            if let Some(declared) = declared {
+                constraints =
+                    fit_declared_signature(declared, constraints, input, output, others, ty_inf)?;
+                let declared_ty = ty_inf.substitute_in_fn_type(&declared.ty);
+                output.functions[id.as_index()].definition.ty_scheme.ty = declared_ty;
+            }
+
+            // Write the final type scheme.
+            let explicit_ty_vars = explicit_ty_vars
+                .iter()
+                .copied()
+                .unique()
+                .collect::<Vec<_>>();
+            quantifiers = explicit_ty_vars
+                .iter()
+                .copied()
+                .chain(
+                    quantifiers
+                        .into_iter()
+                        .filter(|ty_var| !explicit_ty_vars.contains(ty_var)),
+                )
+                .collect();
+            for function_id in function_and_associated_lambdas(id, associated_lambdas) {
+                let descr = &mut output.functions[function_id.as_index()];
+                descr.definition.ty_scheme.ty_quantifiers = quantifiers.clone();
+                descr.definition.ty_scheme.eff_quantifiers =
+                    descr.definition.ty_scheme.ty.input_effect_vars();
+                descr.definition.ty_scheme.constraints = constraints.clone();
+                if declared.is_some() {
+                    descr.definition.ty_scheme.eff_quantifiers =
+                        TypeScheme::<FnType>::list_eff_vars(
+                            &descr.definition.ty_scheme.ty,
+                            constraints.iter(),
+                        );
+                }
+                descr.definition.generic_params = function.generic_params.type_params().to_vec();
+                descr.definition.generic_effect_params =
+                    function.generic_params.effect_params().to_vec();
+                pending_functions
+                    .get_mut(&function_id)
+                    .expect("expected pending function body")
+                    .definition = descr.definition.clone();
+            }
+
+            // Log dropped constraints.
+            if log_enabled!(log::Level::Trace) {
+                let module_env = ModuleEnv::new(output, others);
+                let retained_ptrs: FxHashSet<PubTypeConstraintPtr> =
+                    constraints.iter().map(constraint_ptr).collect();
+                log_dropped_constraints_module(
+                    function.name.0,
+                    &all_constraints,
+                    &related_ptrs,
+                    &retained_ptrs,
+                    module_env,
+                );
+            }
+            Ok(())
+        })();
+        match published {
+            Err(error) if settlement.is_some() => *round_error = Some(error),
+            published => published?,
+        }
+    }
+
+    default_output_effects_in_functions(
+        output,
+        pending_functions,
+        associated_lambdas,
+        local_fns,
+        &FxHashSet::default(),
+    );
+
+    // Safety check: make sure that there are no unused constraints.
+    let module_env = ModuleEnv::new(output, others);
+    let unused_constraints = all_constraints
+        .iter()
+        .filter(|c| {
+            !used_constraints.contains(&constraint_ptr(c))
+                && !c.is_type_has_variant()
+                && !is_compiler_provided_value_constraint(c, module_env)
+        })
+        .collect::<Vec<_>>();
+    // A function that failed in this round did not take its requirements.
+    let all_published = round_errors.iter().all(Option::is_none)
+        && (0..local_fns.len()).all(|index| !is_left_out(&*settlement, index));
+    if !unused_constraints.is_empty() && all_published {
+        let module_env = ModuleEnv::new(output, others);
+        let constraints = unused_constraints
+            .iter()
+            .map(|c| c.format_with(&module_env))
+            .join(" ∧ ");
+        return Err(internal_compilation_error!(Internal {
+            error: format!("Unused constraints in module compilation: {}", constraints),
+            span: unused_constraints[0].use_site(),
+        }));
+    }
+
+    // Every member of an exported recursive group needs the public leaves of its
+    // requirements: a private member cannot recover them backwards from a dictionary for the
+    // unreduced private requirement. A group that settles has them already.
+    let exports_group = group_is_exported(ast_functions());
+    let mut published_requirements_changed = false;
+    for ((input, id), explicit_roots) in ast_functions()
+        .zip(local_fns)
+        .zip(function_explicit_root_tys)
+    {
+        // A group that settles has the public form of its requirements already.
+        if !exports_group || input.trait_default.is_some() || settlement.is_some() {
+            continue;
+        }
+        let scheme = output.functions[id.as_index()].definition.ty_scheme.clone();
+        let rigid = scheme
+            .ty
+            .args
+            .iter()
+            .map(|arg| arg.ty)
+            .chain(explicit_roots.iter().copied())
+            .collect::<Vec<_>>();
+        let Some(constraints) = public_requirements(
+            &scheme.constraints,
+            &rigid,
+            input.function,
+            explicit_roots,
+            *id,
+            output,
+            others,
+            pending_functions,
+            associated_lambdas,
+            ty_inf,
+            solver_arena,
+        )?
+        else {
+            continue;
+        };
+        published_requirements_changed = true;
+        for function_id in function_and_associated_lambdas(id, associated_lambdas) {
+            output.functions[function_id.as_index()]
+                .definition
+                .ty_scheme
+                .constraints = constraints.clone();
+            pending_functions
+                .get_mut(&function_id)
+                .expect("pending function body")
+                .definition
+                .ty_scheme
+                .constraints = constraints.clone();
+        }
+    }
+    if published_requirements_changed {
+        ty_inf.finalize_effects()?;
+        substitute_and_canonicalize_functions(
+            output,
+            pending_functions,
+            associated_lambdas,
+            local_fns,
+            ty_inf,
+        );
+        for id in local_fns {
+            let scheme = &output.functions[id.as_index()].definition.ty_scheme;
+            let quantifiers = scheme
+                .ty_quantifiers
+                .iter()
+                .filter_map(|var| {
+                    ty_inf
+                        .substitute_in_type(Type::variable(*var))
+                        .data()
+                        .as_variable()
+                        .copied()
+                })
+                .chain(TypeScheme::list_ty_vars(
+                    &scheme.ty,
+                    scheme.constraints.iter(),
+                ))
+                .unique()
+                .collect::<Vec<_>>();
+            for function_id in function_and_associated_lambdas(id, associated_lambdas) {
+                output.functions[function_id.as_index()]
+                    .definition
+                    .ty_scheme
+                    .ty_quantifiers = quantifiers.clone();
+                pending_functions
+                    .get_mut(&function_id)
+                    .expect("pending function body")
+                    .definition
+                    .ty_scheme
+                    .ty_quantifiers = quantifiers.clone();
+            }
+        }
+    }
+
+    Ok(Some(round_errors))
+}
+
+/// Numbers the variables of the published schemes of the functions of a group, in their bodies
+/// too, and publishes the signature of each subscript from its bodies. `function_leading_effects`
+/// are the effect variables that each scheme numbers first.
+///
+/// Returns, for each function, the type variables that its quantifiers were, the number that
+/// each effect variable got, and the effect variables that its quantifiers were.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn number_schemes<'a, F, I>(
+    output: &mut Module,
+    others: &Modules,
+    ast_functions: &F,
+    local_fns: &[LocalFunctionId],
+    units: &[usize],
+    function_written_effects: &[Vec<EffectVar>],
+    function_leading_effects: &[Vec<EffectVar>],
+    pending_functions: &mut PendingModuleFunctions,
+    associated_lambdas: &FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
+) -> Result<
+    (
+        Vec<Vec<TypeVar>>,
+        Vec<EffectsInstSubst>,
+        Vec<Vec<EffectVar>>,
+    ),
+    InternalCompilationError,
+>
+where
+    I: Iterator<Item = EmitFunctionInput<'a>>,
+    F: Fn() -> I,
+{
+    let mut function_ty_origins = Vec::new();
+    let mut published_subscripts = FxHashMap::default();
+    let mut function_effect_substs = Vec::new();
+    let mut function_effect_origins = Vec::new();
+    for (((input, id), written_effects), unit) in ast_functions()
+        .zip(local_fns.iter())
+        .zip(function_written_effects)
+        .zip(units)
+    {
+        // The bodies of a definition number their effects as the first does.
+        let leading_effects = &function_leading_effects[*unit];
+        let descr = &mut output.functions[id.as_index()];
+        function_ty_origins.push(descr.definition.ty_scheme.ty_quantifiers.clone());
+        let subst = descr
+            .definition
+            .ty_scheme
+            .normalize_with_leading_effects(leading_effects);
+        function_effect_substs.push(subst.1.clone());
+        function_effect_origins.push(
+            subst
+                .1
+                .iter()
+                .filter_map(|(origin, row)| Some((row.to_single_variable()?, *origin)))
+                .sorted()
+                .map(|(_, origin)| origin)
+                .collect::<Vec<_>>(),
+        );
+        let normalized_scheme = descr.definition.ty_scheme.clone();
+        // A written generic that the scheme does not retain leaves no name behind, so that
+        // the retained ones keep theirs by position.
+        let retained_effect_params = written_effects
+            .iter()
+            .zip(input.function.generic_params.effect_params())
+            .filter(|(var, _)| subst.1.get(var).is_some_and(|row| !row.is_empty()))
+            .map(|(_, name)| *name)
+            .collect::<Vec<_>>();
+        for function_id in function_and_associated_lambdas(id, associated_lambdas) {
+            let descr = &mut output.functions[function_id.as_index()];
+            let mut mapper = BitmapInstantiationMapper::new(&subst);
+            assert_eq!(
+                written_effects.len(),
+                descr.definition.generic_effect_params.len(),
+                "each written effect generic has its variable"
+            );
+            descr.definition.generic_effect_params = retained_effect_params.clone();
+            if function_id != *id {
+                descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
+                descr.definition.ty_scheme.ty_quantifiers =
+                    normalized_scheme.ty_quantifiers.clone();
+                descr.definition.ty_scheme.eff_quantifiers =
+                    normalized_scheme.eff_quantifiers.clone();
+                descr.definition.ty_scheme.constraints = normalized_scheme.constraints.clone();
+            }
+            let pending = pending_functions
+                .get_mut(&function_id)
+                .expect("expected pending function body");
+            pending.definition = descr.definition.clone();
+            instantiate_function_descr_in_place(pending, &mut mapper);
+            default_body_only_effects_in_function_descr(pending);
+        }
+        if let EmitFunctionKind::SubscriptMember {
+            subscript_id,
+            subscript_name,
+            projection_key,
+            member_function_kind,
+            provenance,
+            ..
+        } = input.kind
+        {
+            let definition = output.functions[id.as_index()].definition.clone();
+            let generated_name = {
+                let qualified_name_env = QualifiedNameEnv::new_from_module(output, others);
+                let readable_subscript_name = projection_key.map_or_else(
+                    || {
+                        qualified_name_env
+                            .qualified_named_subscript_name(output.module_id(), subscript_name)
+                    },
+                    |key| qualified_name_env.qualified_projection_subscript_name(key),
+                );
+                qualified_name_env.disambiguated_subscript_member_name(
+                    &readable_subscript_name,
+                    member_function_kind,
+                    &definition,
+                    provenance,
+                )
+            };
+            output.name_function_with_visibility(*id, generated_name.into(), Visibility::Module);
+            update_subscript_signature_from_member_definition(
+                output,
+                subscript_id,
+                projection_key.is_some(),
+                &definition,
+                &mut published_subscripts,
+                input.function.span,
+            )?;
+        }
+    }
+
+    Ok((
+        function_ty_origins,
+        function_effect_substs,
+        function_effect_origins,
+    ))
+}
+
+/// Checks the borrows of the functions of a group and elaborates them into the module, each
+/// reference to a function of the group getting the evidence that the published schemes ask.
+/// `reference_effects` has, for each function, the effects that the settling of the group
+/// recorded for its references, if the group settled, as `effects_per_reference` says.
+#[allow(clippy::too_many_arguments)]
+fn elaborate_functions(
+    output: &mut Module,
+    others: &Modules,
+    warnings: &mut Vec<CompilationWarning>,
+    local_fns: &[LocalFunctionId],
+    function_kinds: &[EmitFunctionKind],
+    pending_functions: &mut PendingModuleFunctions,
+    associated_lambdas: &FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
+    function_ty_origins: Vec<Vec<TypeVar>>,
+    function_effect_origins: Vec<Vec<EffectVar>>,
+    reference_effects: Vec<FxHashMap<Location, Vec<EffType>>>,
+    effects_per_reference: bool,
+) -> Result<(), InternalCompilationError> {
+    let mut module_inst_data = ModuleInstData::default();
+    for (((id, ty_origins), effect_origins), reference_effects) in local_fns
+        .iter()
+        .zip(function_ty_origins)
+        .zip(function_effect_origins)
+        .zip(reference_effects)
+    {
+        let descr = &output.functions[id.as_index()];
+        let requirements = descr
+            .definition
+            .ty_scheme
+            .extra_parameters(ModuleEnv::new(output, others));
+        insert_inst_data_for_function_and_lambdas(
+            &mut module_inst_data,
+            associated_lambdas,
+            *id,
+            LateFunctionInstData {
+                requirements,
+                ty_origins,
+                effect_origins,
+                effects_per_reference,
+                reference_effects,
+            },
+        );
+    }
+    for (id, kind) in local_fns.iter().zip(function_kinds) {
+        if let EmitFunctionKind::SubscriptMember { subscript_id, .. } = kind {
+            module_inst_data.subscripts.insert(*subscript_id, *id);
+        }
+    }
+    for id in local_fns.iter() {
+        let dicts = &module_inst_data.functions[id].requirements;
+        borrow_check_and_elaborate_dict(
+            output,
+            others,
+            pending_functions,
+            associated_lambdas,
+            dicts,
+            &module_inst_data,
+            id,
+            warnings,
+        )?;
+    }
+
+    refresh_debug_info_for_functions(output, associated_lambdas, local_fns);
+    Ok(())
 }
 
 /// The bodies of `functions` and of their lambdas.

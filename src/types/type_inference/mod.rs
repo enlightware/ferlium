@@ -13,3 +13,5 @@ pub mod substitution;
 pub mod tables;
 mod type_bounds;
 pub mod unify;
+
+pub(crate) use evidence_uses::GivenId;
