@@ -28,7 +28,10 @@ use crate::{
         build_capturing_dictionary_value, dictionary_capture_plan, id::Id,
         named_modules_in_environment,
     },
-    std::{core_traits_names::VALUE_TRAIT_NAME, value::generated_value_evidence_types},
+    std::{
+        core_traits_names::VALUE_TRAIT_NAME,
+        value::{dynamic_product_member_layouts, generated_value_evidence_types},
+    },
     types::{
         effects::{EffType, EffectVar},
         r#trait::TraitDictionaryEntryIndex,
@@ -93,6 +96,11 @@ pub(crate) enum EvidencePlanSource {
         target: usize,
     },
     Ground(TraitImplId),
+    /// A requirement on the structure of a type known here, which the type answers: its
+    /// evidence is built here, from that of what the answer requires.
+    Structural {
+        members: Vec<usize>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -185,6 +193,9 @@ impl EvidencePlan {
                             .filter(|child| **child != id)
                             .map(|child| (*child, false)),
                     ),
+                    EvidencePlanSource::Structural { members } => {
+                        pending.extend(members.iter().rev().map(|child| (*child, false)))
+                    }
                     EvidencePlanSource::Pending => {
                         return Err(unresolved(&self.nodes[id].constraint));
                     }
@@ -221,7 +232,8 @@ impl EvidencePlan {
                 EvidencePlanSource::Selected { captures, .. } => {
                     pending.extend(captures.iter().rev().copied())
                 }
-                EvidencePlanSource::GeneratedValue { members } => {
+                EvidencePlanSource::GeneratedValue { members }
+                | EvidencePlanSource::Structural { members } => {
                     pending.extend(members.iter().rev().copied())
                 }
                 EvidencePlanSource::SelfReference { target } => recursive |= *target == root,
@@ -248,7 +260,8 @@ impl EvidencePlan {
                                 *child = indices[child];
                             }
                         }
-                        EvidencePlanSource::GeneratedValue { members } => {
+                        EvidencePlanSource::GeneratedValue { members }
+                        | EvidencePlanSource::Structural { members } => {
                             for child in members {
                                 *child = indices[child];
                             }
@@ -351,10 +364,16 @@ impl EvidencePlan {
     }
 
     /// Replace the reduction that the plan holds with `reduced`, keeping the uses of declared
-    /// fields, which are of the inference of the function and not of a reduction.
+    /// fields that the inference of the function made, and adding those that the reduction
+    /// made when it answered a requirement on a field.
     pub(crate) fn replace_reduction(&mut self, reduced: Self) {
-        let field_uses = mem::take(&mut self.field_uses);
+        let mut field_uses = mem::take(&mut self.field_uses);
         *self = reduced;
+        for field_use in mem::take(&mut self.field_uses) {
+            if !field_uses.contains(&field_use) {
+                field_uses.push(field_use);
+            }
+        }
         self.field_uses = field_uses;
     }
 
@@ -1148,6 +1167,7 @@ impl TraitSolver<'_> {
             .unwrap()
             .clone();
         let rigid = reduction_rigid_types(&constraints, rigid_inputs, inference);
+        let declared = inference.field_uses().len();
         let mut evidence = EvidencePlan::default();
         for constraint in constraints {
             let root = evidence.push(constraint, None);
@@ -1201,6 +1221,8 @@ impl TraitSolver<'_> {
             }
             if deferred.is_empty() {
                 evidence.check_construction_cycles()?;
+                evidence.field_uses = inference.field_uses()[declared..].to_vec();
+                evidence.substitute(inference);
                 return Ok(ReducedRequirements {
                     requirements: leaves,
                     evidence,
@@ -1212,6 +1234,90 @@ impl TraitSolver<'_> {
             deferred.reverse();
             pending = deferred;
         }
+    }
+
+    /// Answer a requirement on the structure of a type that is known here: a field, an element
+    /// or a variant. The type answers it, as it does a use in a body, and the node gets what
+    /// the answer requires: the requirements of a subscript that the type declares for the
+    /// field, or the layout of the members that an access to a stored one depends on.
+    fn reduce_structural_node(
+        &mut self,
+        id: usize,
+        constraint: &PubTypeConstraint,
+        inference: &mut UnifiedTypeInference,
+        arena: &mut NodeArena,
+        work: &mut usize,
+        evidence: &mut EvidencePlan,
+    ) -> Result<bool, InternalCompilationError> {
+        let queued = inference.obligation_count();
+        let declared = inference.field_uses().len();
+        if inference
+            .unify_pub_constraint(
+                constraint,
+                ConstraintAssumptions::all(&[]),
+                |_| false,
+                self,
+                arena,
+            )?
+            .is_some()
+        {
+            return Ok(false);
+        }
+        let mut requirements = inference.take_obligations_from(queued);
+        if inference.field_uses().len() == declared
+            && let Some(DictionaryReq::ProjectionSubscript { subscript_ty, .. }) =
+                constraint.structural_requirement_key()
+        {
+            let receiver = inference.substitute_in_type(subscript_ty.receiver_ty());
+            let value_trait = self.std_trait_id(VALUE_TRAIT_NAME);
+            let span = constraint.use_site();
+            requirements.extend(
+                dynamic_product_member_layouts(receiver, span, &*self)
+                    .into_iter()
+                    .map(|member| {
+                        PubTypeConstraint::new_have_trait(
+                            value_trait,
+                            vec![member],
+                            vec![],
+                            vec![],
+                            span,
+                        )
+                    }),
+            );
+        }
+        let members = requirements
+            .into_iter()
+            .map(|mut requirement| {
+                requirement.set_origin(constraint.origin());
+                evidence.push(requirement, Some(id))
+            })
+            .collect();
+        evidence.nodes[id].source = EvidencePlanSource::Structural { members };
+        // The answer may only bound a type of a selected impl from below, as the type of a
+        // field does the type that the impl reads it at. Such a type is the least one, as
+        // when the impl is matched, unless a requirement not answered yet may still bound it.
+        let own = evidence
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.source {
+                EvidencePlanSource::Selected { application, .. } => {
+                    Some(application.substitution.0.values().copied())
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        let waiting = evidence
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.source, EvidencePlanSource::Pending))
+            .map(|node| inference.substitute_in_constraint(&node.constraint))
+            .collect::<Vec<_>>();
+        inference
+            .select_least_bounded_types(&waiting, Some(&own))
+            .map_err(|_| unresolved(constraint))?;
+        *work -= 1;
+        Ok(true)
     }
 
     /// Expand one node, preserving its identity. A query whose inputs another private output
@@ -1304,7 +1410,7 @@ impl TraitSolver<'_> {
             ..
         } = &constraint
         else {
-            return Err(unresolved(&constraint));
+            return self.reduce_structural_node(id, &constraint, inference, arena, work, evidence);
         };
         if *trait_id == self.std_trait_id(VALUE_TRAIT_NAME)
             && input_tys.len() == 1

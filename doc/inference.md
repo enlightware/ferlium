@@ -101,6 +101,9 @@ Independent variables remain generic, including those occurring only in a functi
 outputs supplied by public prerequisites. A uniformly selected impl may determine its own outputs;
 these substitutions also reach the impl head and bodies. A cycle of output dependencies alone does
 not establish determination.
+What a selected impl requires of a field, an element or a variant of a private type is answered
+there by the type, as a use in a body is, and leaves only what that access takes, such as the
+layout of a generic member.
 
 The compiler records these choices and elaboration replays them without selecting impls again.
 The defining body constructs private dictionaries from the public evidence its caller supplies.

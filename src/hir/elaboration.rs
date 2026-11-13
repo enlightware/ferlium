@@ -360,6 +360,20 @@ fn replay_evidence_plan(
                             span,
                         }));
                     }
+                    EvidencePlanSource::Structural { members } => {
+                        // The members are what the answer requires, to check and to publish.
+                        // Its evidence takes those that it captures only: a marker trait, for
+                        // one, has no evidence to give.
+                        let members = members.clone();
+                        ctx.planned_bindings[index] = Some(structural_evidence_binding(
+                            arena,
+                            &requirement,
+                            &members,
+                            span,
+                            ctx,
+                        )?);
+                        continue;
+                    }
                     EvidencePlanSource::Selected {
                         application,
                         captures,
@@ -666,59 +680,78 @@ fn evidence_binding_for_requirement(
         ),
         DictionaryReq::ProjectionSubscript { .. }
         | DictionaryReq::VariantPayloadIndirection { .. } => {
-            let inst_data = hir::FnInstData::new(vec![requirement.clone()], Vec::new(), Vec::new());
-            let [(kind, _, _)] = extra_arg_kind_from_inst_data(&inst_data, span, ctx, arena)?
-                .try_into()
-                .expect("one evidence requirement must produce one argument");
-            let source = match kind {
-                NodeKind::GetSubscript(subscript) => {
-                    let captures = subscript
-                        .inst_data
-                        .dicts_req
-                        .iter()
-                        .map(|requirement| {
-                            evidence_binding_for_requirement(arena, requirement, span, ctx)
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let static_captures = captures
-                        .iter()
-                        .map(|capture| ctx.static_evidence(*capture))
-                        .collect::<Option<Vec<_>>>();
-                    if let Some(captures) = static_captures {
-                        EvidenceBindingSource::Static(StaticEvidence::Subscript {
-                            definition: subscript.subscript,
-                            captures: captures.into_boxed_slice(),
-                        })
-                    } else {
-                        EvidenceBindingSource::ConstructedSubscript {
-                            definition: subscript.subscript,
-                            captures,
-                        }
-                    }
-                }
-                NodeKind::Immediate(value) => {
-                    EvidenceBindingSource::Static(StaticEvidence::VariantPayloadStorage(
-                        *value
-                            .as_primitive_ty::<bool>()
-                            .expect("variant layout evidence must be bool"),
-                    ))
-                }
-                NodeKind::LoadSubscriptEvidence(load) => {
-                    return Ok(load.extra_parameter);
-                }
-                NodeKind::LoadVariantPayloadStorageEvidence(load) => {
-                    return Ok(load.extra_parameter);
-                }
-                other => {
-                    return Err(internal_compilation_error!(Internal {
-                        error: format!("unexpected static evidence node {other:?}"),
-                        span,
-                    }));
-                }
-            };
-            Ok(ctx.intern_evidence_binding(requirement.clone(), source))
+            structural_evidence_binding(arena, requirement, &[], span, ctx)
         }
     }
+}
+
+/// The evidence of a requirement on the structure of a type, built here when the type is known.
+/// What it captures is taken from `members`, nodes of the plan, where one has the same
+/// contract, and found as any other evidence otherwise.
+fn structural_evidence_binding(
+    arena: &mut NodeArena,
+    requirement: &DictionaryReq,
+    members: &[usize],
+    span: Location,
+    ctx: &mut DictElaborationCtx<'_, '_, '_>,
+) -> Result<EvidenceBindingId, InternalCompilationError> {
+    let inst_data = hir::FnInstData::new(vec![requirement.clone()], Vec::new(), Vec::new());
+    let [(kind, _, _)] = extra_arg_kind_from_inst_data(&inst_data, span, ctx, arena)?
+        .try_into()
+        .expect("one evidence requirement must produce one argument");
+    let source = match kind {
+        NodeKind::GetSubscript(subscript) => {
+            let value_trait = ctx.trait_solver.std_trait_id(VALUE_TRAIT_NAME);
+            let mut captures = Vec::with_capacity(subscript.inst_data.dicts_req.len());
+            for capture in &subscript.inst_data.dicts_req {
+                let planned = members.iter().copied().find(|member| {
+                    ctx.evidence_plan.nodes[*member]
+                        .constraint
+                        .dictionary_requirement_key(value_trait)
+                        .is_some_and(|planned| planned.same_contract(capture))
+                });
+                captures.push(match planned {
+                    Some(member) => replay_evidence_plan(arena, member, span, ctx)?,
+                    None => evidence_binding_for_requirement(arena, capture, span, ctx)?,
+                });
+            }
+            let static_captures = captures
+                .iter()
+                .map(|capture| ctx.static_evidence(*capture))
+                .collect::<Option<Vec<_>>>();
+            if let Some(captures) = static_captures {
+                EvidenceBindingSource::Static(StaticEvidence::Subscript {
+                    definition: subscript.subscript,
+                    captures: captures.into_boxed_slice(),
+                })
+            } else {
+                EvidenceBindingSource::ConstructedSubscript {
+                    definition: subscript.subscript,
+                    captures,
+                }
+            }
+        }
+        NodeKind::Immediate(value) => {
+            EvidenceBindingSource::Static(StaticEvidence::VariantPayloadStorage(
+                *value
+                    .as_primitive_ty::<bool>()
+                    .expect("variant layout evidence must be bool"),
+            ))
+        }
+        NodeKind::LoadSubscriptEvidence(load) => {
+            return Ok(load.extra_parameter);
+        }
+        NodeKind::LoadVariantPayloadStorageEvidence(load) => {
+            return Ok(load.extra_parameter);
+        }
+        other => {
+            return Err(internal_compilation_error!(Internal {
+                error: format!("unexpected static evidence node {other:?}"),
+                span,
+            }));
+        }
+    };
+    Ok(ctx.intern_evidence_binding(requirement.clone(), source))
 }
 
 /// Return the method slot and callable type from an already-instantiated dictionary type.

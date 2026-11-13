@@ -3473,3 +3473,112 @@ fn an_exported_function_uses_a_private_implementation_that_reads_a_field() {
         expected_tuple([int(2), int(2), int(3), int(3), int(4), int(6), int(2)])
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_exported_function_reads_a_field_of_a_private_type_through_a_private_implementation() {
+    // The requirement of the function names private types and a private trait, so it is
+    // reduced where the function is defined. What the implementation requires of a field of
+    // a private type is answered there too, by the type, and the function publishes only
+    // what an access to that field takes.
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    compile_module(
+        &mut session,
+        "a",
+        indoc! { r#"
+            struct Wrapper<T>(T)
+            struct Single<A> { value: A }
+            struct Pair<A> { value: (A, int) }
+            struct Flat<A> { value: int, other: A }
+            struct Nested<A> { outer: Single<A> }
+            #[private_repr]
+            struct Box<T>(T)
+            subscript Box<T>.value(self) -> _ {
+                ref {
+                    let local = self.0;
+                    yield local
+                }
+            }
+
+            // A subscript that requires a trait without methods, which has no evidence, and
+            // one with a method, which has.
+            pub trait Mark<Self> {}
+            impl Mark for int {}
+            pub trait Scale<Self> { fn scale(x: Self) -> Self; }
+            impl Scale for int {
+                fn scale(x) { x * 10 }
+            }
+            #[private_repr]
+            struct Marked<T>(T)
+            subscript Marked<T>.value(self) -> T where T: Mark, T: Scale {
+                ref {
+                    let local = scale(self.0);
+                    yield local
+                }
+            }
+
+            trait Get<Self |-> R> { fn get(x: Self) -> R; }
+            impl<T, R> Get for <Self = Wrapper<T> |-> R = R> {
+                fn get(x) { x.0.value }
+            }
+            trait Deep<Self |-> R> { fn deep(x: Self) -> R; }
+            impl<T, R> Deep for <Self = Wrapper<T> |-> R = R> {
+                fn deep(x) { x.0.outer.value }
+            }
+            trait Bump<Self> { fn bump(x: &mut Self); }
+            impl<T> Bump for <Self = Wrapper<T>> {
+                fn bump(x) { x.0.value = x.0.value + 1 }
+            }
+
+            pub fn single<A>(a: A) -> A { get(Wrapper(Single { value: a })) }
+            pub fn element<A>(a: A) -> A { get(Wrapper(Pair { value: (a, 1) })).0 }
+            pub fn deep_one<A>(a: A) -> A {
+                deep(Wrapper(Nested { outer: Single { value: a } }))
+            }
+            pub fn inner<A>(a: A) -> A {
+                get(Wrapper(Single { value: Single { value: a } })).value
+            }
+            pub fn declared<A>(a: A) -> A { get(Wrapper(Box(a))) }
+            pub fn marked<A>(a: A) -> A { get(Wrapper(Marked(a))) }
+            pub fn written<A>(a: A) -> int {
+                let mut wrapper = Wrapper(Flat { value: 1, other: a });
+                bump(wrapper);
+                get(wrapper)
+            }
+        "# },
+    );
+    compile_module(
+        &mut session,
+        "b",
+        indoc! { r#"
+            use a::{Mark, Scale};
+            struct Mine(int)
+            impl Mark for Mine {}
+            impl Scale for Mine {
+                fn scale(x) { Mine(x.0 + 1) }
+            }
+            pub fn all() -> (int, string, float, int, int, int, int, int, int) {
+                (
+                    a::single(5),
+                    a::element("a"),
+                    a::deep_one(2.5),
+                    a::inner(Mine(3)).0,
+                    a::declared(8),
+                    a::declared(Mine(4)).0,
+                    a::written(Mine(0)),
+                    a::marked(7),
+                    a::marked(Mine(7)).0,
+                )
+            }
+        "# },
+    );
+    assert_val_eq!(
+        session.run("to_string(b::all())"),
+        string("(5, a, 2.5, 3, 8, 4, 2, 70, 8)")
+    );
+    // What the subscript requires is a requirement of the exported function.
+    session
+        .fail_compilation("a::marked(1.5)")
+        .expect_trait_impl_not_found("Mark", &["Self = float"]);
+}
