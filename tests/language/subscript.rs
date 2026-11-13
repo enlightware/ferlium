@@ -20,7 +20,7 @@ use ferlium::{
         r#type::TypeKind,
     },
 };
-use indoc::indoc;
+use indoc::{formatdoc, indoc};
 use test_log::test;
 use ustr::ustr;
 
@@ -901,7 +901,7 @@ fn named_subscript_and_projection_can_share_source_name() {
     let value = run_experimental_subscript_source(indoc! { r#"
         #[private_repr]
         struct Secret {
-            value: int,
+            raw: int,
         }
 
         subscript value(slot: &mut int) -> int {
@@ -912,12 +912,12 @@ fn named_subscript_and_projection_can_share_source_name() {
 
         subscript Secret.value(self) -> int {
             ref mut {
-                self.value
+                self.raw
             }
         }
 
         let mut slot = 3;
-        let secret = Secret { value: 8 };
+        let secret = Secret { raw: 8 };
         slot->[value] + secret.value
     "# });
 
@@ -957,17 +957,17 @@ fn generic_projection_receiver_reads_and_writes() {
     let value = run_experimental_subscript_source(indoc! { r#"
         #[private_repr]
         struct Pair<A, B> {
-            left: A,
-            right: B,
+            first: A,
+            second: B,
         }
 
         subscript Pair<A, B>.left(self) -> A {
             ref mut {
-                self.left
+                self.first
             }
         }
 
-        let mut pair = Pair { left: 2, right: "ignored" };
+        let mut pair = Pair { first: 2, second: "ignored" };
         pair.left = 9;
         pair.left
     "# });
@@ -1790,22 +1790,33 @@ fn generic_projection_mutable_arg_runs_yielded_mut_driver() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn projection_subscript_rejects_accessible_structural_field_conflict() {
-    assert_invalid_subscript_definition(
-        indoc! { r#"
-            struct Point {
-                x: int,
-            }
+fn projection_subscript_rejects_the_name_of_a_stored_field() {
+    // A field name of a type means one thing, also where its representation is private and
+    // the stored field is seen by its module only, and for a type with arguments.
+    for (attribute, generics, field_ty) in [
+        ("", "", "int"),
+        ("#[private_repr]", "", "int"),
+        ("", "<T>", "T"),
+        ("#[private_repr]", "<T>", "T"),
+    ] {
+        assert_invalid_subscript_definition(
+            &formatdoc! { r#"
+                {attribute}
+                struct Point{generics} {{
+                    x: {field_ty},
+                    y: int,
+                }}
 
-            subscript Point.x(self) -> int {
-                ref mut {
-                    self.x
-                }
-            }
-        "# },
-        SubscriptDefinitionSubject::Subscript(ustr("x")),
-        InvalidSubscriptDefinitionKind::ProjectionConflictsWithStructuralField,
-    );
+                subscript Point{generics}.x(self) -> {field_ty} {{
+                    ref mut {{
+                        self.x
+                    }}
+                }}
+            "# },
+            SubscriptDefinitionSubject::Subscript(ustr("x")),
+            InvalidSubscriptDefinitionKind::ProjectionConflictsWithStructuralField,
+        );
+    }
 }
 
 #[test]
@@ -1815,18 +1826,18 @@ fn projection_subscript_rejects_duplicate_receiver_field() {
         indoc! { r#"
             #[private_repr]
             struct Secret {
-                value: int,
+                raw: int,
             }
 
             subscript Secret.value(self) -> int {
                 ref mut {
-                    self.value
+                    self.raw
                 }
             }
 
             subscript Secret.value(self) -> int {
                 ref mut {
-                    self.value
+                    self.raw
                 }
             }
         "# },
@@ -2315,16 +2326,16 @@ fn infers_projection_subscript_return_type() {
     let value = run_experimental_subscript_source(indoc! { r#"
         #[private_repr]
         struct Secret {
-            value: int,
+            raw: int,
         }
 
         subscript Secret.value(self) {
             ref mut {
-                self.value
+                self.raw
             }
         }
 
-        let mut secret = Secret { value: 41 };
+        let mut secret = Secret { raw: 41 };
         secret.value += 1;
         secret.value
     "# });

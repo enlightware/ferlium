@@ -2733,13 +2733,6 @@ impl TypeInference {
         field: Ustr,
     ) -> Option<SubscriptId> {
         let key = ProjectionKey::explicit_for_receiver_ty(receiver_ty, field)?;
-        if env
-            .subscript_member
-            .and_then(|subscript_member| subscript_member.projection_key)
-            == Some(key)
-        {
-            return None;
-        }
         self.find_explicit_projection_subscript(env, key, true)
     }
 

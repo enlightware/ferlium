@@ -44,7 +44,7 @@ In these projection bodies, the final expression is the stored place that should
 That is why reads and assignments through `pixel.x` affect `pixel.coords[0]`.
 
 Define custom projections in the same module as their receiver type.
-An explicit custom projection is rejected if it duplicates an accessible structural field.
+A custom projection cannot have the name of a stored field of its type.
 For types whose representation is private, a custom projection can expose a public field-like view without exposing the stored fields directly.
 
 ## Direct subscript access

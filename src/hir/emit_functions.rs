@@ -2994,16 +2994,10 @@ where
             warnings,
         );
         ty_env.function_name = Some(function.name.0);
-        if let EmitFunctionKind::SubscriptMember {
-            subscript_name,
-            projection_key,
-            ..
-        } = kind
-        {
+        if let EmitFunctionKind::SubscriptMember { subscript_name, .. } = kind {
             ty_env.subscript_member = Some(SubscriptMemberTypingContext {
                 name: subscript_name,
                 requires_mutable_place: kind.requires_mutable_place(),
-                projection_key,
             });
         }
         ty_env.compilation_capabilities = capabilities;

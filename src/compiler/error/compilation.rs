@@ -692,7 +692,7 @@ impl InvalidSubscriptDefinitionKind {
             }
             Self::ProjectionConflictsWithStructuralField => {
                 format!(
-                    "{subject} cannot define an explicit projection for an accessible structural field"
+                    "{subject} cannot define an explicit projection with the name of a stored field of its type"
                 )
             }
             Self::DuplicateAttachedMember => {

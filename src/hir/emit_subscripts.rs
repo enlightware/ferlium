@@ -103,12 +103,7 @@ fn projection_key_for_subscript(
     let env = ModuleEnv::new(output, others);
     let receiver_type_def =
         validate_projection_receiver_type(env, receiver_ty, subscript, receiver_span)?;
-    reject_accessible_structural_projection_conflict(
-        env,
-        receiver_ty,
-        subscript.name,
-        receiver_span,
-    )?;
+    reject_structural_projection_conflict(env, receiver_ty, subscript.name, receiver_span)?;
     Ok(Some(ProjectionKey::nominal(
         receiver_type_def,
         subscript.name.0,
@@ -198,19 +193,17 @@ fn validate_projection_receiver_binding(
     Ok(Some((receiver_ty, receiver_span)))
 }
 
-fn reject_accessible_structural_projection_conflict(
+fn reject_structural_projection_conflict(
     env: ModuleEnv<'_>,
     receiver_ty: Type,
     field: ast::UstrSpan,
     receiver_span: Location,
 ) -> Result<(), InternalCompilationError> {
-    let TypeKind::Named(named) = &*receiver_ty.data() else {
+    // The type is copied out: giving the shape its arguments may make new types.
+    let Some(named) = receiver_ty.data().as_named().cloned() else {
         return Ok(());
     };
     let type_def = env.type_def(named.def);
-    if type_def.has_private_repr() {
-        return Ok(());
-    }
     let shape = type_def.instantiated_shape_with_effects(&named.params, &named.effect_params);
     if shape.data().as_record().is_some_and(|record| {
         record

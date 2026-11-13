@@ -20,8 +20,8 @@ use crate::{
     },
     module::{
         FunctionId, LocalDecl, LocalDeclId, LocalFunctionId, Module, ModuleEnv, ModuleId,
-        ProjectionKey, SubscriptDefinition, SubscriptId, SubscriptMember, TraitId,
-        TypeDefLookupResult, UModuleFunction, id::Id,
+        SubscriptDefinition, SubscriptId, SubscriptMember, TraitId, TypeDefLookupResult,
+        UModuleFunction, id::Id,
     },
     std::{STD_MODULE_ID, array::array_type as std_array_type},
     types::{
@@ -54,7 +54,6 @@ pub type GetSubscriptMemberWithPathData<'a> = (ast::Path, GetSubscriptMemberData
 pub(crate) struct SubscriptMemberTypingContext {
     pub(crate) name: Ustr,
     pub(crate) requires_mutable_place: bool,
-    pub(crate) projection_key: Option<ProjectionKey>,
 }
 
 #[derive(Debug, new)]
