@@ -933,8 +933,8 @@ fn rewrite_caller(source: &Function, factory: &mut VariantFactory<'_>) -> Option
         }
         let visible_start = operation.call_visible_start();
         let mut candidates = Vec::new();
-        for argument in 0..ty.fn_ty.args.len() {
-            if ty.fn_ty.args[argument]
+        for (argument, argument_ty) in ty.fn_ty.args.iter().enumerate() {
+            if argument_ty
                 .mut_ty
                 .as_resolved()
                 .is_some_and(|mutability| mutability.is_mutable())
