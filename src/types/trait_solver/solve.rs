@@ -338,15 +338,7 @@ impl<'a> TraitSolver<'a> {
         // Special case for `Repr` trait.
         if trait_id == self.std_trait_id(REPR_TRAIT_NAME) {
             let input_ty = input_tys[0];
-            let ty_data = input_ty.data();
-            let output_ty = if ty_data.is_named() {
-                let named = ty_data.as_named().unwrap().clone();
-                self.reject_inaccessible_private_repr(named.def, fn_span)?;
-                self.type_def(named.def)
-                    .instantiated_shape_with_effects(&named.params, &named.effect_params)
-            } else {
-                input_ty
-            };
+            let output_ty = self.repr_of_head(input_ty, fn_span)?.unwrap_or(input_ty);
 
             // Only search in current module, create a new implementation if not found.
             let key = ConcreteTraitImplKey::new(trait_id, input_tys.to_vec());

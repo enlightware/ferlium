@@ -2414,6 +2414,28 @@ fn a_generic_function_applies_the_output_of_an_implementation() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_implementation_reads_through_a_named_type_whose_representation_is_new() {
+    // The representation of `Tagged<(int, bool)>` is a type that nothing has made before the
+    // implementation asks for it.
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            struct Wrapper<T>(T)
+            struct Tagged<A>(A, string)
+
+            trait First<Self |-> R> { fn first(x: Self) -> R; }
+            impl<T, R> First for <Self = Wrapper<T> |-> R = R> {
+                fn first(x) { x.0.0 }
+            }
+
+            first(Wrapper(Tagged((7, true), "t"))).0
+        "# }),
+        int(7)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn an_implementation_reads_the_elements_of_a_tuple() {
     // An element of a tuple is required as a field is, and a use of the implementation gives
     // the evidence of each.

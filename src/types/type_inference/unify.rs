@@ -1618,26 +1618,12 @@ impl UnifiedTypeInference {
         // unify indirectly through the Repr constraint, which could never be instantiated.
         if trait_id == repr_trait_id {
             let input_ty = input_tys[0];
-            let ty_data = input_ty.data();
-            let is_known_non_named_ty = !ty_data.is_named() && !ty_data.is_variable();
-            let unify_to_ty = if ty_data.is_named() {
-                let named = ty_data.as_named().unwrap().clone();
-                drop(ty_data);
-                trait_solver.reject_inaccessible_private_repr(named.def, span)?;
-                Some(
-                    trait_solver
-                        .type_def(named.def)
-                        .instantiated_shape_with_effects(&named.params, &named.effect_params),
-                )
-            } else if is_known_non_named_ty || is_ty_adt(input_ty) {
-                drop(ty_data);
-                Some(input_ty)
-            } else {
-                drop(ty_data);
-                None
+            let repr = match trait_solver.repr_of_head(input_ty, span)? {
+                None if is_ty_adt(input_ty) => Some(input_ty),
+                repr => repr,
             };
-            if let Some(unify_to_ty) = unify_to_ty {
-                self.unify_same_type_with_sub_effects(unify_to_ty, span, output_tys[0], span)?;
+            if let Some(repr) = repr {
+                self.unify_same_type_with_sub_effects(repr, span, output_tys[0], span)?;
                 return Ok(None);
             }
         }

@@ -394,6 +394,32 @@ impl<'a> TraitSolver<'a> {
         Ok(())
     }
 
+    /// The representation of `ty` as far as its head tells it: the shape of a named type, the
+    /// type itself if it is structural, and nothing for a variable. `Repr` is answered by this
+    /// function alone, so the arguments of `ty` need not be known.
+    pub(crate) fn repr_of_head(
+        &self,
+        ty: Type,
+        access_span: Location,
+    ) -> Result<Option<Type>, InternalCompilationError> {
+        // Building the shape makes types, so the type is not held meanwhile.
+        let (named, is_variable) = {
+            let ty_data = ty.data();
+            (ty_data.as_named().cloned(), ty_data.is_variable())
+        };
+        Ok(if let Some(named) = named {
+            self.reject_inaccessible_private_repr(named.def, access_span)?;
+            Some(
+                self.type_def(named.def)
+                    .instantiated_shape_with_effects(&named.params, &named.effect_params),
+            )
+        } else if is_variable {
+            None
+        } else {
+            Some(ty)
+        })
+    }
+
     pub fn trait_def(&self, id: TraitId) -> &Trait {
         trait_def_from_parts(self.current_type_items, self.others, id)
     }
