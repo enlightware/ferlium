@@ -2487,6 +2487,85 @@ fn an_implementation_reads_the_elements_of_a_tuple() {
     }
 }
 
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_generic_function_knows_the_output_of_an_implementation() {
+    // The implementation applies whatever the generic is, so its output is known in the
+    // function up to that generic, and a part of it can be the result. A literal given for
+    // the generic then takes its default, as nothing unknown is left that names it.
+    let declarations = indoc! { r#"
+        struct Wrapper<T>(T)
+        struct Pair<A> { value: (A, int) }
+        struct Single<A> { value: A }
+        fn inc(x: int) -> int { x + 1 }
+
+        trait Get<Self |-> R> { fn get(x: Self) -> R; }
+        impl<T, R> Get for <Self = Wrapper<T> |-> R = R> {
+            fn get(x) { x.0.value }
+        }
+    "# };
+    let uses = indoc! { r#"
+        fn element<A>(a: A) -> A { get(Wrapper(Pair { value: (a, 1) })).0 }
+        fn of_any<A>(a: A) -> A { get(Wrapper(Single { value: (a, 1) })).0 }
+        fn field<A>(a: A) -> A { get(Wrapper(Single { value: { inner: a } })).inner }
+        fn bound<A>(a: A) -> A {
+            let mut pair = get(Wrapper(Pair { value: (a, 1) }));
+            pair.1 = pair.1 + 1;
+            pair.0
+        }
+        fn in_a_lambda<A>(a: A) -> A {
+            let second = |x| get(Wrapper(Single { value: (x, a) })).1;
+            second(1)
+        }
+        fn applied<A>(a: A) -> int { get(Wrapper(Single { value: (inc, a) })).0(2) }
+        fn twice<A>(a: A) -> A {
+            get(Wrapper(Single { value: get(Wrapper(Single { value: (a, 2) })) })).0
+        }
+        fn first<A>(a: A, n: int) -> A {
+            if n == 0 {
+                get(Wrapper(Pair { value: (a, 1) })).0
+            } else {
+                second(a, n - 1)
+            }
+        }
+        fn second<A>(a: A, n: int) -> A {
+            if n == 0 {
+                get(Wrapper(Single { value: (a, 1.5) })).0
+            } else {
+                third(a, n - 1)
+            }
+        }
+        fn third<A>(a: A, n: int) -> A {
+            if n == 0 {
+                get(Wrapper(Single { value: { inner: a } })).inner
+            } else {
+                first(a, n - 1)
+            }
+        }
+    "# };
+    let result = indoc! { r#"
+        to_string((
+            (element(5), element("a")),
+            (of_any(5), of_any(1.5)),
+            (field(5), field("a")),
+            bound(5),
+            in_a_lambda(5),
+            applied("a"),
+            twice(5),
+            (first(5, 4), second("a", 5), third(2.5, 6)),
+        ))
+    "# };
+    for source in [
+        format!("{declarations}{uses}{result}"),
+        format!("{uses}{declarations}{result}"),
+    ] {
+        assert_val_eq!(
+            TestSession::new().run(&source),
+            string("((5, a), (5, 1.5), (5, a), 5, 5, 3, 5, (5, a, 2.5))")
+        );
+    }
+}
+
 fn missing_requirement_of_default_method(source: &str) -> Option<MissingRequirement> {
     let error = TestSession::new().fail_compilation(source).into_inner();
     let CompilationErrorImpl::InvalidTraitDefinition {

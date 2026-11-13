@@ -260,11 +260,19 @@ impl UnifiedTypeInference {
     /// type that satisfies them, as inference does between its passes. `pending` holds the
     /// requirements that the caller keeps pending itself, already substituted: a type that
     /// one of them may still bound is left, as for a pending requirement of the inference.
+    /// With `among`, only these types are given one, the others being left to the inference
+    /// that they are of.
     pub(crate) fn select_least_bounded_types(
         &mut self,
         pending: &[PubTypeConstraint],
+        among: Option<&[Type]>,
     ) -> Result<bool, InternalCompilationError> {
-        self.select_lower_bounds_with(false, SelectionPhase::Inference, pending)
+        let among = among.map(|tys| {
+            tys.iter()
+                .filter_map(|ty| self.normalize_type(*ty).data().as_variable().copied())
+                .collect::<FxHashSet<_>>()
+        });
+        self.select_lower_bounds_with(false, SelectionPhase::Inference, pending, among.as_ref())
     }
 
     /// Select only after all currently available structural consequences have
@@ -274,7 +282,7 @@ impl UnifiedTypeInference {
         bottom: bool,
         phase: SelectionPhase,
     ) -> Result<bool, InternalCompilationError> {
-        self.select_lower_bounds_with(bottom, phase, &[])
+        self.select_lower_bounds_with(bottom, phase, &[], None)
     }
 
     fn select_lower_bounds_with(
@@ -282,6 +290,7 @@ impl UnifiedTypeInference {
         bottom: bool,
         phase: SelectionPhase,
         pending: &[PubTypeConstraint],
+        among: Option<&FxHashSet<TypeVar>>,
     ) -> Result<bool, InternalCompilationError> {
         self.propagate_type_bounds()?;
         let relations = self.ordered_bounds();
@@ -308,7 +317,11 @@ impl UnifiedTypeInference {
         if contributors.is_empty() {
             return Ok(false);
         }
-        let mut roots: Vec<_> = contributors.keys().copied().collect();
+        let mut roots: Vec<_> = contributors
+            .keys()
+            .copied()
+            .filter(|root| among.is_none_or(|among| among.contains(root)))
+            .collect();
         roots.sort_by_key(|var| var.name());
         let mut choices = Vec::new();
         let inputs = self.input_variables();

@@ -775,17 +775,19 @@ impl<'a> TraitSolver<'a> {
 
             // The answer to a non-trait constraint may bound a type from below, as the type
             // of a field does the type that the implementation reads it at. Once the
-            // constraints tell nothing more, such a type is the least one, as an effect is: a
-            // scratch match has no later inference to choose it. The caller's own inference,
-            // matching for improvement, chooses it itself. A type that a constraint still
-            // pending here may bound waits for it, so the constraints are tried again after
-            // each choice.
-            if settled && queued_bounds && scratch {
+            // constraints tell nothing more, such a type is the least one, as an effect is:
+            // the requirement would otherwise keep it unknown, as its output, for as long as
+            // its inputs are, and a generic function would never know it. In the caller's own
+            // inference, matching for improvement, only the types of the implementation are
+            // chosen: the caller chooses its own. A type that a constraint still pending here
+            // may bound waits for it, so the constraints are tried again after each choice.
+            if settled && queued_bounds {
                 let pending: Vec<_> = still_remaining
                     .iter()
                     .map(|(_, constraint)| constraint.clone())
                     .collect();
-                match ty_inf.select_least_bounded_types(&pending) {
+                let own: Vec<_> = inst_subst.0.values().copied().collect();
+                match ty_inf.select_least_bounded_types(&pending, (!scratch).then_some(&own[..])) {
                     Ok(true) => {
                         remaining = still_remaining;
                         continue;

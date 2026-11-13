@@ -74,6 +74,9 @@ as its output can be, is the least type above them, as inference would choose.
 The outputs of an impl are functions of its inputs, so the match finds them from the inputs and
 compares them with the outputs that the use requests afterwards: a requested output that is still
 partly unknown, as a function of an argument to be inferred, does not stand for them.
+This also holds while a function is inferred, when the only impl that can apply does so whatever
+its generics are: its output is then known in the function up to these generics, though the
+requirement stays for the caller.
 
 The access bodies of a subscript are bodies of one signature, so they are inferred together, also
 when neither names the other, and are published with the same types and requirements. They differ
