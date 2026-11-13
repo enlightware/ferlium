@@ -158,6 +158,16 @@ impl<'a> EmitFunctionInput<'a> {
         self.subscript
             .map_or(self.function.name, |subscript| subscript.name)
     }
+
+    /// Whether other modules can use the item that the function is of: the function, or its
+    /// subscript, the bodies of a subscript being private functions.
+    fn is_exported(&self) -> bool {
+        self.trait_default.is_none()
+            && self
+                .subscript
+                .map_or(self.function.visibility, |subscript| subscript.visibility)
+                .is_public()
+    }
 }
 
 impl EmitFunctionKind {
@@ -1850,9 +1860,9 @@ fn public_requirements(
     Ok(Some(reduced.requirements))
 }
 
-/// Whether a group publishes requirements: one of its functions is public.
+/// Whether a group publishes requirements: one of its functions, or of its subscripts, is public.
 fn group_is_exported<'a, I: Iterator<Item = EmitFunctionInput<'a>>>(mut inputs: I) -> bool {
-    inputs.any(|input| input.function.visibility.is_public() && input.trait_default.is_none())
+    inputs.any(|input| input.is_exported())
 }
 
 /// Emit the functions of one group of the module's call graph.

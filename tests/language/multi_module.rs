@@ -2416,6 +2416,260 @@ fn exported_recursive_groups_reduce_private_requirements() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn exported_subscripts_reduce_private_requirements() {
+    // A subscript that other modules can use publishes its requirements as an exported function
+    // does, once for its bodies, which are one definition: here `[T]: Hidden` becomes
+    // `T: Inspect`, also for the value of the subscript that a body takes.
+    let hidden = indoc! { r#"
+        trait Hidden<Self |-> ! E> { fn hidden(x: Self) -> int ! E; }
+        impl<T> Hidden for <Self = [T] |-> ! E = fallible> where T: Inspect {
+            fn hidden(x) { string_len(inspect(x[0])) }
+        }
+    "# };
+    let ref_body = indoc! { r#"
+        ref {
+            let local = if depth == 0 {
+                slot + hidden([key])
+            } else {
+                let accessor = cell;
+                slot->[accessor](key, depth - 1)
+            };
+            yield local
+        }
+    "# };
+    let mut_body = indoc! { r#"
+        mut {
+            let mut local = if depth == 0 {
+                slot + hidden([key])
+            } else {
+                slot->[cell](key, depth - 1)
+            };
+            yield local;
+            slot = local
+        }
+    "# };
+    for bodies in [
+        format!("{ref_body}{mut_body}"),
+        format!("{mut_body}{ref_body}"),
+    ] {
+        for signature in [
+            "<T>(slot: &mut int, key: T, depth: int)",
+            "(slot: &mut int, key, depth: int)",
+        ] {
+            let mut session = TestSession::new();
+            session.allow_experimental();
+            compile_module(
+                &mut session,
+                "a",
+                &format!(
+                    indoc! { r#"
+                        {}
+                        pub subscript cell{} -> int {{
+                        {}
+                        }}
+
+                        pub fn read() -> int {{
+                            let mut slot = 1;
+                            slot->[cell](12345, 2)
+                        }}
+
+                        pub fn write() -> int {{
+                            let mut slot = 1;
+                            slot->[cell]("ab", 2) += 10;
+                            slot
+                        }}
+                    "# },
+                    hidden, signature, bodies
+                ),
+            );
+            compile_module(
+                &mut session,
+                "b",
+                indoc! { r#"
+                    use a::cell;
+
+                    pub fn read() -> int {
+                        let accessor = cell;
+                        let mut slot = 1;
+                        slot->[accessor](12345, 2)
+                    }
+
+                    pub fn write() -> int {
+                        let accessor = cell;
+                        let mut slot = 1;
+                        slot->[accessor]("ab", 2) += 10;
+                        slot
+                    }
+
+                    fn read_any(key) -> int {
+                        let accessor = cell;
+                        let mut slot = 1;
+                        slot->[accessor](key, 2)
+                    }
+
+                    pub fn read_bool() -> int {
+                        read_any(true)
+                    }
+                "# },
+            );
+            for (expr, expected) in [
+                ("a::read()", 6),
+                ("a::write()", 15),
+                ("b::read()", 6),
+                ("b::write()", 15),
+                ("b::read_bool()", 5),
+            ] {
+                assert_val_eq!(session.run(expr), int(expected), "{expr}, {signature}");
+            }
+        }
+    }
+
+    // Bodies that require different private things publish them together, in one order; the
+    // public form of one names an output that its private requirement did not.
+    for reverse in [false, true] {
+        let mut bodies = [
+            "ref { let local = slot + hidden([key]); yield local }",
+            "mut { let mut local = slot + hidden_read([key]); yield local; slot = local }",
+        ];
+        if reverse {
+            bodies.reverse();
+        }
+        let mut session = TestSession::new();
+        session.allow_experimental();
+        compile_module(
+            &mut session,
+            "a",
+            &format!(
+                indoc! { r#"
+                    {}
+                    pub trait Read<Self |-> Out> {{
+                        fn read(x: Self) -> Out;
+                    }}
+                    impl Read for <Self = int |-> Out = int> {{
+                        fn read(x: int) -> int {{ x }}
+                    }}
+                    trait HiddenRead<Self> {{
+                        fn hidden_read(x: Self) -> int ! fallible;
+                    }}
+                    impl<T, O> HiddenRead for [T] where T: Read<Out = O>, O: Inspect {{
+                        fn hidden_read(x: [T]) -> int {{ string_len(inspect(read(x[0]))) }}
+                    }}
+                    pub subscript cell(slot: &mut int, key) -> int {{
+                        {}
+                        {}
+                    }}
+                "# },
+                hidden, bodies[0], bodies[1]
+            ),
+        );
+        compile_module(
+            &mut session,
+            "b",
+            indoc! { r#"
+                use a::cell;
+
+                fn write_any(key) -> int {
+                    let accessor = cell;
+                    let mut slot = 1;
+                    slot->[accessor](key) += 10;
+                    slot->[accessor](key)
+                }
+
+                pub fn write() -> int {
+                    write_any(12345)
+                }
+            "# },
+        );
+        assert_val_eq!(session.run("b::write()"), int(21), "reversed: {reverse}");
+    }
+
+    // The same for a subscript declared as a field, which another module reads as a field.
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    compile_module(
+        &mut session,
+        "a",
+        &format!(
+            indoc! { r#"
+                {}
+                #[private_repr]
+                pub struct Secret<T> {{
+                    raw: T,
+                }}
+
+                pub fn make<T>(raw: T) -> Secret<T> {{
+                    Secret {{ raw }}
+                }}
+
+                pub subscript Secret<T>.value(self) -> int {{
+                    ref {{
+                        let local = hidden([self.raw]);
+                        yield local
+                    }}
+                }}
+            "# },
+            hidden
+        ),
+    );
+    compile_module(
+        &mut session,
+        "b",
+        indoc! { r#"
+            pub fn direct() -> int {
+                a::make(12345).value
+            }
+        "# },
+    );
+    assert_val_eq!(session.run("b::direct()"), int(5));
+    assert!(
+        module_fails_with(
+            &mut session,
+            "c",
+            indoc! { r#"
+                fn pure_only(f: () -> int ! ()) -> int {
+                    f()
+                }
+
+                pub fn read() -> int {
+                    pure_only(|| a::make(12345).value)
+                }
+            "# },
+            |e| matches!(e, CompilationErrorImpl::InvalidEffectInclusion { .. })
+        ),
+        "the effect of the reduced requirement is that of the subscript"
+    );
+
+    // A requirement that does not reduce is refused where the subscript is defined, written or
+    // not, and accepted for a subscript of the module alone.
+    let hidden = "trait Hidden<Self> { fn hidden(x: Self) -> int; }\n";
+    let body = "{ ref { let local = slot + hidden(key); yield local } }";
+    for (subscript, private_requirement) in [
+        ("pub subscript cell<T>(slot: &mut int, key: T) -> int", true),
+        (
+            "pub subscript cell<T>(slot: &mut int, key: T) -> int where T: Hidden",
+            true,
+        ),
+        ("subscript cell<T>(slot: &mut int, key: T) -> int", false),
+    ] {
+        let source = format!("{hidden}{subscript} {body}");
+        let mut session = TestSession::new();
+        session.allow_experimental();
+        if private_requirement {
+            assert!(
+                module_fails_with(&mut session, "a", &source, |e| matches!(
+                    e,
+                    CompilationErrorImpl::PrivateRequirementInPublicContract { .. }
+                )),
+                "{source}"
+            );
+        } else {
+            compile_module(&mut session, "a", &source);
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn private_reduction_determines_inferred_function_outputs() {
     let mut session = TestSession::new();
     compile_module(

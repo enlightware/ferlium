@@ -81,9 +81,10 @@ final. Its effects are those of a [recursive group](#where-constraints-come-from
 
 ### Public requirements
 
-Before publishing an exported function or implementation, requirements mentioning private types or
-traits are reduced in the defining module. An impl can be selected only if it applies uniformly,
-without choosing unresolved input types, and no other candidate could apply after instantiation.
+Before publishing an exported function, subscript or implementation, requirements mentioning
+private types or traits are reduced in the defining module. An impl can be selected only if it
+applies uniformly, without choosing unresolved input types, and no other candidate could apply
+after instantiation.
 Independent variables remain generic, including those occurring only in a function's result and
 outputs supplied by public prerequisites. A uniformly selected impl may determine its own outputs;
 these substitutions also reach the impl head and bodies. A cycle of output dependencies alone does
