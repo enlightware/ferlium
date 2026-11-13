@@ -556,10 +556,23 @@ impl TraitSolver<'_> {
                 .dictionary_value
                 .project_entry_captures(index, &captures, || requirement.clone())
                 .expect("source dictionary has valid entry captures");
-            let requirements = BlanketMethodRequirements {
-                entry: DictionaryEntryRequirements::from_callable(callee.clone()),
-                callee,
-            };
+            // Two requirements of the source can be one at these types, and one can need no
+            // evidence any more. The entry takes each once, in the order of its first use,
+            // and gives it to every argument of the method that asks for it.
+            let entry = DictionaryEntryRequirements::canonical(&callee, |id| self.trait_def(id));
+            let source_mapping = source.dictionary_value.entry_capture_mapping(index);
+            let mapping = entry
+                .as_slice()
+                .iter()
+                .map(|requirement| {
+                    let argument = callee
+                        .iter()
+                        .position(|asked| asked == requirement)
+                        .expect("an entry requirement is one of the method");
+                    source_mapping[argument]
+                })
+                .collect::<Vec<_>>();
+            let requirements = BlanketMethodRequirements { entry, callee };
             let mut function = self.materialize_blanket_method_thunk(
                 *function,
                 Some(application.dictionary.module),
@@ -582,12 +595,7 @@ impl TraitSolver<'_> {
             self.fn_collector
                 .push_with_visibility(name, function, Visibility::Module);
             entries.push(id);
-            mappings.push(
-                source
-                    .dictionary_value
-                    .entry_capture_mapping(index)
-                    .to_vec(),
-            );
+            mappings.push(mapping);
         }
         let mut getters = entries.split_off(source.methods.len());
         let mut associated_const_values = source.associated_const_values;

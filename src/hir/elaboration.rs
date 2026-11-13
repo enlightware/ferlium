@@ -949,6 +949,21 @@ fn extra_arg_kind_from_inst_data(
                     let ty = subscript_ty.receiver_ty();
                     let expected_node_ty = Type::subscript_type(subscript_ty.clone());
                     let expected_arg_ty = FnArgType::new_by_val(expected_node_ty);
+                    // Evidence that the function is given for this very type is taken as it
+                    // is: an entry of a dictionary made for a known type is given the fields
+                    // of that type, and not what building them again would take.
+                    if !matches!(&*ty.data(), Variable(_))
+                        && let Some(index) =
+                            find_projection_subscript_dict_index_for_receiver_ty(ctx.dicts, ty, name)
+                    {
+                        return Ok((
+                            K::LoadSubscriptEvidence(hir::LoadSubscriptEvidence {
+                                extra_parameter: EvidenceBindingId::from_index(index),
+                            }),
+                            expected_node_ty,
+                            expected_arg_ty,
+                        ));
+                    }
                     // As inference: the subscript that the type declares, where the
                     // requirement accepts one, and the stored field otherwise.
                     if requirement.accepts_user_defined_projection()

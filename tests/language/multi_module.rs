@@ -3381,3 +3381,95 @@ fn a_declared_field_of_a_generic_receiver_takes_the_evidence_of_the_caller() {
         );
     }
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_exported_function_uses_a_private_implementation_that_reads_a_field() {
+    // The private implementation is chosen where the function is defined, and its dictionary
+    // is given the field of the type that it was chosen for. Reading that field needs
+    // nothing more, also when the type has another member of a generic type.
+    let mut session = TestSession::new();
+    compile_module(
+        &mut session,
+        "a",
+        indoc! { r#"
+            pub struct Wrapper<T>(T)
+            pub struct Flat<A> { value: int, other: A }
+
+            trait Peek<Self> { fn peek(x: Self) -> int; }
+            impl<T> Peek for <Self = Wrapper<T>> {
+                fn peek(x) { x.0.value + 1 }
+            }
+            trait Bump<Self> { fn bump(x: &mut Self); }
+            impl<T> Bump for <Self = Wrapper<T>> {
+                fn bump(x) { x.0.value = x.0.value + 1 }
+            }
+
+            pub fn read<A>(a: A) -> int {
+                peek(Wrapper(Flat { value: 1, other: a }))
+            }
+            pub fn written<A>(a: A) -> int {
+                let mut wrapper = Wrapper(Flat { value: 1, other: a });
+                bump(wrapper);
+                bump(wrapper);
+                wrapper.0.value
+            }
+
+            // Two requirements of an implementation can be one at the types that it is
+            // chosen for, and one can need no evidence there, as `Value` of a function.
+            fn inc(x: int) -> int { x + 1 }
+            trait CopyField<Self> { fn copy_field(x: &mut Self) -> int; }
+            impl<T, U> CopyField for Wrapper<(T, U)> {
+                fn copy_field(x) {
+                    x.0.1.value = x.0.0.value + 1;
+                    x.0.1.value
+                }
+            }
+            trait Keep<Self> { fn keep(x: Self) -> int; }
+            impl<T, U> Keep for Wrapper<(T, U)> {
+                fn keep(x) {
+                    let first = x.0.0;
+                    let second = x.0.1;
+                    1
+                }
+            }
+            pub fn copied<A>(a: A, b: A) -> int {
+                let mut wrapper = Wrapper((
+                    Flat { value: 3, other: a },
+                    Flat { value: 9, other: b },
+                ));
+                copy_field(wrapper)
+            }
+            pub fn copied_of_two<A, B>(a: A, b: B) -> int {
+                let mut wrapper = Wrapper((
+                    Flat { value: 5, other: a },
+                    Flat { value: 9, other: b },
+                ));
+                copy_field(wrapper)
+            }
+            pub fn kept<A>(a: A) -> int { keep(Wrapper((a, a))) + keep(Wrapper((inc, a))) }
+        "# },
+    );
+    compile_module(
+        &mut session,
+        "b",
+        indoc! { r#"
+            struct Mine(string)
+            pub fn all() -> (int, int, int, int, int, int, int) {
+                (
+                    a::read(5),
+                    a::read(Mine("s")),
+                    a::written(2.5),
+                    a::written(Mine("t")),
+                    a::copied("a", "b"),
+                    a::copied_of_two(1, Mine("u")),
+                    a::kept(Mine("v")),
+                )
+            }
+        "# },
+    );
+    assert_val_eq!(
+        session.run("b::all()"),
+        expected_tuple([int(2), int(2), int(3), int(3), int(4), int(6), int(2)])
+    );
+}
