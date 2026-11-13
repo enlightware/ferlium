@@ -20,6 +20,7 @@ use crate::{
         mutability::MutType,
         r#type::{Type, TypeKind, TypeVar, store_types},
         type_like::TypeLike,
+        type_scheme::PubTypeConstraint,
     },
 };
 
@@ -133,11 +134,17 @@ impl UnifiedTypeInference {
         }
     }
 
-    fn pending_output_variables(&mut self, structural_outputs: bool) -> FxHashSet<TypeVar> {
+    /// `pending` holds the requirements that the caller keeps pending itself, already
+    /// substituted; they count as those of the inference do.
+    fn pending_output_variables(
+        &mut self,
+        structural_outputs: bool,
+        pending: &[PubTypeConstraint],
+    ) -> FxHashSet<TypeVar> {
         use crate::types::type_scheme::PubTypeConstraint::*;
         self.normalize_remaining_constraints();
         let mut outputs = FxHashSet::default();
-        for constraint in self.remaining_ty_constraints.iter() {
+        for constraint in self.remaining_ty_constraints.iter().chain(pending) {
             match constraint {
                 HaveTrait {
                     input_tys,
@@ -175,19 +182,20 @@ impl UnifiedTypeInference {
         &mut self,
         structural_outputs: bool,
     ) -> FxHashSet<TypeVar> {
-        self.pending_dependency_variables(structural_outputs, false)
+        self.pending_dependency_variables(structural_outputs, false, &[])
     }
 
     pub(super) fn pending_default_variables(&mut self) -> FxHashSet<TypeVar> {
-        self.pending_dependency_variables(false, true)
+        self.pending_dependency_variables(false, true, &[])
     }
 
     fn pending_dependency_variables(
         &mut self,
         structural_outputs: bool,
         defaulting: bool,
+        pending: &[PubTypeConstraint],
     ) -> FxHashSet<TypeVar> {
-        let mut blocked = self.pending_output_variables(structural_outputs);
+        let mut blocked = self.pending_output_variables(structural_outputs, pending);
         if blocked.is_empty() {
             return blocked;
         }
@@ -211,7 +219,7 @@ impl UnifiedTypeInference {
         // existing shape may preserve unknown members, but defaulting its shape
         // would close a constructor before those members are known.
         use crate::types::type_scheme::PubTypeConstraint::*;
-        for constraint in self.remaining_ty_constraints.iter() {
+        for constraint in self.remaining_ty_constraints.iter().chain(pending) {
             let (subject, output) = match constraint {
                 TupleAtIndexIs {
                     tuple_ty,
@@ -248,12 +256,32 @@ impl UnifiedTypeInference {
         blocked
     }
 
+    /// Give each type that pending bounds restrict from below by known types only the least
+    /// type that satisfies them, as inference does between its passes. `pending` holds the
+    /// requirements that the caller keeps pending itself, already substituted: a type that
+    /// one of them may still bound is left, as for a pending requirement of the inference.
+    pub(crate) fn select_least_bounded_types(
+        &mut self,
+        pending: &[PubTypeConstraint],
+    ) -> Result<bool, InternalCompilationError> {
+        self.select_lower_bounds_with(false, SelectionPhase::Inference, pending)
+    }
+
     /// Select only after all currently available structural consequences have
     /// been propagated. Symbolic predecessors remain dependencies, not bottom.
     pub(super) fn select_lower_bounds(
         &mut self,
         bottom: bool,
         phase: SelectionPhase,
+    ) -> Result<bool, InternalCompilationError> {
+        self.select_lower_bounds_with(bottom, phase, &[])
+    }
+
+    fn select_lower_bounds_with(
+        &mut self,
+        bottom: bool,
+        phase: SelectionPhase,
+        pending: &[PubTypeConstraint],
     ) -> Result<bool, InternalCompilationError> {
         self.propagate_type_bounds()?;
         let relations = self.ordered_bounds();
@@ -288,7 +316,7 @@ impl UnifiedTypeInference {
         let pending_outputs = if phase == SelectionPhase::Publication {
             FxHashSet::default()
         } else {
-            self.pending_bound_variables(phase == SelectionPhase::Inference)
+            self.pending_dependency_variables(phase == SelectionPhase::Inference, false, pending)
         };
         for root in roots {
             if pending_outputs.contains(&root)

@@ -672,6 +672,11 @@ impl UnifiedTypeInference {
         )
     }
 
+    /// The number of subtype bounds between types that are still pending.
+    pub(crate) fn bound_count(&self) -> usize {
+        self.bounds.relations().count()
+    }
+
     pub fn unify_same_type_with_sub_effects(
         &mut self,
         current: Type,

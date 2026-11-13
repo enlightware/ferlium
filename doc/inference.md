@@ -69,6 +69,8 @@ constructors, so joins such as `int` with `bool` can fail.
 
 Structural constraints made resolvable by a pass are retried before trait improvement. In particular,
 a projection must reveal its connection to a written generic before an impl can narrow its result.
+When an impl is matched against a use, a type of the impl that the fields it reads bound from below,
+as its output can be, is the least type above them, as inference would choose.
 
 The access bodies of a subscript are bodies of one signature, so they are inferred together, also
 when neither names the other, and are published with the same types and requirements. They differ

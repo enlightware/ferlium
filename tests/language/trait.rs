@@ -2189,6 +2189,167 @@ fn trait_improvement_keeps_generic_inputs_with_matching_heads() {
     }
 }
 
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_implementation_outputs_the_type_of_a_field() {
+    // The field bounds the output of the implementation from below, and the output is the
+    // least type that the body allows, also for a type that has subtypes, as a function has.
+    let declarations = indoc! { r#"
+        struct Wrapper<T>(T)
+        struct Inside<T> { inner: T }
+        struct Unary { value: (int) -> int }
+        struct Binary { first: (int) -> int, second: (int) -> int }
+
+        trait Get<Self |-> R> { fn get(x: Self) -> R; }
+        impl<T, R> Get for <Self = Wrapper<T> |-> R = R> {
+            fn get(x) { x.0.value }
+        }
+        trait Deep<Self |-> R> { fn deep(x: Self) -> R; }
+        impl<T, R> Deep for <Self = Wrapper<T> |-> R = R> {
+            fn deep(x) { x.0.inner.value }
+        }
+        trait Pick<Self |-> R> { fn pick(x: Self, first: bool) -> R; }
+        impl<T, R> Pick for <Self = Wrapper<T> |-> R = R> {
+            fn pick(x, first) {
+                if first {
+                    x.0.first
+                } else {
+                    x.0.second
+                }
+            }
+        }
+        trait Twice<Self |-> R> { fn twice(x: Self) -> R; }
+        impl<T, R> Twice for <Self = Wrapper<Wrapper<T>> |-> R = R> {
+            fn twice(x) { get(x.0) }
+        }
+        trait Thrice<Self |-> R> { fn thrice(x: Self) -> R; }
+        impl<T, R> Thrice for <Self = Wrapper<Wrapper<Wrapper<T>>> |-> R = R> {
+            fn thrice(x) { twice(x.0) }
+        }
+    "# };
+    let uses = indoc! { r#"
+        fn direct() -> int { get(Wrapper(Unary { value: |x| x + 1 }))(3) }
+        fn bound() -> int { let f = get(Wrapper(Unary { value: |x| x + 1 })); f(3) }
+        fn returned() { get(Wrapper(Unary { value: |x| x + 1 })) }
+        fn nested() -> int { deep(Wrapper(Inside { inner: Unary { value: |x| x * 2 } }))(4) }
+        fn picked() -> (int, int) {
+            let both = Binary { first: |x| x + 1, second: |x| x * 10 };
+            (pick(Wrapper(both), true)(3), pick(Wrapper(both), false)(3))
+        }
+        fn through() -> int {
+            thrice(Wrapper(Wrapper(Wrapper(Unary { value: |x| x - 1 }))))(4)
+        }
+    "# };
+    let result = "to_string((direct(), bound(), returned()(3), nested(), picked(), through()))";
+    for source in [
+        format!("{declarations}{uses}{result}"),
+        format!("{uses}{declarations}{result}"),
+    ] {
+        assert_val_eq!(
+            TestSession::new().run(&source),
+            string("(4, 4, 4, 8, (4, 30), 3)")
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_implementation_outputs_the_type_of_fields_read_through_one_another() {
+    // The output waits for every field that may still bound it: a field that is read on the
+    // value of another field is known only once the type of that other field is chosen.
+    let declarations = indoc! { r#"
+        struct Wrapper<T>(T)
+        struct Box<T>(T)
+        fn inc(x: int) -> int { x + 1 }
+        fn divide(x: int) -> int { idiv(4, x) }
+
+        trait Pick<Self |-> R> { fn pick(x: Self, first: bool) -> R; }
+        impl<T, R> Pick for <Self = Wrapper<T> |-> R = R> {
+            fn pick(x, first) {
+                if first {
+                    x.0.first
+                } else {
+                    x.0.second.inner
+                }
+            }
+        }
+        trait Swapped<Self |-> R> { fn swapped(x: Self, first: bool) -> R; }
+        impl<T, R> Swapped for <Self = Wrapper<T> |-> R = R> {
+            fn swapped(x, first) {
+                if first {
+                    x.0.second.inner
+                } else {
+                    x.0.first
+                }
+            }
+        }
+        trait Joined<Self |-> R> { fn joined(x: Self, first: bool) -> R; }
+        impl<T, R> Joined for <Self = Wrapper<T> |-> R = R> {
+            fn joined(x, first) {
+                let record = if first {
+                    x.0.second
+                } else {
+                    x.0.third.a
+                };
+                record.inner
+            }
+        }
+        trait Every<Self |-> R> { fn every(x: Self) -> [R]; }
+        impl<T, R> Every for <Self = Wrapper<T> |-> R = R> {
+            fn every(x) { [x.0.first, x.0.second.inner, x.0.third.a.inner] }
+        }
+        trait Open<Self |-> R> { fn open(x: Self) -> R; }
+        impl<T, R> Open for <Self = Box<T> |-> R = R> {
+            fn open(x) { x.0.inner }
+        }
+        trait Opened<Self |-> R> { fn opened(x: Self, first: bool) -> R; }
+        impl<T, R> Opened for <Self = Wrapper<T> |-> R = R> {
+            fn opened(x, first) {
+                if first {
+                    x.0.first
+                } else {
+                    open(Box(x.0.second))
+                }
+            }
+        }
+    "# };
+    let uses = indoc! { r#"
+        fn fields() { { first: inc, second: { inner: divide }, third: { a: { inner: inc } } } }
+        fn other() { { first: divide, second: { inner: inc }, third: { a: { inner: divide } } } }
+        fn picked() -> (int, int, int, int) {
+            (
+                pick(Wrapper(fields()), true)(2),
+                pick(Wrapper(fields()), false)(2),
+                pick(Wrapper(other()), true)(2),
+                pick(Wrapper(other()), false)(2),
+            )
+        }
+        fn in_reverse() -> (int, int) {
+            (swapped(Wrapper(fields()), true)(2), swapped(Wrapper(other()), true)(2))
+        }
+        fn of_a_join() -> (int, int) {
+            (joined(Wrapper(fields()), true)(2), joined(Wrapper(fields()), false)(2))
+        }
+        fn of_all() -> int {
+            let all = every(Wrapper(fields()));
+            all[0](2) + all[1](2) + all[2](2)
+        }
+        fn through() -> (int, int) {
+            (opened(Wrapper(fields()), false)(2), opened(Wrapper(other()), false)(2))
+        }
+    "# };
+    let result = "to_string((picked(), in_reverse(), of_a_join(), of_all(), through()))";
+    for source in [
+        format!("{declarations}{uses}{result}"),
+        format!("{uses}{declarations}{result}"),
+    ] {
+        assert_val_eq!(
+            TestSession::new().run(&source),
+            string("((3, 2, 2, 3), (2, 3), (2, 3), 8, (2, 3))")
+        );
+    }
+}
+
 fn missing_requirement_of_default_method(source: &str) -> Option<MissingRequirement> {
     let error = TestSession::new().fail_compilation(source).into_inner();
     let CompilationErrorImpl::InvalidTraitDefinition {

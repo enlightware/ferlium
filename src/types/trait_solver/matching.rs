@@ -483,6 +483,10 @@ impl<'a> TraitSolver<'a> {
             mode,
             BlanketConstraintMode::Structural | BlanketConstraintMode::StructuralAllowUnknown
         );
+        let scratch = !matches!(
+            mode,
+            BlanketConstraintMode::AllowUnknown | BlanketConstraintMode::StructuralAllowUnknown
+        );
 
         // Then unify the instantiated blanket input and output types against
         // the requested trait application. Propagating output equalities before
@@ -532,6 +536,7 @@ impl<'a> TraitSolver<'a> {
             .enumerate()
             .collect::<Vec<_>>();
         let mut remaining = Self::normalize_blanket_remaining_constraints(ty_inf, remaining);
+        let mut queued_bounds = false;
         loop {
             let old_remaining = mem::take(&mut remaining);
             let mut still_remaining = Vec::new();
@@ -579,12 +584,15 @@ impl<'a> TraitSolver<'a> {
                         }
                         _ => None,
                     };
-                    if let Some(unresolved) = query.unify_non_trait_constraint_query(
+                    let bounds = ty_inf.bound_count();
+                    let unresolved = query.unify_non_trait_constraint_query(
                         ty_inf,
                         &substituted_constraint,
                         assumptions,
                         arena,
-                    )? {
+                    )?;
+                    queued_bounds |= ty_inf.bound_count() > bounds;
+                    if let Some(unresolved) = unresolved {
                         still_remaining.push((*constraint_index, unresolved));
                     } else if let Some(req) = runtime_requirement {
                         runtime_requirements.push(ResolvedRuntimeRequirement {
@@ -718,14 +726,38 @@ impl<'a> TraitSolver<'a> {
                 });
             }
 
+            let still_remaining =
+                Self::normalize_blanket_remaining_constraints(ty_inf, still_remaining);
+            let settled = still_remaining.is_empty() || still_remaining == old_remaining;
+
+            // The answer to a non-trait constraint may bound a type from below, as the type
+            // of a field does the type that the implementation reads it at. Once the
+            // constraints tell nothing more, such a type is the least one, as an effect is: a
+            // scratch match has no later inference to choose it. The caller's own inference,
+            // matching for improvement, chooses it itself. A type that a constraint still
+            // pending here may bound waits for it, so the constraints are tried again after
+            // each choice.
+            if settled && queued_bounds && scratch {
+                let pending: Vec<_> = still_remaining
+                    .iter()
+                    .map(|(_, constraint)| constraint.clone())
+                    .collect();
+                match ty_inf.select_least_bounded_types(&pending) {
+                    Ok(true) => {
+                        remaining = still_remaining;
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(_) => return Ok(BlanketImplMatch::No),
+                }
+            }
+
             // Fixed point reached: either all nested constraints are solved or
             // we have to stop according to the caller's mode.
             if still_remaining.is_empty() {
                 break;
             }
 
-            let still_remaining =
-                Self::normalize_blanket_remaining_constraints(ty_inf, still_remaining);
             if still_remaining == old_remaining {
                 match mode {
                     BlanketConstraintMode::RequireAllResolved
@@ -814,11 +846,7 @@ impl<'a> TraitSolver<'a> {
 
         // In a scratch match, the implementation's own effect variables take their least
         // solution; the caller's own inference, matching for improvement, may still bound them.
-        if !matches!(
-            mode,
-            BlanketConstraintMode::AllowUnknown | BlanketConstraintMode::StructuralAllowUnknown
-        ) && ty_inf.minimize_effects_from(local_effects_start).is_err()
-        {
+        if scratch && ty_inf.minimize_effects_from(local_effects_start).is_err() {
             return Ok(BlanketImplMatch::No);
         }
         // The match reads its results through the published effects, but `ty_inf` may be the
