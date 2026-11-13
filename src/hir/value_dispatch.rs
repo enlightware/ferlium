@@ -8,7 +8,7 @@ use crate::{
     containers::{SVec2, b},
     hir::{
         self, NodeArena, NodeId, NodeKind,
-        dictionary::{DictElaborationCtx, find_trait_impl_dict_index},
+        dictionary::DictElaborationCtx,
         elaboration::trait_dictionary_evidence_binding,
         emit_value_impl::function_value_method,
         function::{ArgConvention, arg_conventions_for_args},
@@ -124,7 +124,7 @@ fn resolve_value_method_dispatch(
         )));
     }
     let value_trait_id = ctx.trait_solver.std_trait_id(VALUE_TRAIT_NAME);
-    if let Some(dict_index) = find_trait_impl_dict_index(ctx.dicts, value_trait_id, &[ty]) {
+    if let Some(dict_index) = ctx.dicts.given_trait_impl(value_trait_id, &[ty]) {
         return Ok(ResolvedValueMethodDispatch::Dictionary(
             EvidenceBindingId::from_index(dict_index),
         ));

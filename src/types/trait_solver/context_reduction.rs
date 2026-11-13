@@ -578,20 +578,10 @@ impl TraitSolver<'_> {
             // Two requirements of the source can be one at these types, and one can need no
             // evidence any more. The entry takes each once, in the order of its first use,
             // and gives it to every argument of the method that asks for it.
-            let entry = DictionaryEntryRequirements::canonical(&callee, |id| self.trait_def(id));
-            let source_mapping = source.dictionary_value.entry_capture_mapping(index);
-            let mapping = entry
-                .as_slice()
-                .iter()
-                .map(|requirement| {
-                    let argument = callee
-                        .iter()
-                        .position(|asked| asked == requirement)
-                        .expect("an entry requirement is one of the method");
-                    source_mapping[argument]
-                })
-                .collect::<Vec<_>>();
-            let requirements = BlanketMethodRequirements { entry, callee };
+            let requirements =
+                BlanketMethodRequirements::new(callee, |_| true, |id| self.trait_def(id));
+            let mapping =
+                requirements.entry_evidence(source.dictionary_value.entry_capture_mapping(index));
             let mut function = self.materialize_blanket_method_thunk(
                 *function,
                 Some(application.dictionary.module),

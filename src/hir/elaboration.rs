@@ -11,9 +11,7 @@ use crate::{
         borrow_checker::BorrowContext,
         dictionary::{
             DictElaborationCtx, DictionaryReq, EvidenceBindingSource, LateFunctionInstData,
-            StaticEvidence, find_projection_subscript_dict_index,
-            find_projection_subscript_dict_index_for_receiver_ty, find_trait_impl_dict_index,
-            find_variant_payload_indirection_index, instantiate_dictionary_requirements,
+            StaticEvidence, instantiate_dictionary_requirements,
         },
         hir_syn::{call_dictionary_function, get_dictionary},
         value_dispatch::{resolve_local_clone, resolve_local_drop},
@@ -151,7 +149,7 @@ fn trait_dictionary_node_kind(
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
 ) -> Result<(NodeKind, Type), InternalCompilationError> {
     let trait_def = ctx.trait_solver.trait_def(trait_id);
-    if let Some(index) = find_trait_impl_dict_index(ctx.dicts, trait_id, input_tys) {
+    if let Some(index) = ctx.dicts.given_trait_impl(trait_id, input_tys) {
         let ty = ctx.dicts.requirements[index].to_dict_type(ctx.trait_solver);
         return Ok((
             NodeKind::LoadDictionary(hir::LoadDictionary {
@@ -540,7 +538,7 @@ fn trait_dictionary_evidence_binding_inner(
     span: Location,
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
 ) -> Result<EvidenceBindingId, InternalCompilationError> {
-    if let Some(index) = find_trait_impl_dict_index(ctx.dicts, trait_id, input_tys) {
+    if let Some(index) = ctx.dicts.given_trait_impl(trait_id, input_tys) {
         return Ok(EvidenceBindingId::from_index(index));
     }
     let (input_tys, output_tys, output_effs) = default_unquantified_trait_application_effects(
@@ -982,13 +980,10 @@ fn extra_arg_kind_from_inst_data(
                     let ty = subscript_ty.receiver_ty();
                     let expected_node_ty = Type::subscript_type(subscript_ty.clone());
                     let expected_arg_ty = FnArgType::new_by_val(expected_node_ty);
-                    // Evidence that the function is given for this very type is taken as it
-                    // is: an entry of a dictionary made for a known type is given the fields
+                    // Evidence that the function is given is taken as it is, also for a known
+                    // type: an entry of a dictionary made for a known type is given the fields
                     // of that type, and not what building them again would take.
-                    if !matches!(&*ty.data(), Variable(_))
-                        && let Some(index) =
-                            find_projection_subscript_dict_index_for_receiver_ty(ctx.dicts, ty, name)
-                    {
+                    if let Some(index) = ctx.dicts.given_field(ty, name) {
                         return Ok((
                             K::LoadSubscriptEvidence(hir::LoadSubscriptEvidence {
                                 extra_parameter: EvidenceBindingId::from_index(index),
@@ -1059,12 +1054,7 @@ fn extra_arg_kind_from_inst_data(
                             )
                         }
                         Variable(var) => {
-                            let index = find_projection_subscript_dict_index(ctx.dicts, var, name).unwrap_or_else(
-                                || panic!("Projection subscript dictionary for field \"{name}\" in type variable \"{var}\" not found, type inference should have failed"),
-                            );
-                            K::LoadSubscriptEvidence(hir::LoadSubscriptEvidence {
-                                extra_parameter: EvidenceBindingId::from_index(index),
-                            })
+                            panic!("Projection subscript dictionary for field \"{name}\" in type variable \"{var}\" not found, type inference should have failed")
                         }
                         _ => {
                             panic!("ProjectionSubscript dictionary should have a variable or product type");
@@ -1079,12 +1069,7 @@ fn extra_arg_kind_from_inst_data(
                 } => {
                     let node_ty = Type::primitive::<bool>();
                     if matches!(&*variant_ty.data(), TypeKind::Variable(_)) {
-                        let index = find_variant_payload_indirection_index(
-                            ctx.dicts,
-                            *variant_ty,
-                            *tag,
-                        )
-                        .ok_or_else(|| {
+                        let index = ctx.dicts.given_variant_payload(*variant_ty, *tag).ok_or_else(|| {
                             internal_compilation_error!(Internal {
                                 error: format!(
                                     "variant payload-indirection evidence {dict:?} not found in generic caller requirements {:?}",
@@ -3188,19 +3173,12 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 };
                 drop(ty_data);
                 let access_mode = field_access.access_mode;
-                let given = match open {
-                    Some(var) => Some(
-                        find_projection_subscript_dict_index(self.ctx.dicts, var, &field_name)
-                            .unwrap_or_else(
-                                || panic!("Projection subscript dictionary for field \"{field_name}\" in type variable \"{var}\" not found, type inference should have failed"),
-                            ),
-                    ),
-                    None => find_projection_subscript_dict_index_for_receiver_ty(
-                        self.ctx.dicts,
-                        child_ty,
-                        &field_name,
-                    ),
-                };
+                let given = self.ctx.dicts.given_field(child_ty, &field_name);
+                if let (Some(var), None) = (open, given) {
+                    panic!(
+                        "Projection subscript dictionary for field \"{field_name}\" in type variable \"{var}\" not found, type inference should have failed"
+                    );
+                }
                 if let Some(index) = given {
                     self.projection_evidence_field_access(
                         child,
@@ -3233,12 +3211,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 let payload_ty = src[variant.payload].ty;
                 self.ensure_value_layout_evidence(payload_ty, node_span)?;
                 let payload_storage = if matches!(&*node_ty.data(), TypeKind::Variable(_)) {
-                    let index = find_variant_payload_indirection_index(
-                        self.ctx.dicts,
-                        node_ty,
-                        variant.tag,
-                    )
-                    .ok_or_else(|| {
+                    let index = self.ctx.dicts.given_variant_payload(node_ty, variant.tag).ok_or_else(|| {
                         internal_compilation_error!(Internal {
                             error: format!(
                                 "variant payload-indirection evidence for type {node_ty:?} and case .{} not found for generic construction",

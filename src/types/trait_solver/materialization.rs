@@ -22,10 +22,11 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        ConcreteTraitImplKey, DictionaryEntryRequirements, FunctionId, LocalDecl, LocalDeclId,
-        LocalFunctionId, LocalImplId, ModuleId, PendingFunctionBody, PendingModuleFunction,
-        QualifiedNameEnv, TraitDictionary, TraitId, TraitImpl, TraitImplId, TraitImpls, Visibility,
-        build_capturing_dictionary_value, build_dictionary_value, dictionary_capture_plan, id::Id,
+        ConcreteTraitImplKey, DictionaryEntryEvidence, DictionaryEntryRequirements, FunctionId,
+        LocalDecl, LocalDeclId, LocalFunctionId, LocalImplId, ModuleId, PendingFunctionBody,
+        PendingModuleFunction, QualifiedNameEnv, TraitDictionary, TraitId, TraitImpl, TraitImplId,
+        TraitImpls, Visibility, build_capturing_dictionary_value, build_dictionary_value,
+        dictionary_capture_plan, id::Id,
     },
     std::{
         core_traits_names::VALUE_TRAIT_NAME,
@@ -59,6 +60,42 @@ use super::{
 pub(super) struct BlanketMethodRequirements {
     pub(super) callee: Vec<DictionaryReq>,
     pub(super) entry: DictionaryEntryRequirements,
+}
+
+impl BlanketMethodRequirements {
+    /// The requirements of the entry of a method that asks for `callee`: each of those that
+    /// have evidence and that the entry `takes`, once, in the order of its first use.
+    pub(super) fn new<'a>(
+        callee: Vec<DictionaryReq>,
+        takes: impl Fn(&DictionaryReq) -> bool,
+        trait_def: impl Fn(TraitId) -> &'a Trait,
+    ) -> Self {
+        let entry = DictionaryEntryRequirements::canonical(
+            callee.iter().filter(|requirement| takes(requirement)),
+            trait_def,
+        );
+        Self { callee, entry }
+    }
+
+    /// Where the entry takes each of its requirements from, given where the method takes
+    /// each of its own.
+    pub(super) fn entry_evidence(
+        &self,
+        callee_evidence: &[DictionaryEntryEvidence],
+    ) -> Vec<DictionaryEntryEvidence> {
+        self.entry
+            .as_slice()
+            .iter()
+            .map(|requirement| {
+                let argument = self
+                    .callee
+                    .iter()
+                    .position(|asked| asked == requirement)
+                    .expect("an entry requirement is one of the method");
+                callee_evidence[argument]
+            })
+            .collect()
+    }
 }
 
 /// Materialized constants have capture-free literal getters; only method thunks
@@ -341,15 +378,13 @@ impl<'a> TraitSolver<'a> {
                 // Evidence for an application still being solved closes a cycle of recursive
                 // `Value` dictionaries: capturing it would nest them endlessly, so the thunk
                 // resolves it itself, once the dictionaries exist.
-                let entry_requirements = requirements.iter().filter(|requirement| {
-                    **requirement == self_requirement || !self.closes_a_cycle(requirement)
-                });
-                BlanketMethodRequirements {
-                    entry: DictionaryEntryRequirements::canonical(entry_requirements, |id| {
-                        self.trait_def(id)
-                    }),
-                    callee: requirements,
-                }
+                BlanketMethodRequirements::new(
+                    requirements,
+                    |requirement| {
+                        *requirement == self_requirement || !self.closes_a_cycle(requirement)
+                    },
+                    |id| self.trait_def(id),
+                )
             })
             .collect()
     }

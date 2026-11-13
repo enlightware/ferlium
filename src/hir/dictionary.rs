@@ -408,99 +408,82 @@ impl ExtraParameters {
     }
 }
 
-pub fn find_projection_subscript_dict_index(
-    dicts: &ExtraParameters,
-    var: TypeVar,
-    field: &str,
-) -> Option<usize> {
-    // Resolve the variable to its representation type if it is a different type variable.
-    let var = dicts.repr_map.get(&var).unwrap_or(&var);
-    let ty = Type::variable(*var);
-    // Find the index of the dictionary that matches the type and field.
-    dicts.requirements.iter().position(|dict| {
-        if let DictionaryReq::ProjectionSubscript {
-            field: field2,
-            subscript_ty,
-            ..
-        } = &dict
-        {
-            subscript_ty.receiver_ty() == ty && field2 == field
-        } else {
-            false
-        }
-    })
-}
-
-pub fn find_projection_subscript_dict_index_for_receiver_ty(
-    dicts: &ExtraParameters,
-    receiver_ty: Type,
-    field: &str,
-) -> Option<usize> {
-    dicts.requirements.iter().position(|dict| {
-        if let DictionaryReq::ProjectionSubscript {
-            field: requirement_field,
-            subscript_ty,
-            ..
-        } = dict
-        {
-            subscript_ty.receiver_ty() == receiver_ty && requirement_field == field
-        } else {
-            false
-        }
-    })
-}
-
-pub fn find_variant_payload_indirection_index(
-    dicts: &ExtraParameters,
-    variant_ty: Type,
-    tag: Ustr,
-) -> Option<usize> {
-    dicts.requirements.iter().position(|dict| {
-        matches!(
-            dict,
+impl ExtraParameters {
+    /// The parameter that gives the function the evidence of `requirement`, if it is given
+    /// it. Evidence that a function is given is taken as it is, whatever the type: that of a
+    /// type that is open here, and that of a known type, as an entry of a dictionary made for
+    /// a known type is given what its implementation requires at that type.
+    pub fn given(&self, requirement: &DictionaryReq) -> Option<usize> {
+        match requirement {
+            DictionaryReq::ProjectionSubscript {
+                field,
+                subscript_ty,
+                ..
+            } => self.given_field(subscript_ty.receiver_ty(), field),
             DictionaryReq::VariantPayloadIndirection {
-                variant_ty: requirement_variant_ty,
-                tag: requirement_tag,
+                variant_ty, tag, ..
+            } => self.given_variant_payload(*variant_ty, *tag),
+            DictionaryReq::TraitImpl {
+                trait_id,
+                input_tys,
                 ..
-            } if *requirement_variant_ty == variant_ty
-                && *requirement_tag == tag
-        )
-    })
-}
-
-pub fn find_trait_impl_dict_index(
-    dicts: &ExtraParameters,
-    trait_id: TraitId,
-    input_tys: &[Type],
-) -> Option<usize> {
-    let exact = dicts.requirements.iter().position(|dict| {
-        if let DictionaryReq::TraitImpl {
-            trait_id: trait_id2,
-            input_tys: tys2,
-            ..
-        } = dict
-        {
-            input_tys == tys2 && trait_id == *trait_id2
-        } else {
-            false
+            } => self.given_trait_impl(*trait_id, input_tys),
         }
-    });
-    // Function effects constrain where a function value may be called, but they do not
-    // distinguish runtime trait dictionaries for otherwise identical function-typed inputs.
-    exact.or_else(|| {
-        dicts.requirements.iter().position(|dict| {
-            if let DictionaryReq::TraitImpl {
-                trait_id: trait_id2,
-                input_tys: tys2,
-                ..
-            } = dict
-            {
-                trait_id == *trait_id2 && same_types_erasing_effects(input_tys, tys2)
-            } else {
-                false
-            }
+    }
+
+    /// As [`Self::given`], for the field `field` of `receiver_ty`. A type variable stands
+    /// for its representation, if the function has one for it.
+    pub fn given_field(&self, receiver_ty: Type, field: &str) -> Option<usize> {
+        let open = receiver_ty.data().as_variable().copied();
+        let receiver_ty = match open {
+            Some(var) => Type::variable(*self.repr_map.get(&var).unwrap_or(&var)),
+            None => receiver_ty,
+        };
+        self.requirements.iter().position(|requirement| {
+            matches!(
+                requirement,
+                DictionaryReq::ProjectionSubscript {
+                    field: given_field,
+                    subscript_ty,
+                    ..
+                } if subscript_ty.receiver_ty() == receiver_ty && given_field == field
+            )
         })
-    })
+    }
+
+    /// As [`Self::given`], for where the payload of the case `tag` of `variant_ty` is stored.
+    pub fn given_variant_payload(&self, variant_ty: Type, tag: Ustr) -> Option<usize> {
+        self.requirements.iter().position(|requirement| {
+            matches!(
+                requirement,
+                DictionaryReq::VariantPayloadIndirection {
+                    variant_ty: given_variant_ty,
+                    tag: given_tag,
+                    ..
+                } if *given_variant_ty == variant_ty && *given_tag == tag
+            )
+        })
+    }
+
+    /// As [`Self::given`], for the dictionary of `trait_id` for `input_tys`.
+    pub fn given_trait_impl(&self, trait_id: TraitId, input_tys: &[Type]) -> Option<usize> {
+        let position = |same: &dyn Fn(&[Type]) -> bool| {
+            self.requirements.iter().position(|requirement| {
+                matches!(
+                    requirement,
+                    DictionaryReq::TraitImpl {
+                        trait_id: given_trait_id,
+                        input_tys: given_input_tys,
+                        ..
+                    } if *given_trait_id == trait_id && same(given_input_tys)
+                )
+            })
+        };
+        // Function effects constrain where a function value may be called, but they do not
+        // distinguish runtime trait dictionaries for otherwise identical function-typed inputs.
+        position(&|given| given == input_tys)
+            .or_else(|| position(&|given| same_types_erasing_effects(input_tys, given)))
+    }
 }
 
 fn same_types_erasing_effects(left: &[Type], right: &[Type]) -> bool {
