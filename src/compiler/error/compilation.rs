@@ -1697,7 +1697,7 @@ impl FormatWith<SourceTable> for CompilationError {
             RecursiveGroupBodyDoesNotFit { function: _, span } => {
                 write!(
                     f,
-                    "The effects of function {} would change a type or a trait implementation that its recursive group was inferred with: write its signature",
+                    "The effects of {} would change a type or a trait implementation that its recursive group was inferred with: write its signature",
                     fmt_span(span)
                 )
             }
@@ -1710,7 +1710,7 @@ impl FormatWith<SourceTable> for CompilationError {
             } => {
                 write!(
                     f,
-                    "The effects of the recursive group of function {} did not settle in {rounds} rounds of inference",
+                    "The effects of the recursive group of {} did not settle in {rounds} rounds of inference",
                     fmt_span(span)
                 )?;
                 match growing {

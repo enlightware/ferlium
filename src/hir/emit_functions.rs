@@ -46,8 +46,8 @@ use crate::{
         DictionaryEntryRequirements, FunctionId, GENERATED_LAMBDA_PREFIX, ImplGenericNames,
         LocalDecl, LocalDeclId, LocalFunctionId, LocalSubscriptId, Module, ModuleCheckpoint,
         ModuleEnv, ModuleFunction, ModuleFunctionSpans, PendingFunctionBody, PendingModuleFunction,
-        ProjectionKey, QualifiedNameEnv, SubscriptMemberFunctionKind, SubscriptMemberKind,
-        SubscriptSignature, TraitId, Visibility, YieldProvenance, id::Id,
+        ProjectionKey, QualifiedNameEnv, SubscriptId, SubscriptMemberFunctionKind,
+        SubscriptMemberKind, SubscriptSignature, TraitId, Visibility, YieldProvenance, id::Id,
     },
     std::core_traits_names::VALUE_TRAIT_NAME,
     types::{
@@ -150,6 +150,12 @@ impl<'a> EmitFunctionInput<'a> {
             subscript: None,
             subscript_attachments: &[],
         }
+    }
+
+    /// The name of the item that the function is of: its own, or that of its subscript.
+    fn item_name(&self) -> ast::UstrSpan {
+        self.subscript
+            .map_or(self.function.name, |subscript| subscript.name)
     }
 }
 
@@ -472,10 +478,19 @@ fn update_subscript_signature_from_member_definition(
     Ok(())
 }
 
+/// What the bodies of a subscript share while their group is inferred: they are one definition,
+/// with one signature and one set of requirements, and only the effect that each performs is
+/// its own.
 struct SharedSubscriptSignature {
     signature: SubscriptSignature,
     annotation_subst: InstSubst,
     explicit_root_tys: Vec<Type>,
+    declaration: GroupFunctionDeclaration,
+    /// The index of the first body of the subscript among the functions of the group.
+    first: usize,
+    /// The arguments and the result that the bodies are inferred against, when the group has its
+    /// shapes.
+    baseline: Option<(Vec<FnArgType>, Type)>,
 }
 
 struct DivergingReturnDefaultingInputs<'ctx, I> {
@@ -688,9 +703,8 @@ enum Emitted {
 
 /// How [`emit_functions`] treats a group.
 pub(super) enum GroupMode<'a> {
-    /// Infer the group jointly and emit it: a function that is not recursive, the methods of
-    /// an implementation, or a recursive group with a default method of a trait or a member of
-    /// a subscript.
+    /// Infer the group jointly and emit it: a function or a subscript that is not recursive,
+    /// or the methods of an implementation.
     Normal,
     /// Infer jointly for types alone, effects being ignored, and only produce the shapes.
     Discover,
@@ -847,9 +861,15 @@ struct Settlement {
     round_bound: usize,
     /// The module before the round in progress.
     checkpoint: Option<ModuleCheckpoint>,
-    /// For each function, the error for which the round in progress leaves it out: it gets
-    /// no instance of a contract, and what follows from the effects of the round is not drawn
-    /// for it.
+    /// For each function, the index of the first body of its definition: itself, but for a body
+    /// of a subscript after the first. The bodies of a subscript are one definition: they have
+    /// one signature and one set of requirements, those of the first body, which gets the
+    /// instances for the references that any of them makes; each has the effect that it
+    /// performs.
+    units: Vec<usize>,
+    /// For the first body of each definition, the error for which the round in progress leaves
+    /// the definition out: it gets no instance of a contract, and what follows from the effects
+    /// of the round is not drawn for it.
     left_out: Vec<Option<InternalCompilationError>>,
     /// For each function, its name, its written type generics and their types.
     written_types: Vec<(ast::UstrSpan, Vec<ast::UstrSpan>, Vec<Type>)>,
@@ -908,7 +928,7 @@ impl Settlement {
             }
         }
         for (index, function) in functions.iter().enumerate() {
-            if self.left_out[index].is_some() {
+            if self.units[index] != index || self.is_left_out(index) {
                 continue;
             }
             let given = self
@@ -923,15 +943,33 @@ impl Settlement {
                 )
                 .and_then(|()| self.keeps_types(ty_inf));
             if let Err(error) = given {
-                self.left_out[index] = Some(error);
+                self.leave_out(index, error);
                 return Ok(false);
+            }
+        }
+        for (index, unit) in self.units.iter().enumerate() {
+            if *unit != index {
+                self.requirements[index] = self.requirements[*unit].clone();
+                self.requirement_ranks[index] = self.requirement_ranks[*unit].clone();
             }
         }
         Ok(true)
     }
 
-    /// Gives each reference that the function at `index` makes an instance of the contract of
-    /// the function that it names, and solves the requirements again.
+    /// Whether the round in progress leaves out the definition that the function at `index`
+    /// is a body of.
+    fn is_left_out(&self, index: usize) -> bool {
+        self.left_out[self.units[index]].is_some()
+    }
+
+    /// Leaves the definition that the function at `index` is a body of out of the round in
+    /// progress, for `error`.
+    fn leave_out(&mut self, index: usize, error: InternalCompilationError) {
+        self.left_out[self.units[index]] = Some(error);
+    }
+
+    /// Gives each reference that a body of the definition at `index` makes an instance of the
+    /// contract of the function that it names, and solves the requirements again.
     #[allow(clippy::too_many_arguments)]
     fn give_instances(
         &mut self,
@@ -944,7 +982,7 @@ impl Settlement {
         solver_arena: &mut NodeArena,
     ) -> Result<(), InternalCompilationError> {
         for (reference, (owner, callee, fn_ty, span)) in self.references.iter().enumerate() {
-            if *owner != index {
+            if self.units[*owner] != index {
                 continue;
             }
             let contract = &self.contracts[*callee];
@@ -1112,7 +1150,7 @@ impl Settlement {
         &mut self,
         ty_inf: &mut UnifiedTypeInference,
         written_effects: &[Vec<EffectVar>],
-        first: &ast::DModuleFunction,
+        first: ast::UstrSpan,
         mut errors: Vec<Option<InternalCompilationError>>,
     ) -> Result<Option<Vec<Vec<EffectVar>>>, InternalCompilationError> {
         for (error, left_out) in errors.iter_mut().zip(&mut self.left_out) {
@@ -1122,15 +1160,20 @@ impl Settlement {
         }
         let mut next = Vec::new();
         let mut numbered = Vec::new();
-        for (index, error) in errors.iter().enumerate() {
+        for (index, written_effects) in written_effects.iter().enumerate() {
             let (contract, effects) = round_contract(
                 &self.signatures[index],
                 &self.requirements[index],
                 &self.requirement_ranks[index],
-                &written_effects[index],
+                written_effects,
                 ty_inf,
             );
-            next.push(if error.is_some() {
+            // The bodies of a definition keep their contracts together.
+            let failed = errors
+                .iter()
+                .zip(&self.units)
+                .any(|(error, unit)| error.is_some() && *unit == self.units[index]);
+            next.push(if failed {
                 self.contracts[index].clone()
             } else {
                 contract
@@ -1165,7 +1208,7 @@ impl Settlement {
     fn does_not_settle(
         &self,
         next: &[GroupContract],
-        first: &ast::DModuleFunction,
+        first: ast::UstrSpan,
         ty_inf: &mut UnifiedTypeInference,
     ) -> InternalCompilationError {
         let without_effects = |contract: &GroupContract| {
@@ -1198,11 +1241,11 @@ impl Settlement {
             });
         let (growing, type_names) = growing.unzip();
         internal_compilation_error!(RecursiveGroupDoesNotSettle {
-            function: first.name.0,
+            function: first.0,
             rounds: self.rounds_done,
             growing,
             type_names: type_names.unwrap_or_default(),
-            span: first.name.1,
+            span: first.1,
         })
     }
 }
@@ -1214,12 +1257,16 @@ impl Settlement {
 /// other functions make. If the group is `exported`, they are given their public form here, as
 /// this can determine types: the requirements that name something private are replaced, in the
 /// inference too, by the public ones that give their evidence, and the bodies record how.
+///
+/// `units` has, for each function, the index of the first body of its definition, whose
+/// requirements are those of all its bodies.
 #[allow(clippy::too_many_arguments)]
 fn baseline_requirements<'a>(
     output: &mut Module,
     others: &Modules,
     inputs: impl Iterator<Item = EmitFunctionInput<'a>>,
     functions: &[LocalFunctionId],
+    units: &[usize],
     written_roots: &[Vec<Type>],
     exported: bool,
     pending_functions: &mut PendingModuleFunctions,
@@ -1238,11 +1285,12 @@ fn baseline_requirements<'a>(
     };
     ty_inf.normalize_remaining_constraints();
     let mut own_requirements = Vec::new();
-    for ((id, signature), roots) in functions
+    for ((unit, signature), roots) in units
         .iter()
         .zip(signatures(output, ty_inf))
         .zip(written_roots)
     {
+        let owner = functions[*unit];
         let mut seeds = signature.inner_ty_vars();
         for root in roots {
             seeds.extend(ty_inf.substitute_in_type(*root).inner_ty_vars());
@@ -1251,7 +1299,7 @@ fn baseline_requirements<'a>(
             ConstraintBoundary::from_seed_ty_vars(seeds)
                 .accessible_constraints(ty_inf.remaining_constraints())
                 .into_iter()
-                .filter(|requirement| !ty_inf.is_requirement_of_others(requirement, *id))
+                .filter(|requirement| !ty_inf.is_requirement_of_others(requirement, owner))
                 .cloned()
                 .collect::<Vec<_>>(),
         );
@@ -1263,12 +1311,17 @@ fn baseline_requirements<'a>(
     // The requirements that were replaced, and for each function those that replace them.
     let mut replaced = FxHashSet::default();
     let mut added = vec![Vec::new(); functions.len()];
-    for ((((input, id), roots), requirements), added) in inputs
+    for (index, ((((input, id), roots), requirements), added)) in inputs
         .zip(functions)
         .zip(written_roots)
         .zip(&mut own_requirements)
         .zip(&mut added)
+        .enumerate()
     {
+        if units[index] != index {
+            // As for the first body of its definition, below.
+            continue;
+        }
         let signature = &output.functions[id.as_index()].definition.ty_scheme.ty;
         let rigid = ty_inf
             .substitute_in_fn_type(signature)
@@ -1305,6 +1358,19 @@ fn baseline_requirements<'a>(
                 .filter(|requirement| !reduced.contains(requirement)),
         );
         *requirements = reduced;
+    }
+    for (index, unit) in units.iter().enumerate() {
+        if *unit == index {
+            continue;
+        }
+        own_requirements[index] = own_requirements[*unit].clone();
+        let evidence_plan = pending_functions[&functions[*unit]].evidence_plan.clone();
+        for function_id in function_and_associated_lambdas(&functions[index], associated_lambdas) {
+            pending_functions
+                .get_mut(&function_id)
+                .expect("pending function body")
+                .evidence_plan = evidence_plan.clone();
+        }
     }
     if !replaced.is_empty() {
         // The inference holds the public form too, each new requirement being of its function.
@@ -1409,6 +1475,7 @@ fn round_contract(
 }
 
 /// What joint inference of a group remembers about the declaration of one of its functions.
+#[derive(Clone)]
 struct GroupFunctionDeclaration {
     /// The function's name.
     name: Ustr,
@@ -1730,12 +1797,6 @@ fn fit_declared_signature(
     Ok(constraints.into_iter().unique().collect())
 }
 
-/// Whether a recursive group gets contracts: it holds functions alone, neither a default method
-/// of a trait, whose signature is declared, nor a member of a subscript.
-fn group_gets_contracts<'a, I: Iterator<Item = EmitFunctionInput<'a>>>(mut inputs: I) -> bool {
-    inputs.all(|input| input.trait_default.is_none() && input.subscript.is_none())
-}
-
 /// The public form of the requirements `constraints` of function `id`: those that name
 /// something private are replaced by the public ones that give their evidence, and the body
 /// records how. `None` if all are public already. `rigid` are the types that the requirements
@@ -1809,7 +1870,7 @@ where
     I: Iterator<Item = EmitFunctionInput<'a>>,
     F: Fn() -> I,
 {
-    if recursive_function_names.is_empty() || !group_gets_contracts(ast_functions()) {
+    if recursive_function_names.is_empty() {
         emit_functions(
             output,
             solver_arena,
@@ -1824,6 +1885,8 @@ where
         )?;
         return Ok(());
     }
+    // Nothing names the body of a default method, which is used through its trait.
+    debug_assert!(ast_functions().all(|input| input.trait_default.is_none()));
     let checkpoint = output.checkpoint(&[]);
     let warning_count = warnings.len();
     let discovered = emit_functions(
@@ -1860,7 +1923,11 @@ where
         )
         .with_result_convention(input.kind.return_convention());
         let descr = ModuleFunction::placeholder(definition, Some(function_spans(function)));
-        ids.push(output.add_function_with_visibility(function.name.0, descr, function.visibility));
+        ids.push(if input.kind.force_anonymous() {
+            output.add_function_anonymous(descr)
+        } else {
+            output.add_function_with_visibility(function.name.0, descr, function.visibility)
+        });
     }
     // A group behaves as its unrolling: its bodies are inferred once against these shapes, and
     // its contracts settle from those of functions that call nothing, until none changes.
@@ -2236,6 +2303,9 @@ where
     let mut subscript_signatures: FxHashMap<LocalSubscriptId, SharedSubscriptSignature> =
         FxHashMap::default();
     let mut subscript_attachments: Vec<Vec<SubscriptMemberAttachment>> = Vec::new();
+    // For each function, the index of the first body of its definition: itself, but for a body
+    // of a subscript after the first.
+    let mut units: Vec<usize> = Vec::new();
     for input in ast_functions() {
         let ast::ModuleFunction {
             visibility,
@@ -2287,10 +2357,13 @@ where
             }
             _ => None,
         };
+        // The bodies of a subscript are one definition: what they require is of the first.
+        let unit = cached_subscript_signature.map_or(local_fns.len(), |shared| shared.first);
         let mut annotation_subst = cached_subscript_signature
             .map(|shared| shared.annotation_subst.clone())
             .unwrap_or_else(|| impl_annotation_subst.clone().unwrap_or_default());
         let mut explicit_root_tys = if let Some(shared) = cached_subscript_signature {
+            group_declarations.push(shared.declaration.clone());
             shared.explicit_root_tys.clone()
         } else {
             let explicit_root_tys = generic_params
@@ -2360,6 +2433,12 @@ where
                     signature,
                     annotation_subst: annotation_subst.clone(),
                     explicit_root_tys: explicit_root_tys.clone(),
+                    declaration: group_declarations
+                        .last()
+                        .expect("the first body of a subscript has its declaration")
+                        .clone(),
+                    first: local_fns.len(),
+                    baseline: None,
                 }
             });
             annotation_subst = shared_signature.annotation_subst.clone();
@@ -2386,7 +2465,7 @@ where
         }
         if let GroupMode::Settle { slots, .. } = &mode {
             // A declared requirement is of its function, as those that its body makes.
-            ty_inf.own_constraints_since(declared_requirements, slots[local_fns.len()]);
+            ty_inf.own_constraints_since(declared_requirements, slots[unit]);
         }
         let attrs = validate_function_attributes(
             attributes,
@@ -2408,15 +2487,44 @@ where
         if let GroupMode::Settle { shapes, .. } = &mode {
             // The shape gives the types, and the places of the effects to infer.
             let shape = &shapes[local_fns.len()];
-            let signature = baseline_signature(
-                shape,
-                &mut group_instance,
-                &explicit_root_tys,
-                &written_effects,
-                *span,
-                &mut ty_inf,
-            );
-            fn_type = FnType::new(signature.args, signature.ret, effects.clone());
+            let shared = match kind {
+                EmitFunctionKind::SubscriptMember { subscript_id, .. } => {
+                    subscript_signatures.get_mut(&subscript_id)
+                }
+                EmitFunctionKind::Normal => None,
+            };
+            let (mut args, ret) = match shared.as_ref().and_then(|shared| shared.baseline.clone()) {
+                // The bodies of a subscript have one signature, the effects of its types too.
+                Some(signature) => signature,
+                None => {
+                    let signature = baseline_signature(
+                        shape,
+                        &mut group_instance,
+                        &explicit_root_tys,
+                        &written_effects,
+                        *span,
+                        &mut ty_inf,
+                    );
+                    (signature.args, signature.ret)
+                }
+            };
+            if let Some(shared) = shared {
+                shared.baseline.get_or_insert_with(|| (args.clone(), ret));
+            }
+            if let EmitFunctionKind::SubscriptMember {
+                projection_key: Some(_),
+                requires_mutable_yield,
+                ..
+            } = kind
+            {
+                let member_kind = if requires_mutable_yield {
+                    SubscriptMemberKind::Mut
+                } else {
+                    SubscriptMemberKind::Ref
+                };
+                SubscriptSignature::set_projection_receiver_mutability(&mut args, member_kind);
+            }
+            fn_type = FnType::new(args, ret, effects.clone());
             body_tys.push(fn_type.clone());
             reference_schemes.push(reference_scheme(shape));
         }
@@ -2533,8 +2641,15 @@ where
         function_written_effects.push(written_effects);
         function_attrs.push(attrs);
         function_kinds.push(kind);
+        units.push(unit);
         subscript_attachments.push(input.subscript_attachments.to_vec());
     }
+    // The function that the requirements of each body are of: the bodies of a subscript are one
+    // definition, with one set of requirements, which are of its first body.
+    let owners = units
+        .iter()
+        .map(|unit| local_fns[*unit])
+        .collect::<Vec<_>>();
 
     if let GroupMode::Settle { shapes, .. } = &mode {
         // Every reference to a function of the group has the group's instance of its types.
@@ -2565,6 +2680,46 @@ where
                 attachment.span,
             )?;
         }
+    }
+
+    if mode.has_fixed_types() {
+        // A use of a subscript of the group by the group has the group's instance of its types,
+        // and effects of its own.
+        let module_id = output.module_id();
+        let mut group_subscripts = FxHashMap::default();
+        for (subscript_id, shared) in &subscript_signatures {
+            let (mut args, ret) = shared
+                .baseline
+                .clone()
+                .expect("the bodies of a subscript have their signature");
+            if matches!(
+                function_kinds[shared.first],
+                EmitFunctionKind::SubscriptMember {
+                    projection_key: Some(_),
+                    ..
+                }
+            ) {
+                SubscriptSignature::set_projection_receiver_mutability(
+                    &mut args,
+                    SubscriptMemberKind::Ref,
+                );
+            }
+            let subscript = &mut output.subscripts[subscript_id.as_index()];
+            let members = [&subscript.ref_member, &subscript.mut_member]
+                .into_iter()
+                .flatten()
+                .map(|member| FunctionId::new(module_id, member.function))
+                .collect::<Vec<_>>();
+            subscript.set_shaped_signature(args, ret, |function| {
+                let index = local_fns
+                    .iter()
+                    .position(|id| *id == function)
+                    .expect("the bodies of a subscript are of one group");
+                body_tys[index].effects.clone()
+            });
+            group_subscripts.insert(SubscriptId::new(module_id, *subscript_id), members);
+        }
+        ty_inf.set_group_subscripts(group_subscripts);
     }
 
     // Associated lambdas for functions emitted while lowering closure expressions.
@@ -2802,7 +2957,7 @@ where
             output.functions[id.as_index()].definition.ty_scheme = scheme.clone();
         }
         output.deps.extend(new_deps);
-        ty_inf.own_constraints_since(constraint_scope, *id);
+        ty_inf.own_constraints_since(constraint_scope, owners[function_index]);
         body_references.push(first_reference..ty_inf.group_references().len());
     }
     // The references between the functions of the group, by the indices of these functions.
@@ -2911,8 +3066,8 @@ where
 
     // Resolve local-storage decisions before defaulting so only finalized ownership semantics add `Value`.
     let value_trait_id = module_env.expect_std_trait_id(VALUE_TRAIT_NAME);
-    for id in local_fns.iter() {
-        let mut ty_inf = ty_inf.constraint_owner_scope(*id);
+    for (id, owner) in local_fns.iter().zip(&owners) {
+        let mut ty_inf = ty_inf.constraint_owner_scope(*owner);
         for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
             let descr = pending_functions
                 .get_mut(&function_id)
@@ -2953,8 +3108,8 @@ where
             // Publication can reveal product layouts that were unknown during
             // the pre-defaulting ownership pass. Activate their evidence now.
             let module_env = ModuleEnv::new(output, others);
-            for id in &local_fns {
-                let mut ty_inf = ty_inf.constraint_owner_scope(*id);
+            for (id, owner) in local_fns.iter().zip(&owners) {
+                let mut ty_inf = ty_inf.constraint_owner_scope(*owner);
                 for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
                     let descr = pending_functions
                         .get_mut(&function_id)
@@ -3499,8 +3654,8 @@ where
             // Publication can reveal product layouts that were unknown during
             // the pre-defaulting ownership pass. Activate their evidence now.
             let module_env = ModuleEnv::new(output, others);
-            for id in &local_fns {
-                let mut ty_inf = ty_inf.constraint_owner_scope(*id);
+            for (id, owner) in local_fns.iter().zip(&owners) {
+                let mut ty_inf = ty_inf.constraint_owner_scope(*owner);
                 for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
                     let descr = pending_functions
                         .get_mut(&function_id)
@@ -3641,6 +3796,7 @@ where
                 others,
                 ast_functions(),
                 &local_fns,
+                &units,
                 &function_explicit_root_tys,
                 *exported,
                 &mut pending_functions,
@@ -3665,13 +3821,13 @@ where
                 rounds_done: 0,
                 round_bound: max_refinement_rounds(shapes),
                 checkpoint: None,
+                units: units.clone(),
                 left_out: local_fns.iter().map(|_| None).collect(),
                 written_types: ast_functions()
                     .zip(&function_explicit_root_tys)
                     .map(|(input, roots)| {
-                        let function = input.function;
-                        let params = function.generic_params.type_params().to_vec();
-                        (function.name, params, roots.clone())
+                        let params = input.function.generic_params.type_params().to_vec();
+                        (input.item_name(), params, roots.clone())
                     })
                     .collect(),
                 reference_effects: Vec::new(),
@@ -3714,9 +3870,8 @@ where
             // judged: they are as its signature has them.
             let mut observable = FxHashSet::default();
             if let Some(settlement) = &settlement {
-                for (written, left_out) in function_written_effects.iter().zip(&settlement.left_out)
-                {
-                    if left_out.is_some() {
+                for (index, written) in function_written_effects.iter().enumerate() {
+                    if settlement.is_left_out(index) {
                         observable.extend(written.iter().copied());
                     }
                 }
@@ -3735,8 +3890,8 @@ where
                     _ => None,
                 };
                 match (&mut settlement, function) {
-                    (Some(settlement), Some(index)) if settlement.left_out[index].is_none() => {
-                        settlement.left_out[index] = Some(error);
+                    (Some(settlement), Some(index)) if !settlement.is_left_out(index) => {
+                        settlement.leave_out(index, error);
                         continue;
                     }
                     _ => return Err(error),
@@ -3758,7 +3913,7 @@ where
             let is_left_out = |settlement: &Option<Settlement>, index: usize| {
                 settlement
                     .as_ref()
-                    .is_some_and(|settlement| settlement.left_out[index].is_some())
+                    .is_some_and(|settlement| settlement.is_left_out(index))
             };
             {
                 let env = ModuleEnv::new(output, others);
@@ -3770,14 +3925,14 @@ where
                     // the group has one instance of its types, so the other functions would
                     // fail with it.
                     let mut left_out = None;
-                    for (index, id) in local_fns.iter().enumerate() {
-                        if settlement.left_out[index].is_some() {
+                    for (index, owner) in owners.iter().enumerate() {
+                        if settlement.is_left_out(index) {
                             continue;
                         }
                         let mut applications = requirements(&mut ty_inf)
                             .into_iter()
                             .filter(|application| {
-                                !ty_inf.is_requirement_of_others(application, *id)
+                                !ty_inf.is_requirement_of_others(application, *owner)
                             })
                             .collect::<Vec<_>>();
                         let mut coalesced =
@@ -3791,7 +3946,7 @@ where
                         }
                     }
                     if let Some((index, error)) = left_out {
-                        settlement.left_out[index] = Some(error);
+                        settlement.leave_out(index, error);
                         continue;
                     }
                 } else {
@@ -3845,14 +4000,15 @@ where
             }
             // In a group that settles, a requirement that bodies make is of these bodies: each
             // function has its own instances of what the functions it names require.
-            let requirements_of_others = local_fns
+            let requirements_of_others = owners
                 .iter()
-                .map(|id| {
+                .map(|owner| {
                     ty_inf
                         .remaining_constraints()
                         .iter()
                         .map(|constraint| {
-                            settlement.is_some() && ty_inf.is_requirement_of_others(constraint, *id)
+                            settlement.is_some()
+                                && ty_inf.is_requirement_of_others(constraint, *owner)
                         })
                         .collect::<Vec<_>>()
                 })
@@ -4219,7 +4375,7 @@ where
                 let first = ast_functions()
                     .next()
                     .expect("a group has a function")
-                    .function;
+                    .item_name();
                 // The signatures number their effects as the contracts do.
                 match settlement.end_round(
                     &mut ty_inf,
@@ -4239,11 +4395,13 @@ where
         let mut published_subscripts = FxHashMap::default();
         let mut function_effect_substs = Vec::new();
         let mut function_effect_origins = Vec::new();
-        for (((input, id), written_effects), leading_effects) in ast_functions()
+        for (((input, id), written_effects), unit) in ast_functions()
             .zip(local_fns.iter())
             .zip(&function_written_effects)
-            .zip(&function_leading_effects)
+            .zip(&units)
         {
+            // The bodies of a definition number their effects as the first does.
+            let leading_effects = &function_leading_effects[*unit];
             let descr = &mut output.functions[id.as_index()];
             function_ty_origins.push(descr.definition.ty_scheme.ty_quantifiers.clone());
             let subst = descr

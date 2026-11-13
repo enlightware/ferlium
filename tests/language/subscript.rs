@@ -4838,6 +4838,278 @@ fn a_subscript_value_inside_its_group_holds_the_evidence_of_its_members() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_use_of_a_subscript_inside_its_group_has_effects_of_its_own() {
+    // A recursive subscript behaves, for effects, as its unrolling, as a recursive function:
+    // the pure callback that a body gives to the subscript does not make the callback of the
+    // subscript pure, whichever body does it, in whichever order, by name or through a value.
+    let pure_only = "fn pure_only(f: () -> int ! ()) -> int { f() }\n";
+    let uses = indoc! { r#"
+        fn read_fallible() -> int {
+            let mut slot = 1;
+            slot->[cell](|| idiv(6, 2), 2)
+        }
+
+        fn write_fallible() -> int {
+            let mut slot = 1;
+            slot->[cell](|| idiv(6, 2), 2) += 10;
+            slot
+        }
+
+        fn read_pure() -> int {
+            let mut slot = 1;
+            slot->[cell](|| 4, 2)
+        }
+    "# };
+    let by_name = "slot->[cell](|| 1, depth - 1)";
+    let by_value = "let accessor = cell; slot->[accessor](callback, depth - 1)";
+    let plain = "slot + callback()";
+    let recursive = |step: &str| format!("if depth == 0 {{ slot + callback() }} else {{ {step} }}");
+    for (reading, writing, expected) in [
+        (recursive(by_name), plain.to_string(), [2, 14, 2]),
+        (plain.to_string(), recursive(by_name), [4, 12, 5]),
+        (recursive(by_name), recursive(by_value), [2, 12, 2]),
+        (recursive(by_value), recursive(by_name), [4, 12, 5]),
+    ] {
+        let ref_body = format!("ref {{ let local = {reading}; yield local }}");
+        let mut_body = format!("mut {{ let mut local = {writing}; yield local; slot = local }}");
+        for bodies in [
+            format!("{ref_body}\n{mut_body}"),
+            format!("{mut_body}\n{ref_body}"),
+        ] {
+            let subscript = format!(
+                "subscript cell(slot: &mut int, callback, depth: int) -> int {{\n{bodies}\n}}\n"
+            );
+            let source = format!(
+                "{pure_only}{subscript}{uses}(read_fallible(), write_fallible(), pure_only(read_pure))"
+            );
+            assert_val_eq!(
+                run_experimental_subscript_source(&source),
+                expected_tuple(expected.map(int))
+            );
+            experimental_session()
+                .fail_compilation(&format!(
+                    "{pure_only}{subscript}{uses}pure_only(read_fallible)"
+                ))
+                .expect_invalid_effect_inclusion(effect(PrimitiveEffect::Fallible), no_effects());
+        }
+    }
+
+    // A callback that a body needs pure is pure for the subscript.
+    experimental_session()
+        .fail_compilation(&format!(
+            "{pure_only}{}{uses}read_fallible()",
+            indoc! { r#"
+                subscript cell(slot: &mut int, callback, depth: int) -> int {
+                    ref {
+                        let local = if depth == 0 {
+                            slot + pure_only(callback)
+                        } else {
+                            slot->[cell](|| 1, depth - 1)
+                        };
+                        yield local
+                    }
+
+                    mut {
+                        let mut local = slot + callback();
+                        yield local;
+                        slot = local
+                    }
+                }
+            "# }
+        ))
+        .expect_invalid_effect_inclusion(effect(PrimitiveEffect::Fallible), no_effects());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn the_bodies_of_a_recursive_subscript_have_one_set_of_requirements_and_each_its_effect() {
+    // The bodies of a subscript are one definition: what one requires, all require, in one
+    // order, so that a value of the subscript gives each body its evidence. Each body performs
+    // its own effect: here reading performs that of `A`, and writing that of `B`.
+    let source = indoc! { r#"
+        trait A<Self |-> ! E> { fn run_a(x: Self) -> int ! E; }
+        impl A for <Self = string |-> ! E = fallible> {
+            fn run_a(x) { idiv(6, string_len(x)) }
+        }
+        impl A for <Self = int |-> ! E = ()> {
+            fn run_a(x) { x }
+        }
+        trait B<Self |-> ! E> { fn run_b(x: Self) -> int ! E; }
+        impl B for <Self = string |-> ! E = ()> {
+            fn run_b(x) { string_len(x) }
+        }
+        impl B for <Self = int |-> ! E = fallible> {
+            fn run_b(x) { idiv(12, x) }
+        }
+        fn pure_only(f: () -> int ! ()) -> int { f() }
+
+        subscript cell<T, U>(slot: &mut int, a: T, b: U, depth: int) -> int {
+            ref {
+                let local = if depth == 0 {
+                    slot + run_a(a)
+                } else {
+                    slot->[cell](a, b, depth - 1)
+                };
+                yield local
+            }
+
+            mut {
+                let mut local = if depth == 0 {
+                    slot + run_b(b)
+                } else {
+                    100
+                };
+                if depth > 0 {
+                    slot->[cell](a, b, depth - 1) += 1000
+                };
+                yield local;
+                slot = slot + local
+            }
+        }
+
+        fn read(a, b) -> int {
+            let mut slot = 1;
+            slot->[cell](a, b, 2)
+        }
+
+        fn write(a, b) -> int {
+            let mut slot = 1;
+            slot->[cell](a, b, 2) += 10;
+            slot
+        }
+
+        fn by_value(a, b) -> int {
+            let accessor = cell;
+            let mut slot = 1;
+            slot->[accessor](a, b, 1) += 7;
+            slot->[accessor](a, b, 1)
+        }
+
+        fn read_ints() -> int { read(3, 4) }
+        fn read_string_int() -> int { read("ab", 4) }
+        fn write_ints() -> int { write(3, 4) }
+        fn write_strings() -> int { write("ab", "abc") }
+    "# };
+    assert_val_eq!(
+        run_experimental_subscript_source(&format!(
+            "{source}(read_string_int(), pure_only(read_ints), write_ints(), pure_only(write_strings), by_value(\"ab\", \"abc\"), by_value(3, 4))"
+        )),
+        expected_tuple([4, 4, 2215, 2215, 1115, 1115].map(int))
+    );
+    for impure in ["read_string_int", "write_ints"] {
+        experimental_session()
+            .fail_compilation(&format!("{source}pure_only({impure})"))
+            .expect_invalid_effect_inclusion(effect(PrimitiveEffect::Fallible), no_effects());
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_recursive_subscript_whose_contracts_do_not_settle_is_refused() {
+    // As a recursive function: each round of the recursion needs `Tr` at the effect that the
+    // round before gave, so no signature is found, and a written one is accepted.
+    let prelude = indoc! { r#"
+        struct Pair<A, B>(A, B)
+        trait Tr<Self |-> ! Out> { fn tr(x: Self) -> int ! Out; }
+        impl<T, ! E> Tr for <Self = Pair<T, (() -> int ! E)> |-> ! Out = E> {
+            fn tr(x) { (x.1)() + 1 }
+        }
+        fn step<T, ! E, O>(x: T, g: () -> int ! E) -> (() -> int ! O)
+        where Pair<T, (() -> int ! E)>: Tr<! Out = O> { || tr(Pair(x, g)) }
+        fn pure_only(f: () -> int ! ()) -> int { f() }
+    "# };
+    let bodies = |base: &str| {
+        format!(
+            "{{
+                ref {{
+                    let local = if n == 0 {{ {base} }} else {{ slot->[f](x, step(x, g), n - 1) }};
+                    yield local
+                }}
+
+                mut {{
+                    let mut local = if n == 0 {{ {base} }} else {{ slot->[f](x, step(x, g), n - 1) }};
+                    yield local;
+                    slot = local
+                }}
+            }}\n"
+        )
+    };
+    experimental_session()
+        .fail_compilation(&format!(
+            "{prelude}subscript f<T>(slot: &mut int, x: T, g, n: int) -> int {}0",
+            bodies("0")
+        ))
+        .expect_recursive_group_does_not_settle("f", "Pair<T, ");
+    let written = "subscript f<T, ! E>(slot: &mut int, x: T, g: () -> int ! E, n: int) -> int\nwhere Pair<T, (() -> int ! E)>: Tr<! Out = E> ";
+    let uses = indoc! { r#"
+        fn read() -> int {
+            let mut slot = 0;
+            slot->[f](1, || 10, 3)
+        }
+
+        fn write() -> int {
+            let mut slot = 0;
+            slot->[f](1, || idiv(10, 2), 3) += 1;
+            slot
+        }
+
+        (pure_only(read), write())
+    "# };
+    assert_val_eq!(
+        run_experimental_subscript_source(&format!("{prelude}{written}{}{uses}", bodies("g()"))),
+        expected_tuple([int(13), int(9)])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_function_of_the_group_of_a_subscript_reads_it_as_a_field() {
+    // The types of a group are known before its effects are inferred, so a function of the
+    // group that reads the field of an argument left to infer finds the subscript.
+    let value = run_experimental_subscript_source(indoc! { r#"
+        trait A<Self |-> ! E> { fn run_a(x: Self) -> int ! E; }
+        impl A for <Self = string |-> ! E = fallible> {
+            fn run_a(x) { idiv(6, string_len(x)) }
+        }
+        impl A for <Self = int |-> ! E = ()> {
+            fn run_a(x) { x }
+        }
+        fn pure_only(f: () -> int ! ()) -> int { f() }
+
+        fn get(x) {
+            x.value
+        }
+
+        #[private_repr]
+        struct Secret<T> {
+            raw: T,
+            depth: int,
+        }
+
+        fn read<T>(secret: Secret<T>) -> int {
+            get(secret)
+        }
+
+        subscript Secret<T>.value(self) -> int {
+            ref {
+                let local = if self.depth == 0 {
+                    run_a(self.raw)
+                } else {
+                    read(Secret { raw: self.raw, depth: self.depth - 1 })
+                };
+                yield local
+            }
+        }
+
+        fn of_string() -> int { Secret { raw: "ab", depth: 2 }.value }
+        fn of_int() -> int { Secret { raw: 7, depth: 2 }.value }
+        (of_string(), pure_only(of_int))
+    "# });
+    assert_val_eq!(value, expected_tuple([int(3), int(7)]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn first_class_subscript_value_captures_hidden_evidence() {
     let value = run_experimental_subscript_source(indoc! { r#"
             subscript cell<T>(slot: &mut T) -> T

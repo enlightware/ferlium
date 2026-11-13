@@ -195,7 +195,7 @@ pub(super) fn compilation_error_to_data(
         RecursiveGroupBodyDoesNotFit { function, span } => vec![error_data_from_location(
             span,
             format!(
-                "The effects of function `{function}` would change a type or a trait implementation that its recursive group was inferred with: write its signature"
+                "The effects of `{function}` would change a type or a trait implementation that its recursive group was inferred with: write its signature"
             ),
         )],
         RecursiveGroupDoesNotSettle {
@@ -208,10 +208,10 @@ pub(super) fn compilation_error_to_data(
             span,
             match growing {
                 Some(requirement) => format!(
-                    "The effects of the recursive group of function `{function}` did not settle in {rounds} rounds of inference, the last one still adding `{requirement}` at other effects: write its signature, with a `where` clause that relates these effects"
+                    "The effects of the recursive group of `{function}` did not settle in {rounds} rounds of inference, the last one still adding `{requirement}` at other effects: write its signature, with a `where` clause that relates these effects"
                 ),
                 None => format!(
-                    "The effects of the recursive group of function `{function}` did not settle in {rounds} rounds of inference: write its signature, with its effects and its `where` clause"
+                    "The effects of the recursive group of `{function}` did not settle in {rounds} rounds of inference: write its signature, with its effects and its `where` clause"
                 ),
             },
         )],

@@ -75,8 +75,9 @@ when neither names the other, and are published with the same types and requirem
 by the effect that each performs. A subscript used as a value has that one signature, and gives its
 evidence to whichever body the use then takes.
 While its bodies are inferred, a subscript has the types of that inference: a use of it by the
-group that its bodies are of, by name, as a field or as a value, takes its signature as it is, as a
-use of a function of the group does, and gets its evidence once the group is final.
+group that its bodies are of, by name, as a field or as a value, takes the types of its signature
+as they are, as a use of a function of the group does, and gets its evidence once the group is
+final. Its effects are those of a [recursive group](#where-constraints-come-from).
 
 ### Public requirements
 
@@ -289,6 +290,13 @@ As contracts are provisional, a requirement that followed from an earlier one co
 cycle of references after no function makes it any more. So each requirement of a contract has
 the length of its chain of references back to the function that makes it, and a group is settled
 only when these lengths settle too: a requirement that only goes round has none that does.
+
+A subscript of a recursive group is settled as a function is, with one difference: its bodies are
+one definition. They have one signature, the effects of its types included, and one set of
+requirements, those of all the bodies, as a value of the subscript gives its evidence to
+whichever body a use takes. Each body has the effect that it performs. A use of the subscript by
+name or as a field is a reference to the body that it takes, and a use as a value is a reference
+to each body.
 
 An effect that only inputs of a requirement name is ambiguous and takes its least solution (see
 [publication](#publication)), so requirements that differ only by such effects are one at each

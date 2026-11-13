@@ -158,6 +158,8 @@ pub struct TypeInference {
     /// shapes, the types that its type quantifiers take: the group keeps one type instance, only
     /// effects vary.
     group_type_instances: FxHashMap<FunctionId, Vec<Type>>,
+    /// The member functions of each subscript of that group.
+    group_subscripts: FxHashMap<SubscriptId, Vec<FunctionId>>,
     /// The references to the functions of that group, in the order the bodies make them.
     group_references: Vec<GroupReference>,
     /// Whether equal trait applications share their outputs only within one function.
@@ -552,6 +554,15 @@ impl TypeInference {
         self.group_type_instances = instances;
     }
 
+    /// Give the member functions of each subscript of the recursive group, in the order of the
+    /// members of its type.
+    pub(crate) fn set_group_subscripts(
+        &mut self,
+        subscripts: FxHashMap<SubscriptId, Vec<FunctionId>>,
+    ) {
+        self.group_subscripts = subscripts;
+    }
+
     /// Make the trait applications of each function of the recursive group its own: an output
     /// effect is of one function, also when another has the same application on the same types.
     pub(crate) fn set_applications_per_function(&mut self) {
@@ -613,6 +624,49 @@ impl TypeInference {
             });
         }
         true
+    }
+
+    /// A use of a subscript of the group as a value, of type `subscript_ty` there, is a
+    /// reference to each of its members: what takes the value can call either.
+    fn record_group_subscript_reference(
+        &mut self,
+        subscript: SubscriptId,
+        subscript_ty: &SubscriptType,
+        span: Location,
+    ) {
+        let Some(members) = self.group_subscripts.get(&subscript) else {
+            return;
+        };
+        let member_tys = [&subscript_ty.ref_member, &subscript_ty.mut_member];
+        for (function, member_ty) in members.iter().zip(member_tys.into_iter().flatten()) {
+            self.group_references.push(GroupReference {
+                function: *function,
+                fn_ty: FnType::new(
+                    subscript_ty.args.clone(),
+                    subscript_ty.ret,
+                    member_ty.effects.clone(),
+                ),
+                span,
+            });
+        }
+    }
+
+    /// A call of the member `function` of a subscript of the group, through the type of the
+    /// subscript, is a reference to that member, of type `fn_ty` there.
+    fn record_group_member_reference(
+        &mut self,
+        subscript: SubscriptId,
+        function: FunctionId,
+        fn_ty: &FnType,
+        span: Location,
+    ) {
+        if self.group_subscripts.contains_key(&subscript) {
+            self.group_references.push(GroupReference {
+                function,
+                fn_ty: fn_ty.clone(),
+                span,
+            });
+        }
     }
 
     pub(crate) fn add_given_constraint(&mut self, constraint: PubTypeConstraint) -> GivenId {
@@ -1147,6 +1201,7 @@ impl TypeInference {
                         .type_scheme(owner)
                         .expect("named subscript signature should be resolved before use")
                         .instantiate_with_fresh_vars(self, expr_span, None, env.module_env);
+                    self.record_group_subscript_reference(subscript_id, &subscript_ty, expr_span);
                     let node = K::GetSubscript(b(hir::GetSubscript {
                         subscript: subscript_id,
                         subscript_path: path.clone(),
@@ -2839,12 +2894,21 @@ impl TypeInference {
             }));
         }
 
-        let (inst_fn_ty, inst_data, _subst) = definition.ty_scheme.instantiate_with_fresh_vars(
+        let (inst_fn_ty, mut inst_data, subst) = definition.ty_scheme.instantiate_with_fresh_vars(
             self,
             data.name.1,
             None,
             env.module_env,
         );
+        if self.share_group_type_instance(
+            FunctionId::new(env.current_module_id(), member.function),
+            &definition.ty_scheme.ty_quantifiers,
+            &subst,
+            &inst_fn_ty,
+            data.name.1,
+        ) {
+            inst_data = hir::FnInstData::none();
+        }
         let member_effects = inst_fn_ty.effects.clone();
         let (mut args_node_ids, args_effects, args_diverge) = self
             .check_named_subscript_args_until_never(
@@ -3201,6 +3265,7 @@ impl TypeInference {
             inst_fn_args[0].mut_ty = MutType::mutable();
         }
         let inst_fn_ty = FnType::new(inst_fn_args, subscript_ty.ret, member_ty.effects.clone());
+        self.record_group_member_reference(subscript_id, function, &inst_fn_ty, field.1);
         let receiver_effects = env.ir_arena[receiver.node].effects.clone();
         let combined_effects = self.make_dependent_effect([&receiver_effects, &inst_fn_ty.effects]);
         let ret_ty = inst_fn_ty.ret;

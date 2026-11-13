@@ -244,6 +244,10 @@ pub(crate) enum SubscriptSignatureState {
     /// so a use by the group that the members are of takes it as it is, as it takes the type of
     /// a function of the group.
     Inferring(SubscriptSignature),
+    /// The scheme through which a use by the group takes the subscript while the members are
+    /// inferred against the shapes of the group: the types are those of the group, and each use
+    /// has effects of its own, as a reference to a function of the group has.
+    Shaped(TypeScheme<SubscriptType>),
     /// Fully inferred shared bundle signature.
     Resolved(SubscriptSignature),
 }
@@ -354,7 +358,9 @@ impl SubscriptDefinition {
     /// Return the resolved shared signature, if this bundle has emitted its members.
     pub fn resolved_signature(&self) -> Option<&SubscriptSignature> {
         match &self.signature {
-            SubscriptSignatureState::Pending | SubscriptSignatureState::Inferring(_) => None,
+            SubscriptSignatureState::Pending
+            | SubscriptSignatureState::Inferring(_)
+            | SubscriptSignatureState::Shaped(_) => None,
             SubscriptSignatureState::Resolved(signature) => Some(signature),
         }
     }
@@ -375,13 +381,47 @@ impl SubscriptDefinition {
         self.signature = SubscriptSignatureState::Inferring(signature);
     }
 
+    /// Give the signature that the members are inferred against when the types of their group
+    /// are known: `args` and `ret`, and for each member the effect that `member_effects` gives
+    /// for its function. A use by the group takes these types as they are, and every effect
+    /// anew.
+    pub(crate) fn set_shaped_signature(
+        &mut self,
+        args: Vec<FnArgType>,
+        ret: Type,
+        member_effects: impl Fn(LocalFunctionId) -> EffType,
+    ) {
+        let member = |member: Option<&SubscriptMember>| {
+            let member = member?;
+            Some(SubscriptMemberType::new(
+                member_effects(member.function),
+                subscript_result_convention(member.provenance),
+            ))
+        };
+        let ty = SubscriptType::new(
+            args,
+            ret,
+            member(self.ref_member.as_ref()),
+            member(self.mut_member.as_ref()),
+        );
+        let no_constraints: [PubTypeConstraint; 0] = [];
+        self.signature = SubscriptSignatureState::Shaped(TypeScheme {
+            ty_quantifiers: Vec::new(),
+            eff_quantifiers: TypeScheme::list_eff_vars(&ty, no_constraints.iter()),
+            ty,
+            constraints: Vec::new(),
+        });
+    }
+
     /// Derive the first-class capability type scheme for this subscript bundle.
     ///
-    /// While the members are inferred, it quantifies nothing: the group that uses the subscript
+    /// While the members are inferred, it quantifies no type: the group that uses the subscript
     /// then has one instance of its types, and finds what it requires once the group is final.
+    /// Once the group has its shapes, it quantifies the effects.
     pub fn type_scheme(&self, owner: &Module) -> Option<TypeScheme<SubscriptType>> {
         let (signature, inferring) = match &self.signature {
             SubscriptSignatureState::Pending => return None,
+            SubscriptSignatureState::Shaped(scheme) => return Some(scheme.clone()),
             SubscriptSignatureState::Inferring(signature) => (signature, true),
             SubscriptSignatureState::Resolved(signature) => (signature, false),
         };
