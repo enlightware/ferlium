@@ -536,10 +536,12 @@ impl<'a> TraitSolver<'a> {
             BlanketConstraintMode::AllowUnknown | BlanketConstraintMode::StructuralAllowUnknown
         );
 
-        // Then unify the instantiated blanket input and output types against
-        // the requested trait application. Propagating output equalities before
-        // solving nested constraints lets those constraints observe any output
-        // information already available at the use site.
+        // Then unify the instantiated blanket input types against the requested trait
+        // application. The caller's own inference, matching for improvement, also relates the
+        // output types now: it may stop before the end, and what the head tells is kept. A
+        // scratch match relates them at the end only: the outputs of an implementation are
+        // functions of its inputs, so its constraints find them, and a requested output that
+        // is still open would stand for the type that they find.
         for (imp_input_ty, input_ty) in imp_input_tys.iter().zip(input_tys.iter()) {
             if ty_inf
                 .unify_same_type_with_sub_effects(*imp_input_ty, fn_span, *input_ty, fn_span)
@@ -548,7 +550,9 @@ impl<'a> TraitSolver<'a> {
                 return Ok(BlanketImplMatch::No);
             }
         }
-        if let Some(output_tys) = output_tys {
+        if let Some(output_tys) = output_tys
+            && !scratch
+        {
             for (imp_output_ty, output_ty) in imp_output_tys.iter().zip(output_tys.iter()) {
                 if ty_inf
                     .unify_same_type_with_sub_effects(*imp_output_ty, fn_span, *output_ty, fn_span)

@@ -2350,6 +2350,68 @@ fn an_implementation_outputs_the_type_of_fields_read_through_one_another() {
     }
 }
 
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_generic_function_applies_the_output_of_an_implementation() {
+    // The generic function requires an output that is a function of an argument still to be
+    // known. The implementation is found from its inputs, and its output, the type of a
+    // field, then tells that argument.
+    let declarations = indoc! { r#"
+        struct Wrapper<T>(T)
+        fn inc(x: int) -> int { x + 1 }
+        fn divide(x: int) -> int { idiv(4, x) }
+        fn apply(f: (int) -> int) -> int { f(2) }
+
+        trait Get<Self |-> R> { fn get(x: Self) -> R; }
+        impl<T, R> Get for <Self = Wrapper<T> |-> R = R> {
+            fn get(x) { x.0.value }
+        }
+        trait Pick<Self |-> R> { fn pick(x: Self, first: bool) -> R; }
+        impl<T, R> Pick for <Self = Wrapper<T> |-> R = R> {
+            fn pick(x, first) {
+                if first {
+                    x.0.first
+                } else {
+                    x.0.second.inner
+                }
+            }
+        }
+    "# };
+    let uses = indoc! { r#"
+        fn applied(w, first) { pick(w, first)(2) }
+        fn through(w, first) { applied(w, first) + 1 }
+        fn element(w) { get(w).1(2) }
+        fn passed(w) { get(w)(inc) }
+        fn repeated(w, n) {
+            if n == 0 {
+                0
+            } else {
+                get(w)(n) + repeated(w, n - 1)
+            }
+        }
+        fn fields() { { first: inc, second: { inner: divide } } }
+        fn all() -> (int, int, int, int, int, int) {
+            (
+                applied(Wrapper(fields()), true),
+                applied(Wrapper(fields()), false),
+                through(Wrapper(fields()), true),
+                element(Wrapper({ value: (inc, divide) })),
+                passed(Wrapper({ value: apply })),
+                repeated(Wrapper({ value: inc }), 3),
+            )
+        }
+    "# };
+    for source in [
+        format!("{declarations}{uses}to_string(all())"),
+        format!("{uses}{declarations}to_string(all())"),
+    ] {
+        assert_val_eq!(
+            TestSession::new().run(&source),
+            string("(3, 2, 4, 2, 3, 9)")
+        );
+    }
+}
+
 fn missing_requirement_of_default_method(source: &str) -> Option<MissingRequirement> {
     let error = TestSession::new().fail_compilation(source).into_inner();
     let CompilationErrorImpl::InvalidTraitDefinition {

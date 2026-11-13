@@ -6379,12 +6379,14 @@ fn an_implementation_outputs_the_type_of_a_declared_field() {
         fn of_int() -> string { get(Wrapper(Box(4))) }
         fn of_bool() -> int { get(Wrapper(Box(false)))(3) }
         fn generic(x) { get(Wrapper(Box(x))) }
+        fn applied(w) { get(w)(3) }
     "# };
     assert_val_eq!(
         run_experimental_subscript_source(&format!(
-            "{declarations}to_string((of_int(), of_bool(), generic(5), generic(true)(2)))"
+            "{declarations}to_string((of_int(), of_bool(), generic(5), generic(true)(2), \
+             applied(Wrapper(Box(false)))))"
         )),
-        string("(hello, -3, hello, 2)")
+        string("(hello, -3, hello, 2, -3)")
     );
     experimental_session()
         .fail_compilation(&format!("{declarations}get(Wrapper(Box(1.5)))"))
