@@ -2566,6 +2566,38 @@ fn a_generic_function_knows_the_output_of_an_implementation() {
     }
 }
 
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_generic_function_keeps_a_requirement_that_two_implementations_can_answer() {
+    // Both implementations can apply to the type of the function, which names its generic:
+    // each is tried, with the output that it would give, and neither is kept, so the output
+    // stays generic in the function and each use finds its own.
+    let wrapper = "struct W<T>(T)\ntrait Get<Self |-> R> { fn get(x: Self) -> R; }\n";
+    let of_int = indoc! { r#"
+        impl<T, R> Get for <Self = W<(int, T)> |-> R = R> {
+            fn get(x) { x.0.1.value }
+        }
+    "# };
+    let of_string = indoc! { r#"
+        impl<T, R> Get for <Self = W<(string, T)> |-> R = R> {
+            fn get(x) { x.0.1.other }
+        }
+    "# };
+    let uses = indoc! { r#"
+        fn written<A>(a: A) { get(W((a, { value: 1, other: "s" }))) }
+        fn inferred(a) { get(W((a, { value: 1, other: "s" }))) }
+    "# };
+    let result = r#"to_string(((written(1), written("a")), (inferred(1), inferred("a"))))"#;
+    for source in [
+        format!("{wrapper}{of_int}{of_string}{uses}{result}"),
+        format!("{wrapper}{of_string}{of_int}{uses}{result}"),
+        format!("{uses}{wrapper}{of_int}{of_string}{result}"),
+        format!("{uses}{wrapper}{of_string}{of_int}{result}"),
+    ] {
+        assert_val_eq!(TestSession::new().run(&source), string("((1, s), (1, s))"));
+    }
+}
+
 fn missing_requirement_of_default_method(source: &str) -> Option<MissingRequirement> {
     let error = TestSession::new().fail_compilation(source).into_inner();
     let CompilationErrorImpl::InvalidTraitDefinition {
