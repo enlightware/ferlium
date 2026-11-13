@@ -16,10 +16,10 @@ use ferlium::{
     module::{ConcreteTraitImplKey, ModuleId, Visibility, id::Id},
     types::r#type::Type,
 };
-use indoc::indoc;
+use indoc::{formatdoc, indoc};
 use ustr::ustr;
 
-use crate::harness::{TestSession, int, string};
+use crate::harness::{TestSession, expected_tuple, int, string};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -2615,12 +2615,21 @@ fn exported_subscripts_reduce_private_requirements() {
         &mut session,
         "b",
         indoc! { r#"
+            fn get(x) {
+                x.value
+            }
+
             pub fn direct() -> int {
                 a::make(12345).value
+            }
+
+            pub fn generic() -> int {
+                get(a::make(true))
             }
         "# },
     );
     assert_val_eq!(session.run("b::direct()"), int(5));
+    assert_val_eq!(session.run("b::generic()"), int(4));
     assert!(
         module_fails_with(
             &mut session,
@@ -3302,6 +3311,73 @@ fn private_value_prerequisite_cycles_still_need_a_generated_anchor() {
                 CompilationErrorImpl::PrivateRequirementInPublicContract { .. }
             )),
             "{source}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_declared_field_of_a_generic_receiver_takes_the_evidence_of_the_caller() {
+    // What the subscript of a declared field requires of a generic of the function that
+    // reads the field is a requirement of that function, however the field is read: the
+    // implementation that the module of the function sees for another type is not taken.
+    let provider = |body: &str| {
+        formatdoc! { r#"
+            pub trait Read<Self, Other> {{
+                fn read(x: Self, y: Other) -> int;
+            }}
+            impl Read for <Self = int, Other = int> {{
+                fn read(x, y) {{ 7 }}
+            }}
+
+            pub struct Box<T>(T)
+            pub subscript Box<T>.value(self) -> int {{
+                ref {{
+                    let zero: int = 0;
+                    let local = read(self.0, zero);
+                    yield local
+                }}
+            }}
+
+            fn get(x) {{ x.value }}
+            pub struct Wrapper<T>(T)
+            pub trait Show<Self> {{ fn show(x: Self) -> int; }}
+            impl<T> Show for Wrapper<T> {{
+                fn show(x) {{ x.0.value }}
+            }}
+
+            pub fn generic<T>(b: Box<T>) -> int {{
+                {body}
+            }}
+        "# }
+    };
+    for body in [
+        "b.value",
+        "let field = |x| x.value; field(b)",
+        "get(b)",
+        "show(Wrapper(b))",
+        "let field = |x| x.value; field(b) + get(b) - b.value",
+    ] {
+        let mut session = TestSession::new();
+        session.allow_experimental();
+        compile_module(&mut session, "a", &provider(body));
+        compile_module(
+            &mut session,
+            "b",
+            indoc! { r#"
+                use a::Read;
+                struct Q(int)
+                impl Read for <Self = Q, Other = int> {
+                    fn read(x, y) { 9 }
+                }
+                pub fn of_q() -> int { a::generic(a::Box(Q(4))) }
+                pub fn of_int() -> int { a::generic(a::Box(4)) }
+            "# },
+        );
+        assert_val_eq!(
+            session.run("(b::of_q(), b::of_int())"),
+            expected_tuple([int(9), int(7)]),
+            "{body}"
         );
     }
 }

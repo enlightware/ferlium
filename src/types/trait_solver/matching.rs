@@ -5,6 +5,7 @@
 
 use std::mem;
 
+use itertools::Itertools;
 use ustr::Ustr;
 
 use crate::{
@@ -14,7 +15,7 @@ use crate::{
     internal_compilation_error,
     module::{
         BlanketImpls, BlanketTraitImplSubKey, BlanketTraitImpls, CandidateSearch, LocalImplId,
-        ModuleId, TraitId, TraitImpl, id::Id,
+        ModuleId, SubscriptId, TraitId, TraitImpl, id::Id,
     },
     std::{
         core_traits_names::VALUE_TRAIT_NAME,
@@ -26,7 +27,7 @@ use crate::{
         effect_polarity::EffectPolarity,
         effects::{EffType, Effect, EffectVar},
         mutability::MutType,
-        r#type::{Type, TypeKind},
+        r#type::{SubscriptType, Type, TypeKind},
         type_inference::{
             effect_solver::EffectConstraintOrigin, substitution::InstSubst,
             unify::UnifiedTypeInference,
@@ -35,7 +36,7 @@ use crate::{
         type_mapper::{
             BitmapInstantiationMapper, EffectErasingMapper, SimpleInstantiationMapper, TypeMapper,
         },
-        type_scheme::PubTypeConstraint,
+        type_scheme::{PubTypeConstraint, TypeScheme},
     },
 };
 
@@ -185,6 +186,10 @@ pub(super) enum BlanketConstraintMode {
     /// recursive `Value` materialization.
     DeferConcreteObligations,
 }
+
+/// The index, in a match, of a constraint that the answer to another constraint requires: it is
+/// none of the constraints of the head, and its evidence is none of the head's.
+const NO_RUNTIME_REQUIREMENT: usize = usize::MAX;
 
 /// Result of matching a blanket impl against a requested trait application.
 pub(super) enum BlanketImplMatch {
@@ -471,6 +476,49 @@ impl<'a> TraitSolver<'a> {
             ty_inf.fresh_type_var_subst(imp_ty_var_count),
             ty_inf.fresh_effect_var_subst(imp_eff_var_count),
         );
+        Self::match_instance(
+            query,
+            ty_inf,
+            local_effects_start,
+            inst_subst,
+            imp_input_tys,
+            imp_output_tys,
+            imp_output_effs,
+            output_polarities,
+            imp_constraints,
+            input_tys,
+            output_tys,
+            output_effs,
+            assumptions,
+            fn_span,
+            arena,
+            mode,
+        )
+    }
+
+    /// As [`Self::match_blanket_impl`], for a head and constraints whose generics `inst_subst`
+    /// gives fresh variables of `ty_inf`, the effect ones made from `local_effects_start` on.
+    /// The head need not be of an implementation: a subscript that a type declares for a field
+    /// is matched this way against a use of the field.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn match_instance<Q: TraitOutputQuery>(
+        query: &mut Q,
+        ty_inf: &mut UnifiedTypeInference,
+        local_effects_start: u32,
+        inst_subst: InstSubst,
+        imp_input_tys: &[Type],
+        imp_output_tys: &[Type],
+        imp_output_effs: &[EffType],
+        output_polarities: &[EffectPolarity],
+        imp_constraints: &[PubTypeConstraint],
+        input_tys: &[Type],
+        output_tys: Option<&[Type]>,
+        output_effs: Option<&[EffType]>,
+        assumptions: ConstraintAssumptions<'_>,
+        fn_span: Location,
+        arena: &mut NodeArena,
+        mode: BlanketConstraintMode,
+    ) -> Result<BlanketImplMatch, InternalCompilationError> {
         let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
         let imp_input_tys = instantiate_types(imp_input_tys, &mut mapper);
         let mut imp_output_tys = instantiate_types(imp_output_tys, &mut mapper);
@@ -584,6 +632,7 @@ impl<'a> TraitSolver<'a> {
                         }
                         _ => None,
                     };
+                    let queued = ty_inf.obligation_count();
                     let bounds = ty_inf.bound_count();
                     let unresolved = query.unify_non_trait_constraint_query(
                         ty_inf,
@@ -592,6 +641,15 @@ impl<'a> TraitSolver<'a> {
                         arena,
                     )?;
                     queued_bounds |= ty_inf.bound_count() > bounds;
+                    // What the answer requires, as a subscript that a type declares for a
+                    // field does, is to solve here too. It needs no evidence of its own: the
+                    // answer holds it.
+                    still_remaining.extend(
+                        ty_inf
+                            .take_obligations_from(queued)
+                            .into_iter()
+                            .map(|obligation| (NO_RUNTIME_REQUIREMENT, obligation)),
+                    );
                     if let Some(unresolved) = unresolved {
                         still_remaining.push((*constraint_index, unresolved));
                     } else if let Some(req) = runtime_requirement {
@@ -880,6 +938,7 @@ impl<'a> TraitSolver<'a> {
                 }
             }
         }
+        runtime_requirements.retain(|requirement| requirement.index != NO_RUNTIME_REQUIREMENT);
         runtime_requirements.sort_by_key(|requirement| requirement.index);
         ty_inf.substitute_in_types_in_place(&mut imp_output_tys);
         ty_inf.substitute_in_effect_types_in_place(&mut imp_output_effs);
@@ -1147,6 +1206,102 @@ impl<'a> TraitSolver<'a> {
             }));
         }
         Ok(())
+    }
+
+    /// What the generics of the subscript that the type of `receiver_ty` declares for `field`
+    /// are at a use of the field whose receiver has type `receiver_ty` and whose result has
+    /// type `ret`, both without type variables: the subscript, its scheme and the instance.
+    /// `None` if the type declares no subscript for the field.
+    ///
+    /// This is for the use that an implementation selected for known types requires: no
+    /// inference of a function made it. With all types known, the instance is a function of
+    /// these two types, as the instance of the implementation is of its inputs: a generic
+    /// that they do not name is an output of a requirement of the subscript, or nothing
+    /// observes it. So it is found as an implementation is matched. A use that a function
+    /// makes keeps the instance of its inference instead, see `DeclaredFieldUse`: what the
+    /// subscript requires can be given to the function there, and a match knows no givens.
+    pub(crate) fn projection_subscript_instance(
+        &mut self,
+        receiver_ty: Type,
+        ret: Type,
+        field: Ustr,
+        span: Location,
+        arena: &mut NodeArena,
+    ) -> Result<Option<(SubscriptId, TypeScheme<SubscriptType>, InstSubst)>, InternalCompilationError>
+    {
+        let Some((subscript, scheme)) = self.projection_subscript_scheme(receiver_ty, field) else {
+            return Ok(None);
+        };
+        let use_tys = [receiver_ty, ret];
+        if !use_tys.iter().all(|ty| ty.is_trait_input_resolved()) {
+            return Err(internal_compilation_error!(Internal {
+                error: format!(
+                    "the use of the subscript declared for the field `{field}` has open types, and no inference kept its instance"
+                ),
+                span,
+            }));
+        }
+        // The effect variables of the use are kept apart from the fresh ones of the instance.
+        let mut ty_inf = UnifiedTypeInference::new_with_ty_vars(0);
+        for _ in 0..Self::effect_var_capacity(&use_tys, &[]) {
+            ty_inf.fresh_effect_var();
+        }
+        let local_effects_start = ty_inf.effect_var_count();
+        let inst_subst: InstSubst = (
+            scheme
+                .ty_quantifiers
+                .iter()
+                .map(|var| (*var, Type::variable(ty_inf.fresh_type_var())))
+                .collect(),
+            scheme
+                .eff_quantifiers
+                .iter()
+                .sorted()
+                .map(|var| (*var, EffType::single_variable(ty_inf.fresh_effect_var())))
+                .collect(),
+        );
+        let matched = Self::match_instance(
+            self,
+            &mut ty_inf,
+            local_effects_start,
+            inst_subst,
+            &[scheme.ty.receiver_ty(), scheme.ty.ret],
+            &[],
+            &[],
+            &[],
+            &scheme.constraints,
+            &use_tys,
+            None,
+            None,
+            ConstraintAssumptions::all(&[]),
+            span,
+            arena,
+            BlanketConstraintMode::RequireAllResolved,
+        )?;
+        let BlanketImplMatch::Yes {
+            mut instantiation, ..
+        } = matched
+        else {
+            return Err(internal_compilation_error!(Internal {
+                error: format!(
+                    "the subscript declared for the field `{field}` has no instance at this use, which inference accepted"
+                ),
+                span,
+            }));
+        };
+        // A generic that nothing determines is observed by nothing: it is `never`, as an
+        // unbound variable of a body is.
+        for ty in instantiation.0.values_mut() {
+            let unbound = ty
+                .inner_ty_vars()
+                .into_iter()
+                .map(|var| (var, Type::never()))
+                .collect::<FxHashMap<_, _>>();
+            if !unbound.is_empty() {
+                *ty = ty.instantiate_simple(&(unbound, FxHashMap::default()));
+            }
+        }
+        Ok(Some((subscript, scheme, instantiation)))
     }
 
     /// A blanket impl did not match. If it applies by structure, ignoring all effects, it is

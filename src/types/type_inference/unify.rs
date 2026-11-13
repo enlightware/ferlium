@@ -16,7 +16,7 @@ use super::{
     constraints::{EffectConstraint, MutConstraint, TypeConstraint},
     effect_solver::{EffectConstraintOrigin, EffectSolver, EffectSolverSnapshot},
     evidence_uses::{EvidenceUses, GivenId},
-    expr::TypeInference,
+    expr::{GroupReference, TypeInference},
     ground_bounds::is_maximal,
     selection::SelectionStats,
     tables::{Revision, RevisionedConstraints, RevisionedTable},
@@ -30,7 +30,7 @@ use crate::{
     },
     hir::{NodeArena, value::LiteralValue},
     internal_compilation_error,
-    module::{LocalFunctionId, TraitId},
+    module::{FunctionId, LocalFunctionId, SubscriptId, TraitId},
     parser::location::Location,
     std::{
         core_traits_names::{FROM_ITERATOR_TRAIT_NAME, REPR_TRAIT_NAME, VALUE_TRAIT_NAME},
@@ -41,7 +41,7 @@ use crate::{
         effects::{EffType, EffectVar, EffectsInstSubst, no_effects},
         mutability::{MutType, MutVal, MutVar, MutVarKey},
         recursive_equation::{RecursiveEquationError, try_intern_recursive_equation},
-        trait_solver::{ConstraintAssumptions, TraitSolver, output_effect_fits},
+        trait_solver::{ConstraintAssumptions, DeclaredFieldUse, TraitSolver, output_effect_fits},
         r#type::{
             FnArgType, FnType, SubscriptMemberType, SubscriptResultConvention, SubscriptType,
             TyVarKey, Type, TypeInstSubst, TypeKind, TypeVar,
@@ -82,6 +82,8 @@ pub(crate) struct UnifiedTypeInferenceSnapshot {
     remaining_ty_constraints_len: usize,
     obligations_len: usize,
     expanded_value_applications_len: usize,
+    field_references_len: usize,
+    field_uses_len: usize,
 }
 
 /// Equality state, retained bounds and public obligations during inference.
@@ -115,6 +117,31 @@ pub struct UnifiedTypeInference {
     /// The number of trait applications that were answered other than by a given: by an
     /// implementation, or by the structure of their inputs.
     answered_applications: usize,
+    /// The member functions of each subscript of the recursive group whose bodies are inferred
+    /// against their shapes.
+    group_subscripts: FxHashMap<SubscriptId, Vec<FunctionId>>,
+    /// The accesses to a field whose receiver was not known when they were typed, each as its
+    /// body made it. Equal requirements are merged, and an access stays one use: if its
+    /// requirement is answered with a subscript of the group, it is a reference of its own.
+    field_sites: Vec<FieldSite>,
+    /// The references to these members that the requirements on fields made, when they were
+    /// answered with a subscript of the group, each with the function that made it.
+    field_references: Vec<(Option<LocalFunctionId>, GroupReference)>,
+    /// The uses of the subscripts that types declare for fields, one for each requirement on
+    /// a field that was answered with such a subscript, with the instance made for it.
+    field_uses: Vec<DeclaredFieldUse>,
+}
+
+/// An access to a field whose receiver was not known when it was typed.
+#[derive(Debug, Clone)]
+struct FieldSite {
+    /// The requirement that the access made.
+    origin: ConstraintOrigin,
+    /// The function whose body makes the access.
+    owner: Option<LocalFunctionId>,
+    span: Location,
+    /// Whether the access is to change the field.
+    mutable: bool,
 }
 
 /// Lexical owner for deferred obligations. Restores the enclosing owner on every
@@ -196,6 +223,52 @@ impl UnifiedTypeInference {
     ) -> bool {
         self.evidence_uses
             .owned_by_others(requirement.origin(), function)
+    }
+
+    /// The number of constraints queued so far by the answers to other constraints.
+    pub(crate) fn obligation_count(&self) -> usize {
+        self.obligations.len()
+    }
+
+    /// The number of subtype bounds between types that are still pending.
+    pub(crate) fn bound_count(&self) -> usize {
+        self.bounds.relations().count()
+    }
+
+    /// Take the constraints queued since there were `count` of them: what the answers to
+    /// constraints solved since then require.
+    pub(crate) fn take_obligations_from(&mut self, count: usize) -> Vec<PubTypeConstraint> {
+        self.obligations.split_off(count)
+    }
+
+    /// The references to the bodies of the subscripts of the group that the requirements on
+    /// fields made, each with the function that made it.
+    /// The uses of declared fields made so far, in the variables of this inference.
+    pub(crate) fn field_uses(&self) -> &[DeclaredFieldUse] {
+        &self.field_uses
+    }
+
+    /// The type variables that the instances of these uses still hold, each with the place of
+    /// the requirement that its use answered.
+    pub(crate) fn field_use_ty_vars(&mut self) -> Vec<(TypeVar, Location)> {
+        let field_uses = self.field_uses.clone();
+        field_uses
+            .iter()
+            .flat_map(|field_use| {
+                let span = field_use.span;
+                self.substitute_in_types(&field_use.ty_args)
+                    .into_iter()
+                    .flat_map(|ty| ty.inner_ty_vars())
+                    .map(move |var| (var, span))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    pub(crate) fn take_field_references(
+        &mut self,
+    ) -> Vec<(Option<LocalFunctionId>, GroupReference)> {
+        mem::take(&mut self.field_references)
     }
 
     /// The number of trait applications answered so far other than by a given.
@@ -384,6 +457,8 @@ impl UnifiedTypeInference {
             remaining_ty_constraints_len: self.remaining_ty_constraints.len(),
             obligations_len: self.obligations.len(),
             expanded_value_applications_len: self.expanded_value_applications.len(),
+            field_references_len: self.field_references.len(),
+            field_uses_len: self.field_uses.len(),
         }
     }
 
@@ -401,6 +476,9 @@ impl UnifiedTypeInference {
         self.obligations.truncate(snapshot.obligations_len);
         self.expanded_value_applications
             .truncate(snapshot.expanded_value_applications_len);
+        self.field_references
+            .truncate(snapshot.field_references_len);
+        self.field_uses.truncate(snapshot.field_uses_len);
     }
 
     pub fn unify_type_inference(
@@ -419,6 +497,7 @@ impl UnifiedTypeInference {
             ty_coverage_constraints,
             mut effects,
             applications_per_function,
+            group_subscripts,
             ..
         } = ty_inf;
         let effect_constraints = effects.drain_constraints();
@@ -441,7 +520,41 @@ impl UnifiedTypeInference {
             expanded_value_applications: vec![],
             applications_per_function,
             answered_applications: 0,
+            group_subscripts,
+            field_sites: vec![],
+            field_references: vec![],
+            field_uses: vec![],
         };
+        if !unified_ty_inf.group_subscripts.is_empty() {
+            // Before any requirement is merged with another: each has the function that made it.
+            unified_ty_inf.field_sites = ty_constraints
+                .iter()
+                .filter_map(|constraint| {
+                    let TypeConstraint::Pub(PubTypeConstraint::ProjectionSubscriptIs {
+                        origin,
+                        field_span,
+                        subscript_ty,
+                        ..
+                    }) = constraint
+                    else {
+                        return None;
+                    };
+                    origin.index()?;
+                    let owner = unified_ty_inf
+                        .evidence_uses
+                        .owners(*origin)
+                        .into_iter()
+                        .flatten()
+                        .next();
+                    Some(FieldSite {
+                        origin: *origin,
+                        owner,
+                        span: field_span.use_site,
+                        mutable: subscript_ty.mut_member.is_some(),
+                    })
+                })
+                .collect();
+        }
         // Keep source/inference order stable. Constraint equality deliberately ignores spans, so
         // iterating a hash set here made the diagnostic span and dictionary order depend on the
         // process-local identities assigned by the type interner.
@@ -670,11 +783,6 @@ impl UnifiedTypeInference {
             SubOrSameType::SameType,
             &mut FxHashSet::default(),
         )
-    }
-
-    /// The number of subtype bounds between types that are still pending.
-    pub(crate) fn bound_count(&self) -> usize {
-        self.bounds.relations().count()
     }
 
     pub fn unify_same_type_with_sub_effects(
@@ -2289,10 +2397,110 @@ impl UnifiedTypeInference {
                 }));
             }
             let actual_subscript_ty = if requirement.accepts_user_defined_projection()
-                && let Some(actual_subscript_ty) =
-                    trait_solver.projection_subscript_type(receiver_ty, *field)
+                && let Some((subscript, scheme)) =
+                    trait_solver.projection_subscript_scheme(receiver_ty, *field)
             {
-                Some(actual_subscript_ty)
+                // A use of the subscript, as one by name: an instance of its scheme, whose
+                // requirements are of what uses it.
+                let subst = (
+                    scheme
+                        .ty_quantifiers
+                        .iter()
+                        .map(|var| (*var, Type::variable(self.fresh_type_var())))
+                        .collect::<TypeInstSubst>(),
+                    scheme
+                        .eff_quantifiers
+                        .iter()
+                        .sorted()
+                        .map(|var| (*var, EffType::single_variable(self.fresh_effect_var())))
+                        .collect::<EffectsInstSubst>(),
+                );
+                let mut mapper = BitmapInstantiationMapper::new(&subst);
+                for requirement in &scheme.constraints {
+                    self.obligations.push(
+                        requirement
+                            .map(&mut mapper)
+                            .instantiate_location_cloned(field_span.use_site),
+                    );
+                }
+                let actual = scheme.ty.map(&mut mapper);
+                // The use keeps this instance to elaboration, as a use by name does.
+                self.field_uses.push(DeclaredFieldUse {
+                    field: *field,
+                    span: field_span.use_site,
+                    required: subscript_ty.clone(),
+                    subscript,
+                    of_group: self.group_subscripts.contains_key(&subscript),
+                    ty_args: scheme
+                        .ty_quantifiers
+                        .iter()
+                        .map(|quantifier| subst.0[quantifier])
+                        .collect(),
+                    eff_args: scheme
+                        .eff_quantifiers
+                        .iter()
+                        .sorted()
+                        .map(|quantifier| subst.1[quantifier].clone())
+                        .collect(),
+                });
+                if let Some(functions) = self.group_subscripts.get(&subscript) {
+                    // The subscript is of the group being inferred: each access that made
+                    // this requirement is a reference to the body that it takes, of the
+                    // function that makes the access.
+                    let origin = constraint.origin();
+                    let mut sites = self
+                        .field_sites
+                        .iter()
+                        .filter(|site| self.evidence_uses.same(site.origin, origin))
+                        .map(|site| (site.owner, site.span, site.mutable))
+                        .collect::<Vec<_>>();
+                    if sites.is_empty() {
+                        // No body made it, as what an implementation requires: it is of the
+                        // functions that needed it.
+                        let members = [
+                            (subscript_ty.ref_member.is_some(), false),
+                            (subscript_ty.mut_member.is_some(), true),
+                        ];
+                        for owner in self.evidence_uses.owners(origin) {
+                            for (used, mutable) in members {
+                                if used {
+                                    sites.push((owner, field_span.use_site, mutable));
+                                }
+                            }
+                        }
+                    }
+                    let mut functions = functions.iter();
+                    let mut body = |member: &Option<SubscriptMemberType>| {
+                        member.as_ref().map(|member| {
+                            let function = *functions
+                                .next()
+                                .expect("each body of a subscript of the group has its function");
+                            (function, member.effects.clone())
+                        })
+                    };
+                    let ref_body = body(&actual.ref_member);
+                    let mut_body = body(&actual.mut_member);
+                    for (owner, span, mutable) in sites {
+                        let Some((function, effects)) =
+                            (if mutable { &mut_body } else { &ref_body }).clone()
+                        else {
+                            continue;
+                        };
+                        let mut args = actual.args.clone();
+                        if mutable {
+                            args[0].mut_ty = MutType::mutable();
+                        }
+                        self.field_references.push((
+                            owner,
+                            GroupReference {
+                                function,
+                                fn_ty: FnType::new(args, actual.ret, effects),
+                                span,
+                            },
+                        ));
+                    }
+                }
+                Some(actual)
             } else {
                 let ctx = if requirement.accepts_user_defined_projection() {
                     InvalidRecordFieldContext::ProjectionFallback

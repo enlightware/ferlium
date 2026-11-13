@@ -35,8 +35,8 @@ use crate::{
             default_unconstrained_types_to_never, first_unbound_type_in_constraints,
             function_and_associated_lambdas, insert_inst_data_for_function_and_lambdas,
             instantiate_function_descr_in_place, is_compiler_provided_value_constraint,
-            log_dropped_constraints_module, refresh_debug_info_for_functions, set_pending_function,
-            substitute_and_canonicalize_functions,
+            log_dropped_constraints_module, record_field_uses, refresh_debug_info_for_functions,
+            set_pending_function, substitute_and_canonicalize_functions,
         },
         function::{CallableDefinition, arg_conventions_for_args},
         hir_syn,
@@ -1855,7 +1855,8 @@ fn public_requirements(
         pending_functions
             .get_mut(&function_id)
             .expect("pending function body")
-            .evidence_plan = reduced.evidence.clone();
+            .evidence_plan
+            .replace_reduction(reduced.evidence.clone());
     }
     Ok(Some(reduced.requirements))
 }
@@ -3525,6 +3526,12 @@ where
     }
 
     // Substitute everything using ty_inf (single pass, includes all defaults).
+    record_field_uses(
+        &mut pending_functions,
+        &associated_lambdas,
+        &local_fns,
+        &ty_inf,
+    );
     substitute_and_canonicalize_functions(
         output,
         &mut pending_functions,
@@ -3918,7 +3925,7 @@ where
     let GroupBodies {
         mut pending_functions,
         associated_lambdas,
-        group_references,
+        mut group_references,
         recursive_function_ids,
     } = bodies;
     determine_function_types(
@@ -3962,6 +3969,20 @@ where
         protected,
         ModuleEnv::new(output, others),
     )?;
+
+    // A field that inference found to be a subscript of the group is a reference to its bodies.
+    for (owner, reference) in ty_inf.take_field_references() {
+        let index = |function: LocalFunctionId| local_fns.iter().position(|id| *id == function);
+        let (Some(owner), Some(callee)) =
+            (owner.and_then(index), index(reference.function.function))
+        else {
+            return Err(internal_compilation_error!(Internal {
+                error: "a field of the group is used by no function of the group".into(),
+                span: reference.span,
+            }));
+        };
+        group_references.push((owner, callee, reference.fn_ty, reference.span));
+    }
 
     // Types are determined. The contracts of a group settle from here, over copies of this
     // state: the first round takes the contracts of functions that call nothing.
@@ -4399,6 +4420,7 @@ where
     }
 
     // Substitute everything using ty_inf (single pass, includes all defaults).
+    record_field_uses(pending_functions, associated_lambdas, local_fns, ty_inf);
     substitute_and_canonicalize_functions(
         output,
         pending_functions,

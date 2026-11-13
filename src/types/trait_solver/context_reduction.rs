@@ -7,6 +7,7 @@
 
 use std::{
     hash::{Hash, Hasher},
+    mem,
     rc::Rc,
 };
 
@@ -22,15 +23,16 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        DefKind, DictionaryEntryRequirements, ModuleId, PendingModuleFunction, TraitId, TraitImpl,
-        TraitImplId, TraitImpls, TypeDefId, Visibility, build_capturing_dictionary_value,
-        dictionary_capture_plan, id::Id, named_modules_in_environment,
+        DefKind, DictionaryEntryRequirements, ModuleId, PendingModuleFunction, SubscriptId,
+        TraitId, TraitImpl, TraitImplId, TraitImpls, TypeDefId, Visibility,
+        build_capturing_dictionary_value, dictionary_capture_plan, id::Id,
+        named_modules_in_environment,
     },
     std::{core_traits_names::VALUE_TRAIT_NAME, value::generated_value_evidence_types},
     types::{
         effects::{EffType, EffectVar},
         r#trait::TraitDictionaryEntryIndex,
-        r#type::{FnType, Type, TypeKind, TypeVar},
+        r#type::{FnType, SubscriptType, Type, TypeKind, TypeVar},
         type_inference::{substitution::InstSubst, unify::UnifiedTypeInference},
         type_like::{TypeLike, instantiate_types},
         type_mapper::{BitmapInstantiationMapper, EffectErasingMapper, TypeMapper},
@@ -101,11 +103,45 @@ pub(crate) struct EvidencePlanNode {
     parent: Option<usize>,
 }
 
+/// A use of the subscript that a type declares for a field, as inference made it when it
+/// answered a requirement on the field. Its instance is kept, as that of a use by name is in
+/// its node: what the subscript requires can be given by the function that makes the use, and
+/// the types of the use do not tell the instance then.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct DeclaredFieldUse {
+    pub(crate) field: Ustr,
+    /// Where the requirement that the use answered was made.
+    pub(crate) span: Location,
+    /// The type that the requirement asked of the field.
+    pub(crate) required: SubscriptType,
+    pub(crate) subscript: SubscriptId,
+    /// Whether the subscript is of the group being inferred: it has no quantifiers yet, and
+    /// its use gets its evidence as a reference to a function of the group does.
+    pub(crate) of_group: bool,
+    /// What the use gives to the type quantifiers of the subscript, in their order.
+    pub(crate) ty_args: Vec<Type>,
+    /// What it gives to its effect quantifiers, sorted.
+    pub(crate) eff_args: Vec<EffType>,
+}
+
+impl DeclaredFieldUse {
+    /// Whether this is the use that answered a requirement for `field` on a receiver of type
+    /// `receiver_ty` with a result of type `ret`. Effects are left out, as they select nothing.
+    pub(crate) fn answers(&self, field: Ustr, receiver_ty: Type, ret: Type) -> bool {
+        let erased = |ty: Type| ty.map(&mut EffectErasingMapper);
+        self.field == field
+            && erased(self.required.receiver_ty()) == erased(receiver_ty)
+            && erased(self.required.ret) == erased(ret)
+    }
+}
+
 /// Compiler-only evidence retained until elaboration. Never part of an exported type scheme.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct EvidencePlan {
     pub(crate) nodes: Vec<EvidencePlanNode>,
     pub(crate) roots: Vec<usize>,
+    /// The uses of declared fields that the inference of the function made.
+    pub(crate) field_uses: Vec<DeclaredFieldUse>,
 }
 
 impl EvidencePlan {
@@ -225,7 +261,14 @@ impl EvidencePlan {
             })
             .collect();
         let roots = members.iter().map(|id| indices[id]).collect();
-        Some((Self { nodes, roots }, ids))
+        Some((
+            Self {
+                nodes,
+                roots,
+                field_uses: self.field_uses.clone(),
+            },
+            ids,
+        ))
     }
 
     pub(crate) fn default_unquantified_effects(&mut self, retained: &FxHashSet<EffectVar>) {
@@ -239,6 +282,17 @@ impl EvidencePlan {
                 for effect in application.substitution.1.values() {
                     effect.fill_with_inner_effect_vars(&mut variables);
                 }
+            }
+        }
+        for field_use in &self.field_uses {
+            field_use
+                .required
+                .fill_with_inner_effect_vars(&mut variables);
+            for ty in &field_use.ty_args {
+                ty.fill_with_inner_effect_vars(&mut variables);
+            }
+            for effect in &field_use.eff_args {
+                effect.fill_with_inner_effect_vars(&mut variables);
             }
         }
         let effects = variables
@@ -266,6 +320,15 @@ impl EvidencePlan {
                 }
             }
         }
+        for field_use in &mut self.field_uses {
+            field_use.required = field_use.required.map(mapper);
+            for ty in &mut field_use.ty_args {
+                *ty = ty.map(mapper);
+            }
+            for eff in &mut field_use.eff_args {
+                *eff = mapper.map_effect_type(eff);
+            }
+        }
     }
 
     pub(crate) fn substitute(&mut self, inference: &mut UnifiedTypeInference) {
@@ -280,6 +343,24 @@ impl EvidencePlan {
                 }
             }
         }
+        for field_use in &mut self.field_uses {
+            inference.substitute_in_subscript_type_in_place(&mut field_use.required);
+            inference.substitute_in_types_in_place(&mut field_use.ty_args);
+            inference.substitute_in_effect_types_in_place(&mut field_use.eff_args);
+        }
+    }
+
+    /// Replace the reduction that the plan holds with `reduced`, keeping the uses of declared
+    /// fields, which are of the inference of the function and not of a reduction.
+    pub(crate) fn replace_reduction(&mut self, reduced: Self) {
+        let field_uses = mem::take(&mut self.field_uses);
+        *self = reduced;
+        self.field_uses = field_uses;
+    }
+
+    /// Take the uses of declared fields that `inference` made, as it has them now.
+    pub(crate) fn record_field_uses(&mut self, inference: &UnifiedTypeInference) {
+        self.field_uses = inference.field_uses().to_vec();
     }
 }
 

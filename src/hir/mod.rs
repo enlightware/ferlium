@@ -64,6 +64,7 @@ use crate::{
             CastableToType, TypeLike, instantiate_effect_types_in_place, instantiate_types_in_place,
         },
         type_mapper::TypeMapper,
+        type_scheme::ProjectionRequirementKind,
     },
 };
 
@@ -495,12 +496,18 @@ impl<P: HirPhase> Project<P> {
     }
 }
 
-/// Access a product field; tuple fields use their decimal index as the field name.
+/// Access a field of a value whose type was not known when the access was typed; tuple fields
+/// use their decimal index as the field name. `requirement` is what inference asked of that
+/// type: any field of that name, a subscript that the type declares for it first, or a stored
+/// field only. Once the type is known, the same rule tells what the access is.
 #[derive(Debug, Clone, Copy, new)]
 pub struct FieldAccess<P: HirPhase = Unelaborated> {
     pub value: NodeId<P>,
     pub field: Ustr,
+    /// Where the field is named: the site of the requirement that the access makes.
+    pub field_span: Location,
     pub access_mode: SubscriptMemberKind,
+    pub requirement: ProjectionRequirementKind,
 }
 
 // Local storage and ownership payloads.

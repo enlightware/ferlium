@@ -33,6 +33,7 @@ use crate::{
     },
     types::{
         effects::{EffType, EffectVar, EffectsInstSubst, no_effects},
+        r#trait::Trait,
         trait_solver::TraitSolver,
         r#type::{
             FnArgType, SubscriptMemberType, SubscriptResultConvention, SubscriptType, Type,
@@ -1211,14 +1212,24 @@ pub(crate) fn normalize_types(tys: &mut [TypeVar]) -> TypeInstSubst {
     ty_subst
 }
 
-fn is_std_trait(env: ModuleEnv<'_>, trait_id: TraitId, name: &str) -> bool {
-    trait_id.module == STD_MODULE_ID && env.trait_def(trait_id).name == name
-}
-
 /// Extra functions parameters that must be passed to resolve polymorphism for a list of constraints.
 pub(crate) fn extra_parameters_from_constraints(
     constraints: &[PubTypeConstraint],
     env: ModuleEnv<'_>,
+) -> ExtraParameters {
+    extra_parameters_from_constraints_with(
+        constraints,
+        env.expect_std_trait_id(VALUE_TRAIT_NAME),
+        &|id| env.trait_def(id),
+    )
+}
+
+/// As [`extra_parameters_from_constraints`], where no module environment is at hand: with the
+/// `Value` trait and the definitions of the traits.
+pub(crate) fn extra_parameters_from_constraints_with<'t>(
+    constraints: &[PubTypeConstraint],
+    value_trait_id: TraitId,
+    trait_def: &dyn Fn(TraitId) -> &'t Trait,
 ) -> ExtraParameters {
     use PubTypeConstraint::*;
 
@@ -1232,7 +1243,7 @@ pub(crate) fn extra_parameters_from_constraints(
             ..
         } = constraint
         {
-            if is_std_trait(env, *trait_id, REPR_TRAIT_NAME) {
+            if trait_id.module == STD_MODULE_ID && trait_def(*trait_id).name == REPR_TRAIT_NAME {
                 let input_ty = input_tys.first().unwrap();
                 let output_ty = output_tys.first().unwrap();
                 let in_var = input_ty.data().as_variable().copied();
@@ -1259,7 +1270,6 @@ pub(crate) fn extra_parameters_from_constraints(
 
     // Process other constraints needing runtime evidence. Variant payload layout obligations are
     // case-qualified uses of ordinary `Value<B>` evidence, not additional runtime parameters.
-    let value_trait_id = env.expect_std_trait_id(VALUE_TRAIT_NAME);
     let mut requirements = Vec::new();
     for constraint in constraints {
         let requirement = match constraint {
@@ -1276,7 +1286,7 @@ pub(crate) fn extra_parameters_from_constraints(
                 output_tys,
                 ..
             } => {
-                let trait_def = env.trait_def(*trait_id);
+                let trait_def = trait_def(*trait_id);
                 if !trait_def.has_runtime_dictionary_entries()
                     || is_value_trait_for_function_type(*trait_id, trait_def, input_tys, output_tys)
                     || is_function_surface_only_value_trait_application(

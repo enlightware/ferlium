@@ -38,7 +38,7 @@ use crate::{
     types::{
         effect_polarity::EffectVarPolarities,
         effects::EffType,
-        trait_solver::{TraitSolver, trait_solver_from_module},
+        trait_solver::{EvidencePlan, TraitSolver, trait_solver_from_module},
         r#type::{CallResultConvention, FnType, Type, TypeInstSubst},
         type_inference::{
             defaulting::DefaultingScope, expr::TypeInference, unify::UnifiedTypeInference,
@@ -351,10 +351,16 @@ fn emit_expr_unsafe_inner(
 
     // Substitute everything using ty_inf (single pass, includes all defaults).
     ty_inf.substitute_in_node(expr_arena, node_id);
+    // The uses of declared fields that this inference made, for the expression and for each
+    // of its lambdas: they follow the types of the nodes from here on.
+    let mut evidence_plan = EvidencePlan::default();
+    evidence_plan.record_field_uses(&ty_inf);
+    evidence_plan.substitute(&mut ty_inf);
     for lambda_id in lambda_functions.iter() {
         let descr = pending_functions
             .get_mut(lambda_id)
             .expect("expected pending function body");
+        descr.evidence_plan.record_field_uses(&ty_inf);
         ty_inf.substitute_in_pending_module_function(descr);
         module.functions[lambda_id.as_index()].definition = descr.definition.clone();
     }
@@ -390,6 +396,7 @@ fn emit_expr_unsafe_inner(
     if !fixup_subst.0.is_empty() {
         let mut mapper = BitmapInstantiationMapper::new(&fixup_subst);
         hir::instantiate_node_in_place(expr_arena, node_id, &mut mapper);
+        evidence_plan.instantiate_in_place(&mut mapper);
         for lambda_id in lambda_functions.iter() {
             let descr = &mut module.functions[lambda_id.as_index()];
             descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
@@ -402,6 +409,7 @@ fn emit_expr_unsafe_inner(
                 pending.code.entry_node_id,
                 &mut mapper,
             );
+            pending.evidence_plan.instantiate_in_place(&mut mapper);
             for local in &mut pending.locals {
                 local.ty = local.ty.map(&mut mapper);
             }
@@ -448,6 +456,7 @@ fn emit_expr_unsafe_inner(
     if !drop_subst.0.is_empty() {
         let mut mapper = BitmapInstantiationMapper::new(&drop_subst);
         hir::instantiate_node_in_place(expr_arena, node_id, &mut mapper);
+        evidence_plan.instantiate_in_place(&mut mapper);
         for lambda_id in lambda_functions.iter() {
             let descr = &mut module.functions[lambda_id.as_index()];
             descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
@@ -460,6 +469,7 @@ fn emit_expr_unsafe_inner(
                 pending.code.entry_node_id,
                 &mut mapper,
             );
+            pending.evidence_plan.instantiate_in_place(&mut mapper);
             for local in &mut pending.locals {
                 local.ty = local.ty.map(&mut mapper);
             }
@@ -536,6 +546,7 @@ fn emit_expr_unsafe_inner(
     // Substitute the normalized types in the node, effects and locals.
     let mut mapper = BitmapInstantiationMapper::new(&subst);
     hir::instantiate_node_in_place(expr_arena, node_id, &mut mapper);
+    evidence_plan.instantiate_in_place(&mut mapper);
     for lambda_id in lambda_functions.iter() {
         let descr = &mut module.functions[lambda_id.as_index()];
         descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
@@ -548,6 +559,7 @@ fn emit_expr_unsafe_inner(
             pending.code.entry_node_id,
             &mut mapper,
         );
+        pending.evidence_plan.instantiate_in_place(&mut mapper);
         for local in &mut pending.locals {
             local.ty = local.ty.map(&mut mapper);
         }
@@ -574,6 +586,7 @@ fn emit_expr_unsafe_inner(
         &mut solver,
         generated_projection_subscripts,
     );
+    ctx.set_evidence_plan(evidence_plan);
     let elaborated = elaborate_hir_with_warnings(
         expr_arena,
         node_id,

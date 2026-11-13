@@ -99,9 +99,14 @@ use crate::{
         effects::{EffType, Effect, EffectsInstSubst, no_effects},
         mutability::MutType,
         trait_solver::alpha_canonicalize_types_with_instantiation,
-        r#type::{CallImplType, CallResultConvention, FnArgType, FnType, Type, TypeKind, TypeVar},
+        r#type::{
+            CallImplType, CallResultConvention, FnArgType, FnType, SubscriptMemberType,
+            SubscriptType, Type, TypeKind, TypeVar,
+        },
+        type_inference::substitution::InstSubst,
         type_like::TypeLike,
         type_mapper::{BitmapInstantiationMapper, TypeMapper},
+        type_scheme::extra_parameters_from_constraints_with,
     },
 };
 
@@ -743,6 +748,125 @@ fn get_projection_subscript_node_kind(
     }))
 }
 
+/// A use of the subscript that a type declares for a field: the subscript, its members, and
+/// what it requires at the use.
+struct ElaboratedFieldUse {
+    subscript: SubscriptId,
+    ty: SubscriptType,
+    inst_data: hir::FnInstData,
+}
+
+/// The use of the subscript that the type `receiver_ty` declares for `field`, where the field
+/// is read from a receiver of that type with a result of type `ret`; `None` if the type
+/// declares no subscript for it.
+///
+/// Inference made the use as an instance of the scheme of the subscript, see
+/// `ProjectionSubscriptIs`, and the function being elaborated kept that instance, see
+/// `DeclaredFieldUse`: it is taken from there, as the instance of a use by name is taken from
+/// its node. A use of a subscript of the group being emitted gets what its members require as
+/// a reference to a function of the group does. Only a use that no function made, which an
+/// implementation selected here for known types requires, is found from its types.
+fn declared_field_use(
+    receiver_ty: Type,
+    ret: Type,
+    field: Ustr,
+    span: Location,
+    ctx: &mut DictElaborationCtx<'_, '_, '_>,
+    arena: &mut NodeArena,
+) -> Result<Option<ElaboratedFieldUse>, InternalCompilationError> {
+    let Some((subscript, scheme)) = ctx
+        .trait_solver
+        .projection_subscript_scheme(receiver_ty, field)
+    else {
+        return Ok(None);
+    };
+    let recorded = ctx
+        .evidence_plan
+        .field_uses
+        .iter()
+        .find(|field_use| {
+            field_use.subscript == subscript && field_use.answers(field, receiver_ty, ret)
+        })
+        .cloned();
+    let (ty_args, eff_args) = match recorded {
+        Some(field_use) if field_use.of_group => {
+            let members = ctx.module_inst_data.and_then(|inst_data| {
+                let member = inst_data.subscripts.get(&subscript.subscript)?;
+                inst_data.functions.get(member)
+            });
+            let inst_data = match members {
+                Some(members) if !members.requirements.is_empty() => late_module_call_inst_data(
+                    members,
+                    &hir::FnInstData::none(),
+                    ctx.caller_inst_data,
+                    span,
+                    span,
+                )?,
+                _ => hir::FnInstData::none(),
+            };
+            return Ok(Some(ElaboratedFieldUse {
+                subscript,
+                ty: scheme.ty,
+                inst_data,
+            }));
+        }
+        Some(field_use) => (field_use.ty_args, field_use.eff_args),
+        None => {
+            let Some((_, _, subst)) = ctx.trait_solver.projection_subscript_instance(
+                receiver_ty,
+                ret,
+                field,
+                span,
+                arena,
+            )?
+            else {
+                return Ok(None);
+            };
+            (
+                scheme
+                    .ty_quantifiers
+                    .iter()
+                    .map(|quantifier| subst.0[quantifier])
+                    .collect(),
+                scheme
+                    .eff_quantifiers
+                    .iter()
+                    .sorted()
+                    .map(|quantifier| subst.1[quantifier].clone())
+                    .collect(),
+            )
+        }
+    };
+    let subst: InstSubst = (
+        scheme
+            .ty_quantifiers
+            .iter()
+            .copied()
+            .zip(ty_args.iter().copied())
+            .collect(),
+        scheme
+            .eff_quantifiers
+            .iter()
+            .sorted()
+            .copied()
+            .zip(eff_args.iter().cloned())
+            .collect(),
+    );
+    let mut mapper = BitmapInstantiationMapper::new(&subst);
+    let solver = &*ctx.trait_solver;
+    let requirements = extra_parameters_from_constraints_with(
+        &scheme.constraints,
+        solver.std_trait_id(VALUE_TRAIT_NAME),
+        &|id| solver.trait_def(id),
+    );
+    let dicts_req = instantiate_dictionary_requirements(&requirements.requirements, &mut mapper);
+    Ok(Some(ElaboratedFieldUse {
+        subscript,
+        ty: scheme.ty,
+        inst_data: hir::FnInstData::new(dicts_req, ty_args, eff_args),
+    }))
+}
+
 fn generated_projection_subscript_node_kind(
     subscript: SubscriptId,
     spec: GeneratedStructuralProjectionSpec,
@@ -825,28 +949,29 @@ fn extra_arg_kind_from_inst_data(
                     let ty = subscript_ty.receiver_ty();
                     let expected_node_ty = Type::subscript_type(subscript_ty.clone());
                     let expected_arg_ty = FnArgType::new_by_val(expected_node_ty);
+                    // As inference: the subscript that the type declares, where the
+                    // requirement accepts one, and the stored field otherwise.
+                    if requirement.accepts_user_defined_projection()
+                        && let Some(field_use) =
+                            declared_field_use(ty, subscript_ty.ret, *name, span, ctx, arena)?
+                    {
+                        return Ok((
+                            get_projection_subscript_node_kind(
+                                field_use.subscript,
+                                *name,
+                                span,
+                                field_use.inst_data,
+                            ),
+                            expected_node_ty,
+                            expected_arg_ty,
+                        ));
+                    }
                     let generated = ctx
                         .generated_projection_subscripts
                         .as_mut()
                         .expect("projection evidence generation requires module elaboration");
                     let structural_key = ProjectionKey::structural(ty, *name);
                     let existing_structural = generated.get_existing(structural_key);
-                    if existing_structural.is_none()
-                        && requirement.accepts_user_defined_projection()
-                        && let Some(key) = ProjectionKey::explicit_for_receiver_ty(ty, *name)
-                        && let Some(subscript) = ctx.trait_solver.projection_subscript_id(key)
-                    {
-                        return Ok((
-                            get_projection_subscript_node_kind(
-                                subscript,
-                                *name,
-                                span,
-                                hir::FnInstData::none(),
-                            ),
-                            expected_node_ty,
-                            expected_arg_ty,
-                        ));
-                    }
                     let ty_data = ty.data();
                     let ty_kind = ty_data.clone();
                     drop(ty_data);
@@ -1947,6 +2072,35 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
         else {
             panic!("Projection subscript dictionary index should reference projection evidence");
         };
+        let subscript_ty = subscript_ty.clone();
+        let subscript = self.alloc_elaborated_node(
+            LoadSubscriptEvidence(hir::LoadSubscriptEvidence { extra_parameter }),
+            Type::subscript_type(subscript_ty.clone()),
+            no_effects(),
+            node_span,
+        );
+        self.subscript_field_access(
+            subscript,
+            &subscript_ty,
+            child,
+            field_name,
+            access_mode,
+            node_ty,
+        )
+    }
+
+    /// The access to the field `field_name` of `child` through the value `subscript` of the
+    /// subscript that gives it, of type `subscript_ty`.
+    fn subscript_field_access(
+        &mut self,
+        subscript: ENodeId,
+        subscript_ty: &SubscriptType,
+        child: ENodeId,
+        field_name: Ustr,
+        access_mode: SubscriptMemberKind,
+        node_ty: Type,
+    ) -> NodeKind<Elaborated> {
+        use NodeKind::*;
         let member_ty = match access_mode {
             SubscriptMemberKind::Ref => subscript_ty.ref_member.as_ref(),
             SubscriptMemberKind::Mut => subscript_ty.mut_member.as_ref(),
@@ -1960,12 +2114,6 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
         if access_mode.mut_member() {
             inst_fn_args[0].mut_ty = MutType::mutable();
         }
-        let subscript = self.alloc_elaborated_node(
-            LoadSubscriptEvidence(hir::LoadSubscriptEvidence { extra_parameter }),
-            Type::subscript_type(subscript_ty.clone()),
-            no_effects(),
-            node_span,
-        );
         let passing = if access_mode.mut_member() {
             ArgConvention::MutableRef
         } else {
@@ -1983,6 +2131,67 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 CallResultConvention::Subscript(member_ty.result_convention),
             ),
         }))
+    }
+
+    /// The access to the field `field_name` of `child` when the type of `child`, known only
+    /// once its uses were inferred, declares a subscript for that field: a use of that
+    /// subscript, with the effects that inference gave to the access, `node_effects`. `None`
+    /// if the type declares none.
+    #[allow(clippy::too_many_arguments)]
+    fn declared_subscript_field_access(
+        &mut self,
+        child: ENodeId,
+        child_ty: Type,
+        field_name: Ustr,
+        field_span: Location,
+        access_mode: SubscriptMemberKind,
+        node_ty: Type,
+        node_effects: &EffType,
+        node_span: Location,
+    ) -> Result<Option<NodeKind<Elaborated>>, InternalCompilationError> {
+        let Some(field_use) = declared_field_use(
+            child_ty,
+            node_ty,
+            field_name,
+            field_span,
+            self.ctx,
+            &mut self.generated,
+        )?
+        else {
+            return Ok(None);
+        };
+        let member = |member: &Option<SubscriptMemberType>| {
+            member.as_ref().map(|member| {
+                SubscriptMemberType::new(node_effects.clone(), member.result_convention)
+            })
+        };
+        let subscript_ty = SubscriptType::new(
+            vec![FnArgType::new_by_val(child_ty)],
+            node_ty,
+            member(&field_use.ty.ref_member),
+            member(&field_use.ty.mut_member),
+        );
+        let subscript_node_ty = Type::subscript_type(subscript_ty.clone());
+        let get_subscript = hir::GetSubscript {
+            subscript: field_use.subscript,
+            subscript_path: Path::new(vec![(field_name, node_span)]),
+            inst_data: field_use.inst_data,
+        };
+        let value = self.elaborate_get_subscript(
+            get_subscript,
+            subscript_node_ty,
+            &no_effects(),
+            node_span,
+        )?;
+        let value = self.alloc_elaborated_node(value, subscript_node_ty, no_effects(), node_span);
+        Ok(Some(self.subscript_field_access(
+            value,
+            &subscript_ty,
+            child,
+            field_name,
+            access_mode,
+            node_ty,
+        )))
     }
 
     fn materialize_elaborated_place_value(
@@ -2911,64 +3120,65 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 } else {
                     ty_data
                 };
-                match &*ty_data {
+                // What the field is, by the rule that inference followed when it answered
+                // the requirement of the access, see `ProjectionSubscriptIs`: the evidence of
+                // a type that is still open, or that the function was given for this type;
+                // else, where the access accepts one, the subscript that the type declares;
+                // else a place of the product.
+                let open = ty_data.as_variable().copied();
+                let stored = match &*ty_data {
                     Tuple(fields) => {
-                        let index = field_name
-                            .as_str()
-                            .parse::<usize>()
-                            .expect("tuple field index");
+                        let index = field_name.as_str().parse::<usize>().ok();
                         assert!(
-                            index < fields.len(),
+                            index.is_none_or(|index| index < fields.len()),
                             "tuple field must have been checked by inference"
                         );
-                        Project(HirProject::new(child, ProjectionIndex::from_index(index)))
+                        index
                     }
-                    Record(record) => {
-                        if let Some(index) = record.iter().position(|field| field.0 == field_name) {
-                            Project(HirProject::new(child, ProjectionIndex::from_index(index)))
-                        } else if let Some(index) =
-                            find_projection_subscript_dict_index_for_receiver_ty(
-                                self.ctx.dicts,
-                                child_ty,
-                                &field_name,
-                            )
-                        {
-                            self.projection_evidence_field_access(
-                                child,
-                                field_name,
-                                field_access.access_mode,
-                                index,
-                                node_ty,
-                                node_span,
-                            )
-                        } else {
-                            panic!("Field not found in type, type inference should have failed");
-                        }
-                    }
-                    Variable(var) => {
-                        let var = *var;
-                        drop(ty_data);
-                        let access_mode = field_access.access_mode;
-                        let index = find_projection_subscript_dict_index(
-                            self.ctx.dicts,
-                            var,
-                            &field_name,
-                        )
+                    Record(record) => record.iter().position(|field| field.0 == field_name),
+                    _ => None,
+                };
+                drop(ty_data);
+                let access_mode = field_access.access_mode;
+                let given = match open {
+                    Some(var) => Some(
+                        find_projection_subscript_dict_index(self.ctx.dicts, var, &field_name)
                             .unwrap_or_else(
                                 || panic!("Projection subscript dictionary for field \"{field_name}\" in type variable \"{var}\" not found, type inference should have failed"),
-                            );
-                        self.projection_evidence_field_access(
-                            child,
-                            field_name,
-                            access_mode,
-                            index,
-                            node_ty,
-                            node_span,
-                        )
-                    }
-                    _ => {
-                        panic!("FieldAccess should have a product or variable type");
-                    }
+                            ),
+                    ),
+                    None => find_projection_subscript_dict_index_for_receiver_ty(
+                        self.ctx.dicts,
+                        child_ty,
+                        &field_name,
+                    ),
+                };
+                if let Some(index) = given {
+                    self.projection_evidence_field_access(
+                        child,
+                        field_name,
+                        access_mode,
+                        index,
+                        node_ty,
+                        node_span,
+                    )
+                } else if field_access.requirement.accepts_user_defined_projection()
+                    && let Some(access) = self.declared_subscript_field_access(
+                        child,
+                        child_ty,
+                        field_name,
+                        field_access.field_span,
+                        access_mode,
+                        node_ty,
+                        node_effects,
+                        node_span,
+                    )?
+                {
+                    access
+                } else if let Some(index) = stored {
+                    Project(HirProject::new(child, ProjectionIndex::from_index(index)))
+                } else {
+                    panic!("Field not found in type, type inference should have failed");
                 }
             }
             Variant(variant) => {

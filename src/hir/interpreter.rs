@@ -864,6 +864,22 @@ fn eval_static_evidence_node(
         NodeKind::LoadSubscriptEvidence(load) => HiddenEvidenceArgValue::Subscript(b(
             subscript_from_extra_parameter(ctx, load.extra_parameter),
         )),
+        // A subscript with the evidence of what it requires, as a subscript that a type
+        // declares for a field has when it is the evidence of that field.
+        NodeKind::BuildSubscriptValue(build) => {
+            let HiddenEvidenceArgValue::Subscript(mut subscript) =
+                eval_static_evidence_node(arena, build.subscript, ctx)
+            else {
+                panic!("the subscript of a subscript value must be a subscript");
+            };
+            subscript.hidden_args.extend(
+                build
+                    .evidence_captures
+                    .iter()
+                    .map(|capture| eval_static_evidence_node(arena, *capture, ctx)),
+            );
+            HiddenEvidenceArgValue::Subscript(subscript)
+        }
         NodeKind::LoadVariantPayloadStorageEvidence(load) => {
             match extra_parameter_value(ctx, load.extra_parameter) {
                 HiddenEvidenceArgValue::VariantPayloadStorage(storage) => {

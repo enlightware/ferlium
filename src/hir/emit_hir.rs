@@ -579,6 +579,27 @@ pub(super) fn default_output_effects_in_functions(
     }
 }
 
+/// Give the functions of an inference, and their lambdas, the uses of declared fields that it
+/// made, before their types are substituted: the uses then follow the types of the bodies. Each
+/// function holds them all, as a use is found by its types and each body is elaborated on its
+/// own.
+pub(super) fn record_field_uses(
+    pending_functions: &mut PendingModuleFunctions,
+    associated_lambdas: &FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
+    local_fns: &[LocalFunctionId],
+    ty_inf: &UnifiedTypeInference,
+) {
+    for id in local_fns.iter() {
+        for function_id in function_and_associated_lambdas(id, associated_lambdas) {
+            pending_functions
+                .get_mut(&function_id)
+                .expect("expected pending function body")
+                .evidence_plan
+                .record_field_uses(ty_inf);
+        }
+    }
+}
+
 pub(super) fn substitute_and_canonicalize_functions(
     output: &mut Module,
     pending_functions: &mut PendingModuleFunctions,
@@ -1522,10 +1543,13 @@ pub(super) fn default_unconstrained_types_to_never<'a>(
     protected: impl IntoIterator<Item = TypeVar>,
     module_env: ModuleEnv<'_>,
 ) -> Result<(), InternalCompilationError> {
+    // The instance of a use of a declared field is held beside the bodies.
+    let field_use_vars = ty_inf.field_use_ty_vars();
     ty_inf.default_unconstrained_to_never(
         hir::all_unbound_ty_vars(bodies)
             .into_iter()
-            .map(|(var, ctxs)| (var, ctxs.first().1)),
+            .map(|(var, ctxs)| (var, ctxs.first().1))
+            .chain(field_use_vars),
         protected,
         |constraint| dependent_ty_vars(constraint, module_env),
     )

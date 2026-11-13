@@ -20,7 +20,7 @@ pub(crate) use canonical::{
     alpha_canonicalize_types_with_instantiation, application_key,
 };
 pub(crate) use context_reduction::{
-    EvidencePlan, EvidencePlanSource, REDUCTION_WORK_LIMIT, UniformDictionaryKey,
+    DeclaredFieldUse, EvidencePlan, EvidencePlanSource, REDUCTION_WORK_LIMIT, UniformDictionaryKey,
 };
 pub(crate) use matching::{input_heads_may_match, output_effect_fits};
 pub(crate) use probe::{ConstraintAssumptions, TraitSolverProbe};
@@ -50,11 +50,11 @@ use crate::{
         effect_polarity::{EffectPolarity, trait_output_effect_polarities},
         effects::{EffType, EffectVar},
         r#trait::{Trait, TraitAssociatedConstIndex},
-        r#type::{SubscriptType, Type, TypeDef, TypeKind, TypeVar},
+        r#type::{SubscriptType, Type, TypeDef},
         type_inference::effect_solver::EffectConstraintOrigin,
         type_like::TypeLike,
         type_properties::{TypePropertyEnv, concrete_type_is_trivial_copy, trivial_copy_impl_key},
-        type_scheme::PubTypeConstraint,
+        type_scheme::{PubTypeConstraint, TypeScheme},
     },
 };
 
@@ -282,7 +282,7 @@ pub(crate) use trait_solver_from_module;
 #[derive(Debug, Clone)]
 pub(crate) struct CurrentProjectionSubscriptTypes<'a> {
     source: CurrentProjectionSubscriptTypeSource<'a>,
-    types: Option<Rc<FxHashMap<ProjectionKey, SubscriptType>>>,
+    types: Option<Rc<FxHashMap<ProjectionKey, TypeScheme<SubscriptType>>>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -299,7 +299,7 @@ impl<'a> CurrentProjectionSubscriptTypes<'a> {
         }
     }
 
-    pub(crate) fn from_map(types: FxHashMap<ProjectionKey, SubscriptType>) -> Self {
+    pub(crate) fn from_map(types: FxHashMap<ProjectionKey, TypeScheme<SubscriptType>>) -> Self {
         Self {
             source: CurrentProjectionSubscriptTypeSource::Materialized,
             types: Some(Rc::new(types)),
@@ -311,7 +311,7 @@ impl<'a> CurrentProjectionSubscriptTypes<'a> {
         Self::from_map(FxHashMap::default())
     }
 
-    fn get(&mut self, key: ProjectionKey) -> Option<SubscriptType> {
+    fn get(&mut self, key: ProjectionKey) -> Option<TypeScheme<SubscriptType>> {
         if self.types.is_none() {
             let CurrentProjectionSubscriptTypeSource::Module(source) = self.source else {
                 return None;
@@ -330,15 +330,16 @@ impl<'a> CurrentProjectionSubscriptTypes<'a> {
     }
 }
 
+/// The scheme of each projection subscript of `module` whose signature is known.
 pub(crate) fn current_projection_subscript_type_map(
     module: &Module,
-) -> FxHashMap<ProjectionKey, SubscriptType> {
+) -> FxHashMap<ProjectionKey, TypeScheme<SubscriptType>> {
     module
         .projection_subscripts
         .iter()
         .filter_map(|(key, entry)| {
             let subscript = module.get_subscript_by_id(entry.subscript)?;
-            Some((*key, subscript.type_scheme(module)?.ty))
+            Some((*key, subscript.type_scheme(module)?))
         })
         .collect()
 }
@@ -423,22 +424,17 @@ impl<'a> TraitSolver<'a> {
         })
     }
 
-    pub(crate) fn projection_subscript_type(
+    /// The subscript that a type whose representation is its own declares for `field`, if it
+    /// does, with its scheme. A use of the field is a use of the subscript: it takes an
+    /// instance of this scheme, and its requirements.
+    pub(crate) fn projection_subscript_scheme(
         &mut self,
         receiver_ty: Type,
         field: Ustr,
-    ) -> Option<SubscriptType> {
+    ) -> Option<(module::SubscriptId, TypeScheme<SubscriptType>)> {
         let key = ProjectionKey::explicit_for_receiver_ty(receiver_ty, field)?;
-        let receiver_params = {
-            let data = receiver_ty.data();
-            match &*data {
-                TypeKind::Named(named) => named.params.clone(),
-                TypeKind::Native(_) => Default::default(),
-                _ => return None,
-            }
-        };
         let subscript = self.projection_subscript_id(key)?;
-        let subscript_ty = if subscript.module == self.current_type_items.module.id {
+        let scheme = if subscript.module == self.current_type_items.module.id {
             self.current_projection_subscript_types.get(key)?
         } else {
             let module = self
@@ -448,18 +444,8 @@ impl<'a> TraitSolver<'a> {
             module
                 .get_subscript_by_id(subscript.subscript)?
                 .type_scheme(module)?
-                .ty
         };
-        let subst = (
-            receiver_params
-                .iter()
-                .copied()
-                .enumerate()
-                .map(|(index, ty)| (TypeVar::new(index as u32), ty))
-                .collect(),
-            FxHashMap::default(),
-        );
-        Some(subscript_ty.instantiate_simple(&subst))
+        Some((subscript, scheme))
     }
 
     pub(crate) fn projection_subscript_id(

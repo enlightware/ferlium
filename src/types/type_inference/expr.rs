@@ -159,7 +159,7 @@ pub struct TypeInference {
     /// effects vary.
     group_type_instances: FxHashMap<FunctionId, Vec<Type>>,
     /// The member functions of each subscript of that group.
-    group_subscripts: FxHashMap<SubscriptId, Vec<FunctionId>>,
+    pub(super) group_subscripts: FxHashMap<SubscriptId, Vec<FunctionId>>,
     /// The references to the functions of that group, in the order the bodies make them.
     group_references: Vec<GroupReference>,
     /// Whether equal trait applications share their outputs only within one function.
@@ -1923,7 +1923,9 @@ impl TypeInference {
                         K::FieldAccess(HirFieldAccess::new(
                             tuple_node_id,
                             ustr(&index.to_string()),
+                            index_span,
                             SubscriptMemberKind::Ref,
+                            ProjectionRequirementKind::Structural,
                         ))
                     };
                     (node, element_ty, tuple_mut, effects)
@@ -3695,7 +3697,17 @@ impl TypeInference {
                 record_node_id,
                 ProjectionIndex::from_index(index),
             )),
-            None => NodeKind::FieldAccess(HirFieldAccess::new(record_node_id, field, mode)),
+            None => NodeKind::FieldAccess(HirFieldAccess::new(
+                record_node_id,
+                field,
+                field_span,
+                mode,
+                if uses_projection_evidence {
+                    ProjectionRequirementKind::All
+                } else {
+                    ProjectionRequirementKind::Structural
+                },
+            )),
         };
         let node = env
             .ir_arena
@@ -3744,7 +3756,9 @@ impl TypeInference {
             NodeKind::FieldAccess(HirFieldAccess::new(
                 tuple_node_id,
                 ustr(&index.to_string()),
+                index_span,
                 mode,
+                ProjectionRequirementKind::Structural,
             ))
         };
         let node = env
@@ -5590,7 +5604,9 @@ impl TypeInference {
                     NodeKind::FieldAccess(HirFieldAccess::new(
                         value,
                         field_access.field,
+                        field_access.field_span,
                         field_access.access_mode,
+                        field_access.requirement,
                     ))
                 })
             }

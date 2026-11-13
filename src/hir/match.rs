@@ -29,7 +29,7 @@ use crate::{
     types::mutability::MutType,
     types::r#type::Type,
     types::type_inference::expr::TypeInference,
-    types::type_scheme::PubTypeConstraint,
+    types::type_scheme::{ProjectionRequirementKind, PubTypeConstraint},
     types::typing_env::TypingEnv,
 };
 
@@ -451,7 +451,9 @@ impl TypeInference {
                                     K::FieldAccess(FieldAccess::new(
                                         project_variant_inner_id,
                                         bind_var_names[i].0,
+                                        bind_var_names[i].1,
                                         SubscriptMemberKind::Ref,
+                                        ProjectionRequirementKind::Structural,
                                     ))
                                 };
                                 let project_inner_id = env.ir_arena.alloc(N::new(

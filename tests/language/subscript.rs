@@ -5717,3 +5717,676 @@ fn subscript_yield_inside_nested_block_keeps_outer_epilogue() {
 
     assert_val_eq!(value, expected_tuple([int(5), int(11)]));
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_field_that_a_type_declares_as_a_subscript_is_a_use_of_that_subscript() {
+    // A field of a type that declares a subscript for it is a use of the subscript, with its
+    // requirements and its effects, also when the access is typed before its receiver: in a
+    // function that is generic in the receiver, in one that calls it, or in a lambda.
+    let declarations = indoc! { r#"
+        trait A<Self |-> ! E> { fn run_a(x: Self) -> int ! E; }
+        impl A for <Self = string |-> ! E = fallible> {
+            fn run_a(x) { idiv(6, string_len(x)) }
+        }
+        impl A for <Self = int |-> ! E = ()> {
+            fn run_a(x) { x }
+        }
+        fn pure_only(f: () -> int ! ()) -> int { f() }
+
+        #[private_repr]
+        struct Secret<T> {
+            raw: T,
+            total: int,
+        }
+
+        subscript Secret<T>.value(self) -> int {
+            ref {
+                let local = run_a(self.raw);
+                yield local
+            }
+
+            mut {
+                let mut local = run_a(self.raw);
+                yield local;
+                self.total = self.total + local
+            }
+        }
+
+        fn get(x) { x.value }
+        fn add(x, n: int) { x.value += n }
+        fn through<U>(secret: Secret<U>) -> int { get(secret) }
+
+        fn of_string() -> int { get(Secret { raw: "ab", total: 0 }) }
+        fn of_int() -> int { get(Secret { raw: 7, total: 0 }) }
+        fn through_string() -> int { through(Secret { raw: "ab", total: 0 }) }
+        fn added_int() -> int {
+            let mut secret = Secret { raw: 7, total: 1 };
+            add(secret, 5);
+            secret.total
+        }
+        fn added_string() -> int {
+            let mut secret = Secret { raw: "abc", total: 1 };
+            add(secret, 5);
+            secret.total
+        }
+        fn in_lambda_string() -> int {
+            let read = |x| x.value;
+            read(Secret { raw: "ab", total: 0 })
+        }
+        fn in_lambda_int() -> int {
+            let mut secret = Secret { raw: 7, total: 1 };
+            let bump = |x, n| { x.value += n };
+            bump(secret, 5);
+            secret.total
+        }
+    "# };
+    assert_val_eq!(
+        run_experimental_subscript_source(&format!(
+            "{declarations}(of_string(), pure_only(of_int), through_string(), pure_only(added_int), added_string(), in_lambda_string(), pure_only(in_lambda_int))"
+        )),
+        expected_tuple([3, 7, 3, 13, 8, 3, 13].map(int))
+    );
+    for fallible in [
+        "of_string",
+        "through_string",
+        "added_string",
+        "in_lambda_string",
+    ] {
+        experimental_session()
+            .fail_compilation(&format!("{declarations}pure_only({fallible})"))
+            .expect_invalid_effect_inclusion(effect(PrimitiveEffect::Fallible), no_effects());
+    }
+    // What the subscript requires is required of the type of the receiver.
+    for missing in [
+        "get(Secret { raw: 1.5, total: 0 })",
+        "through(Secret { raw: 1.5, total: 0 })",
+        "{ let read = |x| x.value; read(Secret { raw: 1.5, total: 0 }) }",
+    ] {
+        experimental_session()
+            .fail_compilation(&format!("{declarations}{missing}"))
+            .expect_trait_impl_not_found("A", &["Self = float"]);
+    }
+
+    // The same for a type whose representation is a tuple.
+    let value = run_experimental_subscript_source(indoc! { r#"
+        #[private_repr]
+        struct Pair(int, int)
+
+        subscript Pair.sum(self) -> int {
+            ref {
+                let local = self.0 + self.1;
+                yield local
+            }
+        }
+
+        fn get(x) { x.sum }
+        fn in_lambda() -> int {
+            let read = |x| x.sum;
+            read(Pair(3, 4))
+        }
+        (get(Pair(1, 2)), in_lambda())
+    "# });
+    assert_val_eq!(value, expected_tuple([int(3), int(7)]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_field_read_inside_the_group_of_its_subscript_is_a_reference_of_the_group() {
+    // A function of the group of a subscript reads its field in a lambda, where the access is
+    // typed before its receiver: the read is a reference to the subscript as one by name is,
+    // with effects of its own, and the function requires what the subscript requires.
+    let declarations = indoc! { r#"
+        trait A<Self |-> ! E> { fn run_a(x: Self) -> int ! E; }
+        impl A for <Self = string |-> ! E = fallible> {
+            fn run_a(x) { idiv(6, string_len(x)) }
+        }
+        impl A for <Self = int |-> ! E = ()> {
+            fn run_a(x) { x }
+        }
+        fn pure_only(f: () -> int ! ()) -> int { f() }
+
+        #[private_repr]
+        struct Secret<T> {
+            raw: T,
+            depth: int,
+        }
+
+        fn read<T>(secret: Secret<T>) -> int {
+            let field = |x| x.value;
+            field(secret)
+        }
+
+        subscript Secret<T>.value(self) -> int {
+            ref {
+                let local = if self.depth == 0 {
+                    run_a(self.raw)
+                } else {
+                    read(Secret { raw: self.raw, depth: self.depth - 1 })
+                };
+                yield local
+            }
+        }
+
+        fn of_string() -> int { Secret { raw: "ab", depth: 2 }.value }
+        fn of_int() -> int { Secret { raw: 7, depth: 2 }.value }
+    "# };
+    assert_val_eq!(
+        run_experimental_subscript_source(&format!(
+            "{declarations}(of_string(), pure_only(of_int))"
+        )),
+        expected_tuple([int(3), int(7)])
+    );
+    experimental_session()
+        .fail_compilation(&format!("{declarations}pure_only(of_string)"))
+        .expect_invalid_effect_inclusion(effect(PrimitiveEffect::Fallible), no_effects());
+
+    // Each access is a reference of the function that makes it: two functions of the group
+    // that read the field, one of them twice, each require what the subscript requires,
+    // whatever the order of the definitions.
+    let prelude = indoc! { r#"
+        trait A<Self |-> ! E> { fn run_a(x: Self) -> int ! E; }
+        impl A for <Self = string |-> ! E = fallible> {
+            fn run_a(x) { idiv(6, string_len(x)) }
+        }
+        impl A for <Self = int |-> ! E = ()> {
+            fn run_a(x) { x }
+        }
+        fn pure_only(f: () -> int ! ()) -> int { f() }
+
+        #[private_repr]
+        struct Secret<T> {
+            raw: T,
+            depth: int,
+        }
+    "# };
+    let read1 = indoc! { r#"
+        fn read1<T>(secret: Secret<T>) -> int {
+            let field = |x| x.value;
+            field(secret)
+        }
+    "# };
+    let read2 = indoc! { r#"
+        fn read2<T>(secret: Secret<T>) -> int {
+            let field = |x| x.value;
+            let again = |x| x.value;
+            field(secret) + again(Secret { raw: secret.raw, depth: 0 })
+        }
+    "# };
+    let subscript = indoc! { r#"
+        subscript Secret<T>.value(self) -> int {
+            ref {
+                let local = if self.depth == 0 {
+                    run_a(self.raw)
+                } else if self.depth == 1 {
+                    read1(Secret { raw: self.raw, depth: 0 })
+                } else {
+                    read2(Secret { raw: self.raw, depth: self.depth - 1 })
+                };
+                yield local
+            }
+        }
+    "# };
+    for items in [
+        [read1, read2, subscript],
+        [read2, read1, subscript],
+        [subscript, read1, read2],
+        [subscript, read2, read1],
+        [read1, subscript, read2],
+        [read2, subscript, read1],
+    ] {
+        let items = items.concat();
+        assert_val_eq!(
+            run_experimental_subscript_source(&format!(
+                "{prelude}{items}(read2(Secret {{ raw: \"ab\", depth: 2 }}), pure_only(|| read1(Secret {{ raw: 7, depth: 3 }})))"
+            )),
+            expected_tuple([int(9), int(21)]),
+            "{items}"
+        );
+        assert!(
+            matches!(
+                experimental_session()
+                    .fail_compilation(&format!(
+                        "{prelude}{items}pure_only(|| read1(Secret {{ raw: \"ab\", depth: 3 }}))"
+                    ))
+                    .into_inner(),
+                CompilationErrorImpl::TraitImplOutputEffectsMismatch { .. }
+            ),
+            "{items}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_declared_field_typed_before_its_receiver_is_an_instance_of_its_subscript() {
+    // An access typed before its receiver is an instance of the subscript that the type
+    // declares: a generic that the types of the receiver and of the result do not name is an
+    // output of what the subscript requires. Here the type of the field is such an output.
+    let declarations = indoc! { r#"
+        trait Read<Self |-> Out> { fn read(x: Self) -> Out; }
+        impl Read for <Self = int |-> Out = string> {
+            fn read(x) { "hello" }
+        }
+        impl Read for <Self = bool |-> Out = int> {
+            fn read(x) { 42 }
+        }
+
+        #[private_repr]
+        struct Box<T>(T)
+
+        subscript Box<T>.value(self) -> _ {
+            ref {
+                let local = read(self.0);
+                yield local
+            }
+        }
+
+        fn get(x) { x.value }
+        fn through(b) { get(b) }
+        fn generic<T, O>(b: Box<T>) -> O where T: Read<Out = O> {
+            let field = |x| x.value;
+            field(b)
+        }
+        fn in_lambdas() {
+            let of_int = |x| x.value;
+            let of_bool = |x| x.value;
+            (of_int(Box(4)), of_bool(Box(true)))
+        }
+    "# };
+    assert_val_eq!(
+        run_experimental_subscript_source(&format!(
+            "{declarations}(in_lambdas(), get(Box(4)), get(Box(true)), generic(Box(4)), generic(Box(true)), through(Box(4)))"
+        )),
+        expected_tuple([
+            expected_tuple([string("hello"), int(42)]),
+            string("hello"),
+            int(42),
+            string("hello"),
+            int(42),
+            string("hello"),
+        ])
+    );
+    experimental_session()
+        .fail_compilation(&format!(
+            "{declarations}{{ let field = |x| x.value; field(Box(1.5)) }}"
+        ))
+        .expect_trait_impl_not_found("Read", &["Self = float"]);
+
+    // An effect that only what the subscript requires names is an output too: here the
+    // effect of the callback that the body gives to `use_it`.
+    let declarations = indoc! { r#"
+        trait Run<Self |-> ! E> { fn run(x: Self) -> int ! E; }
+        impl Run for <Self = string |-> ! E = fallible> {
+            fn run(x) { idiv(6, string_len(x)) }
+        }
+        impl Run for <Self = int |-> ! E = ()> {
+            fn run(x) { x }
+        }
+        trait Use<Self |-> ! F> { fn use_it(x: Self) -> int ! F; }
+        struct Pair<T, U>(T, U)
+        impl<T, ! E> Use for <Self = Pair<T, (() -> int ! E)> |-> ! F = E>
+        where T: Run<! E = E> {
+            fn use_it(x) { x.1() }
+        }
+        fn pure_only(f: () -> int ! ()) -> int { f() }
+
+        #[private_repr]
+        struct Box<T>(T)
+
+        subscript Box<T>.value(self) -> int {
+            ref {
+                let callback = || run(self.0);
+                let local = use_it(Pair(self.0, callback));
+                yield local
+            }
+        }
+
+        fn of_string() -> int {
+            let field = |x| x.value;
+            field(Box("ab"))
+        }
+        fn of_int() -> int {
+            let field = |x| x.value;
+            field(Box(7))
+        }
+        fn generic<T, ! E>(b: Box<T>) -> int where T: Run<! E = E> {
+            let field = |x| x.value;
+            field(b)
+        }
+    "# };
+    assert_val_eq!(
+        run_experimental_subscript_source(&format!(
+            "{declarations}(of_string(), pure_only(of_int), generic(Box(\"ab\")), pure_only(|| generic(Box(7))))"
+        )),
+        expected_tuple([3, 7, 3, 7].map(int))
+    );
+    experimental_session()
+        .fail_compilation(&format!("{declarations}pure_only(of_string)"))
+        .expect_invalid_effect_inclusion(effect(PrimitiveEffect::Fallible), no_effects());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_declared_field_is_the_same_whenever_its_receiver_is_known() {
+    // An access typed before its receiver follows the rule of one typed after it: the
+    // subscript that the type declares for the field, for a type that stores fields and for
+    // one that stores none.
+    let value = run_experimental_subscript_source(indoc! { r#"
+        #[private_repr]
+        struct Secret {
+            raw: int,
+        }
+
+        subscript Secret.value(self) -> int {
+            ref {
+                let local = self.raw + 1;
+                yield local
+            }
+
+            mut {
+                let mut local = self.raw + 1;
+                yield local;
+                self.raw = local * 10
+            }
+        }
+
+        fn get(x) { x.value }
+        fn set(x: &mut _) { x.value = 7 }
+
+        fn all() -> (int, int, int, int) {
+            let mut secret = Secret { raw: 4 };
+            let before = get(secret);
+            set(secret);
+            let read = |x| x.value;
+            (before, read(secret), get(secret), secret.value)
+        }
+        all()
+    "# });
+    assert_val_eq!(value, expected_tuple([5, 71, 71, 71].map(int)));
+
+    let value = run_experimental_subscript_source(indoc! { r#"
+        enum Choice {
+            Default,
+            Given(int),
+        }
+
+        subscript Choice.value(self) -> int {
+            ref {
+                let local = match self {
+                    Default => 7,
+                    Given(n) => n,
+                };
+                yield local
+            }
+        }
+
+        fn get(x) { x.value }
+
+        fn all() -> (int, int, int) {
+            let read = |x| x.value;
+            (read(Choice::Given(3)), get(Choice::Default), Choice::Given(1).value)
+        }
+        all()
+    "# });
+    assert_val_eq!(value, expected_tuple([3, 7, 1].map(int)));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_implementation_that_reads_a_declared_field_requires_what_its_subscript_requires() {
+    // An implementation for any type that has the field applies to a type that declares it
+    // as a subscript when what the subscript requires holds, effects included.
+    let declarations = indoc! { r#"
+        trait A<Self |-> ! E> { fn run_a(x: Self) -> int ! E; }
+        impl A for <Self = string |-> ! E = fallible> {
+            fn run_a(x) { idiv(6, string_len(x)) }
+        }
+        impl A for <Self = int |-> ! E = ()> {
+            fn run_a(x) { x }
+        }
+
+        #[private_repr]
+        struct Secret<T> {
+            raw: T,
+        }
+
+        subscript Secret<T>.value(self) -> int {
+            ref {
+                let local = run_a(self.raw);
+                yield local
+            }
+        }
+
+        trait Show<Self> { fn show(x: Self) -> int; }
+        struct Wrapper<T>(T)
+        impl<T> Show for Wrapper<T> {
+            fn show(x) { x.0.value }
+        }
+
+        fn generic<T>(x: T) -> int { show(Wrapper(Secret { raw: x })) }
+    "# };
+    assert_val_eq!(
+        run_experimental_subscript_source(&format!(
+            "{declarations}(show(Wrapper(Secret {{ raw: 7 }})), generic(5))"
+        )),
+        expected_tuple([int(7), int(5)])
+    );
+    for missing in ["show(Wrapper(Secret { raw: 1.5 }))", "generic(1.5)"] {
+        experimental_session()
+            .fail_compilation(&format!("{declarations}{missing}"))
+            .expect_trait_impl_not_found("Show", &["Self = Wrapper<Secret<float>>"]);
+    }
+    // `show` is pure, and reading the field of a `Secret<string>` is not.
+    assert!(matches!(
+        experimental_session()
+            .fail_compilation(&format!(
+                "{declarations}show(Wrapper(Secret {{ raw: \"ab\" }}))"
+            ))
+            .into_inner(),
+        CompilationErrorImpl::TraitImplEffectsMismatch { .. }
+    ));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_declared_field_of_a_generic_receiver_keeps_the_instance_of_its_use() {
+    // What the subscript requires of a generic of the function that reads the field is given
+    // to that function, and an output of it is known from there only: here `Out`, which the
+    // types of the access do not name. The use keeps the instance that inference made.
+    let declarations = |body: &str| {
+        formatdoc! { r#"
+            trait Read<Self |-> Out> {{ fn read(x: Self) -> Out; }}
+            impl Read for <Self = int |-> Out = string> {{
+                fn read(x) {{ "hello" }}
+            }}
+            impl Read for <Self = bool |-> Out = int> {{
+                fn read(x) {{ 42 }}
+            }}
+
+            #[private_repr]
+            struct Box<T>(T)
+
+            subscript Box<T>.value(self) -> string {{
+                ref {{
+                    let local = to_string(read(self.0));
+                    yield local
+                }}
+            }}
+
+            fn get(x) {{ x.value }}
+
+            fn generic<T>(b: Box<T>) -> string {{
+                {body}
+            }}
+
+            (generic(Box(4)), generic(Box(true)))
+        "# }
+    };
+    for body in [
+        "b.value",
+        "let field = |x| x.value; field(b)",
+        "get(b)",
+        "let field = |x| x.value; let twice = |x| field(x); twice(b)",
+    ] {
+        assert_val_eq!(
+            run_experimental_subscript_source(&declarations(body)),
+            expected_tuple([string("hello"), string("42")]),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_declared_field_of_a_generic_receiver_requires_and_writes_as_a_use_by_name() {
+    // A subscript that reads a declared field of its generic requires what that field
+    // requires, and so on: each use keeps its instance, also the one that another use makes.
+    let nested = |body: &str| {
+        formatdoc! { r#"
+            trait Read<Self |-> Out> {{ fn read(x: Self) -> Out; }}
+            impl Read for <Self = int |-> Out = string> {{
+                fn read(x) {{ "hello" }}
+            }}
+            impl Read for <Self = bool |-> Out = int> {{
+                fn read(x) {{ 42 }}
+            }}
+
+            #[private_repr]
+            struct Box<T>(T)
+            subscript Box<T>.value(self) -> string {{
+                ref {{
+                    let local = to_string(read(self.0));
+                    yield local
+                }}
+            }}
+
+            #[private_repr]
+            struct Outer<T>(T)
+            subscript Outer<T>.value(self) -> string {{
+                ref {{
+                    let local = string_concat("<", self.0.value);
+                    yield local
+                }}
+            }}
+
+            fn get(x) {{ x.value }}
+
+            {body}
+
+            (generic(Outer(Box(4))), generic(Outer(Box(true))))
+        "# }
+    };
+    for body in [
+        "fn generic<U>(o: Outer<Box<U>>) -> string { o.value }",
+        "fn generic<U>(o: Outer<Box<U>>) -> string { let field = |x| x.value; field(o) }",
+        "fn generic<U>(o: Outer<Box<U>>) -> string { get(o) }",
+        "fn generic<U>(o: Outer<U>) -> string { let field = |x| x.value; field(o) }",
+    ] {
+        assert_val_eq!(
+            run_experimental_subscript_source(&nested(body)),
+            expected_tuple([string("<hello"), string("<42")]),
+            "{body}"
+        );
+    }
+
+    // The body that writes requires `Scale` of the generic of the function.
+    let value = run_experimental_subscript_source(indoc! { r#"
+        trait Scale<Self> { fn scale(x: Self) -> int; }
+        impl Scale for int {
+            fn scale(x) { 10 }
+        }
+        impl Scale for bool {
+            fn scale(x) { 100 }
+        }
+
+        #[private_repr]
+        struct Cell<T> {
+            raw: int,
+            tag: T,
+        }
+
+        subscript Cell<T>.value(self) -> int {
+            ref {
+                let local = self.raw;
+                yield local
+            }
+
+            mut {
+                let mut local = self.raw;
+                yield local;
+                self.raw = local * scale(self.tag)
+            }
+        }
+
+        fn set(x: &mut _) { x.value = 7 }
+
+        fn generic<T>(tag: T) -> (int, int) {
+            let mut cell = Cell { raw: 1, tag };
+            let before = cell.value;
+            set(cell);
+            let read = |x| x.value;
+            (before, read(cell))
+        }
+
+        (generic(1), generic(true))
+    "# });
+    assert_val_eq!(
+        value,
+        expected_tuple([
+            expected_tuple([int(1), int(70)]),
+            expected_tuple([int(1), int(700)]),
+        ])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_implementation_outputs_the_type_of_a_declared_field() {
+    // The type of the field is here an output of what its subscript requires, known once
+    // that is solved: the output of the implementation follows it.
+    let declarations = indoc! { r#"
+        trait Read<Self |-> Out> { fn read(x: Self) -> Out; }
+        impl Read for <Self = int |-> Out = string> {
+            fn read(x) { "hello" }
+        }
+        impl Read for <Self = bool |-> Out = (int) -> int> {
+            fn read(x) {
+                |y| if x {
+                    y
+                } else {
+                    0 - y
+                }
+            }
+        }
+
+        #[private_repr]
+        struct Box<T>(T)
+
+        subscript Box<T>.value(self) -> _ {
+            ref {
+                let local = read(self.0);
+                yield local
+            }
+        }
+
+        struct Wrapper<T>(T)
+        trait Get<Self |-> R> { fn get(x: Self) -> R; }
+        impl<T, R> Get for <Self = Wrapper<T> |-> R = R> {
+            fn get(x) { x.0.value }
+        }
+
+        fn of_int() -> string { get(Wrapper(Box(4))) }
+        fn of_bool() -> int { get(Wrapper(Box(false)))(3) }
+        fn generic(x) { get(Wrapper(Box(x))) }
+    "# };
+    assert_val_eq!(
+        run_experimental_subscript_source(&format!(
+            "{declarations}to_string((of_int(), of_bool(), generic(5), generic(true)(2)))"
+        )),
+        string("(hello, -3, hello, 2)")
+    );
+    experimental_session()
+        .fail_compilation(&format!("{declarations}get(Wrapper(Box(1.5)))"))
+        .expect_trait_impl_not_found("Get", &["Self = Wrapper<Box<float>>"]);
+}

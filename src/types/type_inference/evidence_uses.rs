@@ -117,6 +117,14 @@ impl EvidenceUses {
         data.groups[left].owners.extend(owners);
     }
 
+    /// Whether the obligations of `a` and `b` are one, as two that were merged are.
+    pub fn same(&self, a: ConstraintOrigin, b: ConstraintOrigin) -> bool {
+        match (a.index(), b.index()) {
+            (Some(a), Some(b)) => self.root(a) == self.root(b),
+            _ => false,
+        }
+    }
+
     /// The functions that the obligation of `origin` is of, in a fixed order: `None` stands
     /// for no function.
     pub fn owners(&self, origin: ConstraintOrigin) -> Vec<Option<LocalFunctionId>> {
