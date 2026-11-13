@@ -607,35 +607,16 @@ impl<'a> TraitSolver<'a> {
                 )) = substituted_constraint.as_have_trait()
                 else {
                     debug_assert!(substituted_constraint.as_have_trait().is_none());
-                    let runtime_requirement = match &substituted_constraint {
-                        PubTypeConstraint::ProjectionSubscriptIs {
-                            requirement,
-                            field,
-                            subscript_ty,
-                            ..
-                        } => Some(DictionaryReq::new_projection_subscript(
-                            *requirement,
-                            *field,
-                            subscript_ty.clone(),
-                        )),
-                        PubTypeConstraint::TypeHasVariant {
-                            variant_ty,
-                            tag,
-                            payload_ty,
-                            ..
-                        } => Some(DictionaryReq::new_variant_payload_indirection(
-                            *variant_ty,
-                            *tag,
-                            *payload_ty,
-                        )),
-                        PubTypeConstraint::VariantPayloadLayout { .. } => {
-                            // This is an inference-only trigger. The payload's ordinary `Value`
-                            // leaves are separate constraints and therefore separate runtime
-                            // requirements; the case-qualified trigger has no ABI slot.
-                            continue;
-                        }
-                        _ => None,
-                    };
+                    if matches!(
+                        substituted_constraint,
+                        PubTypeConstraint::VariantPayloadLayout { .. }
+                    ) {
+                        // This is an inference-only trigger. The payload's ordinary `Value`
+                        // leaves are separate constraints and therefore separate runtime
+                        // requirements; the case-qualified trigger has no ABI slot.
+                        continue;
+                    }
+                    let runtime_requirement = substituted_constraint.structural_requirement_key();
                     let queued = ty_inf.obligation_count();
                     let bounds = ty_inf.bound_count();
                     let unresolved = query.unify_non_trait_constraint_query(

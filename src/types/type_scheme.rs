@@ -178,6 +178,34 @@ impl PubTypeConstraint {
         value_trait_id: TraitId,
     ) -> Option<DictionaryReq> {
         match self {
+            Self::VariantPayloadLayout { payload_ty, .. } => Some(DictionaryReq::new_trait_impl(
+                value_trait_id,
+                vec![*payload_ty],
+                Vec::new(),
+                Vec::new(),
+            )),
+            Self::HaveTrait {
+                trait_id,
+                input_tys,
+                output_tys,
+                output_effs,
+                ..
+            } => Some(DictionaryReq::new_trait_impl(
+                *trait_id,
+                input_tys.clone(),
+                output_tys.clone(),
+                output_effs.clone(),
+            )),
+            Self::ProjectionSubscriptIs { .. }
+            | Self::TypeHasVariant { .. }
+            | Self::TupleAtIndexIs { .. } => self.structural_requirement_key(),
+        }
+    }
+
+    /// The dictionary key of a constraint on the structure of a type: a field, an element of a
+    /// tuple, which is the field of its index, or a variant. None for another constraint.
+    pub(crate) fn structural_requirement_key(&self) -> Option<DictionaryReq> {
+        match self {
             Self::ProjectionSubscriptIs {
                 requirement,
                 field,
@@ -198,24 +226,6 @@ impl PubTypeConstraint {
                 *tag,
                 *payload_ty,
             )),
-            Self::VariantPayloadLayout { payload_ty, .. } => Some(DictionaryReq::new_trait_impl(
-                value_trait_id,
-                vec![*payload_ty],
-                Vec::new(),
-                Vec::new(),
-            )),
-            Self::HaveTrait {
-                trait_id,
-                input_tys,
-                output_tys,
-                output_effs,
-                ..
-            } => Some(DictionaryReq::new_trait_impl(
-                *trait_id,
-                input_tys.clone(),
-                output_tys.clone(),
-                output_effs.clone(),
-            )),
             Self::TupleAtIndexIs {
                 origin: _,
                 tuple_ty,
@@ -230,7 +240,8 @@ impl PubTypeConstraint {
                 index_span.use_site,
                 *element_ty,
             )
-            .dictionary_requirement_key(value_trait_id),
+            .structural_requirement_key(),
+            Self::VariantPayloadLayout { .. } | Self::HaveTrait { .. } => None,
         }
     }
 

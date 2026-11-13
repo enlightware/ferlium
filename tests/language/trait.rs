@@ -2412,6 +2412,81 @@ fn a_generic_function_applies_the_output_of_an_implementation() {
     }
 }
 
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_implementation_reads_the_elements_of_a_tuple() {
+    // An element of a tuple is required as a field is, and a use of the implementation gives
+    // the evidence of each.
+    let declarations = indoc! { r#"
+        struct Wrapper<T>(T)
+
+        trait Pick<Self |-> R> { fn pick(x: Self, first: bool) -> R; }
+        impl<T, R> Pick for <Self = Wrapper<T> |-> R = R> {
+            fn pick(x, first) {
+                if first {
+                    x.0.0
+                } else {
+                    x.0.1
+                }
+            }
+        }
+        trait Total<Self |-> R> { fn total(x: Self) -> R; }
+        impl<T, R> Total for <Self = Wrapper<T> |-> R = R> {
+            fn total(x) { x.0.0 + x.0.1.0 + x.0.1.1 }
+        }
+        trait Mixed<Self |-> R> { fn mixed(x: Self) -> R; }
+        impl<T, R> Mixed for <Self = Wrapper<T> |-> R = R> {
+            fn mixed(x) {
+                if x.0.flag.0 {
+                    x.0.pair.1
+                } else {
+                    x.0.other.0.name
+                }
+            }
+        }
+        trait Third<Self |-> R> { fn third(x: Self) -> R; }
+        impl<T, R> Third for <Self = Wrapper<Wrapper<T>> |-> R = R> {
+            fn third(x) { x.0.0.2 }
+        }
+        trait Deep<Self |-> R> { fn deep(x: Self) -> R; }
+        impl<T, R> Deep for <Self = Wrapper<T> |-> R = R> {
+            fn deep(x) { third(Wrapper(Wrapper(x.0.1))) }
+        }
+        trait Bump<Self> { fn bump(x: &mut Self); }
+        impl<T> Bump for <Self = Wrapper<T>> {
+            fn bump(x) { x.0.1 = x.0.1 + 1 }
+        }
+    "# };
+    let uses = indoc! { r#"
+        fn picked() -> (int, int) { (pick(Wrapper((1, 2)), true), pick(Wrapper((1, 2)), false)) }
+        fn totals() -> (int, float) {
+            (total(Wrapper((1, (2, 3)))), total(Wrapper((1.5, (2.0, 3.0)))))
+        }
+        fn of_a_record() -> string {
+            mixed(Wrapper({ flag: (false, 1), pair: (1, "a"), other: ({ name: "b" }, 2) }))
+        }
+        fn generic(a, b) { pick(Wrapper((a, b)), true) }
+        fn through() -> float { deep(Wrapper((1, (1, "a", 2.5)))) }
+        fn written() -> int {
+            let mut w = Wrapper(("a", 1));
+            bump(w);
+            bump(w);
+            w.0.1
+        }
+    "# };
+    let result =
+        "to_string((picked(), totals(), of_a_record(), generic(4, 5), through(), written()))";
+    for source in [
+        format!("{declarations}{uses}{result}"),
+        format!("{uses}{declarations}{result}"),
+    ] {
+        assert_val_eq!(
+            TestSession::new().run(&source),
+            string("((1, 2), (6, 6.5), b, 4, 2.5, 3)")
+        );
+    }
+}
+
 fn missing_requirement_of_default_method(source: &str) -> Option<MissingRequirement> {
     let error = TestSession::new().fail_compilation(source).into_inner();
     let CompilationErrorImpl::InvalidTraitDefinition {
