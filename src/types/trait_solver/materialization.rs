@@ -98,6 +98,31 @@ impl BlanketMethodRequirements {
     }
 }
 
+/// Whether an implementation's inputs determine its outputs, as declared: every type and effect
+/// variable of its outputs occurs in its input types. An application of such an implementation is
+/// the same whatever outputs a request names. Nothing flowing through a constraint counts: effects
+/// never select an implementation, so the one a constraint selects may take an effect of its own,
+/// which only a request chooses, at any depth of the types it gives.
+fn declared_outputs_follow_from_inputs(imp: &TraitImpl) -> bool {
+    let mut ty_vars = FxHashSet::default();
+    let mut effect_vars = FxHashSet::default();
+    for ty in &imp.input_tys {
+        ty_vars.extend(ty.inner_ty_vars());
+        ty.fill_with_inner_effect_vars(&mut effect_vars);
+    }
+    let mut output_effect_vars = FxHashSet::default();
+    for ty in &imp.output_tys {
+        if !ty.inner_ty_vars().iter().all(|var| ty_vars.contains(var)) {
+            return false;
+        }
+        ty.fill_with_inner_effect_vars(&mut output_effect_vars);
+    }
+    for eff in &imp.output_effs {
+        eff.fill_with_inner_effect_vars(&mut output_effect_vars);
+    }
+    output_effect_vars.is_subset(&effect_vars)
+}
+
 /// Materialized constants have capture-free literal getters; only method thunks
 /// contribute evidence requirements to a blanket implementation's dictionary.
 fn blanket_dictionary(
@@ -866,6 +891,7 @@ impl<'a> TraitSolver<'a> {
                 &self.impls
             };
             let imp = &impls.data[impl_id.as_index()];
+            let determined = declared_outputs_follow_from_inputs(imp);
             // Self evidence belongs to method execution, not to blanket selection.
             // The selected dictionary supplies it through the existing entry mapping.
             let method_requirements = self.blanket_method_requirements(
@@ -990,7 +1016,10 @@ impl<'a> TraitSolver<'a> {
             .with_associated_const_getters(associated_const_getters);
             // A generated dictionary denotes its full application, outputs included: it is
             // indexed by its request and by the outputs it has, so that a later request
-            // naming either finds it, and never serves another application.
+            // naming either finds it, and never serves another application. When its
+            // implementation's inputs determine its outputs, it is the application of these
+            // inputs, also indexed by them alone: a request naming its outputs otherwise, or not
+            // at all, finds it if they match.
             let local_impl_id = self.impls.add_anonymous_dictionary_struct(imp);
             let requested_key = application_key(
                 trait_id,
@@ -1001,8 +1030,13 @@ impl<'a> TraitSolver<'a> {
             let resulting_key =
                 application_key(trait_id, input_tys, Some(&output_tys), Some(&output_effs));
             self.record_generated_source(local_impl_id, imp_module_id, impl_id);
+            let keys = Rc::make_mut(&mut self.impls.application_key_to_id);
             for key in [requested_key, resulting_key] {
-                Rc::make_mut(&mut self.impls.application_key_to_id).insert(key, local_impl_id);
+                keys.insert(key, local_impl_id);
+            }
+            if determined {
+                keys.entry(application_key(trait_id, input_tys, None, None))
+                    .or_insert(local_impl_id);
             }
 
             return Ok(Some(

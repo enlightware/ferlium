@@ -283,6 +283,26 @@ impl<'a> TraitSolver<'a> {
                     local_impl_id,
                 ));
             }
+            // The application its inputs determine serves a request naming outputs it has.
+            if requested_output_tys.is_some() || requested_output_effs.is_some() {
+                let inputs_key = application_key(trait_id, input_tys, None, None);
+                if let Some(local_impl_id) =
+                    self.impls.application_key_to_id.get(&inputs_key).copied()
+                    && self.generated_impl_is_visible(local_impl_id)
+                    && self.impl_matches_requested_outputs(
+                        &self.impls.data[local_impl_id.as_index()],
+                        requested_output_tys,
+                        requested_output_effs,
+                        &quantified_effect_vars,
+                        fn_span,
+                    )
+                {
+                    return Ok(TraitImplId::new(
+                        self.current_type_items.module.id,
+                        local_impl_id,
+                    ));
+                }
+            }
         }
         if self.solving_stack.contains(&key) {
             return Err(internal_compilation_error!(TraitSolverCycleDetected {
