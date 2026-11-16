@@ -2894,10 +2894,10 @@ mod tests {
         session.set_mir_optimization(MirOptimization::Disabled);
         session.set_allow_experimental(true);
         let support = session.compile(
-            "pub trait Describe<Self> { fn describe(value: Self) -> int; } impl Describe for int { fn describe(value: int) -> int { value } } pub struct Wrapper<T>(T) impl<T> Describe for Wrapper<T> where T: Describe, T: Value { fn describe(value: Wrapper<T>) -> int { describe(value.0) + 1 } } pub fn forward<T>(value: T) -> int where T: Describe, T: Value { describe(value) }
+            "pub trait Describe<Self> { fn describe(value: Self) -> int; } impl Describe for int { fn describe(value: int) -> int { value } } pub struct Wrapper<T>(T) impl<T> Describe for Wrapper<T> where T: Describe { fn describe(value: Wrapper<T>) -> int { describe(value.0) + 1 } } pub fn forward<T>(value: T) -> int where T: Describe { describe(value) }
              pub trait Tag<Self> { fn tag(value: Self) -> int; } impl<A> Tag for Wrapper<A> { fn tag(value: Wrapper<A>) -> int { 42 } } pub fn tagged<T>(value: T) -> int where T: Tag { tag(value) }
              pub fn tag_wrapped<U>(value: U) -> int { tagged(Wrapper(value)) }
-             pub subscript cell<T>(x: &mut T) -> T where T: Value { ref { let v = x; yield v; } mut { let mut v = x; yield v; x = v; } }",
+             pub subscript cell<T>(x: &mut T) -> T where nothing { ref { let v = x; yield v; } mut { let mut v = x; yield v; x = v; } }",
             "generic_traits", Path::single_str("generic_traits"),
         ).unwrap().module_id;
         session

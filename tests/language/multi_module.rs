@@ -2021,7 +2021,7 @@ fn an_impl_is_private_only_through_its_owning_input() {
     }
 }
 
-const SEALED_MODULE: &str = "#[sealed]\npub trait Shape<Self> { fn area(x: Self) -> int ! fallible; }\npub struct Square(int)\nimpl Shape for Square { fn area(x: Square) -> int { x.0 * x.0 } }\nimpl<T> Shape for [T] where T: Shape, T: Value { fn area(x: [T]) -> int { area(x[0]) } }";
+const SEALED_MODULE: &str = "#[sealed]\npub trait Shape<Self> { fn area(x: Self) -> int ! fallible; }\npub struct Square(int)\nimpl Shape for Square { fn area(x: Square) -> int { x.0 * x.0 } }\nimpl<T> Shape for [T] where T: Shape { fn area(x: [T]) -> int { area(x[0]) } }";
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
@@ -2805,7 +2805,7 @@ fn private_recursive_value_evidence_is_constructed_in_exported_bodies() {
         "a",
         r#"
         enum List<T> { Empty, Cons(T, List<T>) }
-        pub fn f<T>(x: T) -> string where T: Value {
+        pub fn f<T>(x: T) -> string where nothing {
             let values: List<T> = List::Cons(x, List::Empty);
             to_string(values)
         }
@@ -3280,10 +3280,10 @@ fn generated_recursive_value_constructs_custom_members_from_self() {
                         r#"
                 struct Cell<T>({field})
                 {items}
-                {make_visibility} fn make<T>(x: T) -> List<T> where T: Value {{
+                {make_visibility} fn make<T>(x: T) -> List<T> where nothing {{
                     {construction}
                 }}
-                pub fn f<T>(x: T) -> string where T: Value {{
+                pub fn f<T>(x: T) -> string where nothing {{
                     let values = make(x);
                     let other = values;
                     assert(eq(values, other));
@@ -3327,7 +3327,7 @@ fn recursive_value_evidence_crosses_multiple_custom_members() {
         }
         enum List<T> { Nil, Cons(T, Cell<Cell<Tree<T>>>) }
         enum Tree<T> { End, Next(List<T>) }
-        pub fn f<T>(x: T) -> string where T: Value {
+        pub fn f<T>(x: T) -> string where nothing {
             let value = List::Cons(x, Cell(Some(Cell(Some(Tree::Next(List::Nil))))));
             let other = value;
             assert(eq(value, other));
@@ -3371,7 +3371,7 @@ fn private_value_prerequisite_cycles_still_need_a_generated_anchor() {
             struct B<T>(T)
             {first}
             {second}
-            pub fn f<T>(x: T) -> string where T: Value, .. {{ to_string(A(x)) }}
+            pub fn f<T>(x: T) -> string where .. {{ to_string(A(x)) }}
         "#
         );
         assert!(

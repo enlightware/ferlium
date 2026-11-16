@@ -761,7 +761,7 @@ fn overlapping_trait_impls_are_shown_with_their_written_generics() {
         trait Tr<Self> { fn go(x: Self) -> int; }
         struct P<A, B>(A, B)
         struct Cb<! F>(() -> int ! F)
-        impl<U, T ! X> Tr for P<(T, Cb<! X>), U> where T: Num, U: Value {
+        impl<U, T ! X> Tr for P<(T, Cb<! X>), U> where T: Num {
             fn go(x: P<(T, Cb<! X>), U>) -> int { 1 }
         }
         impl<V ! Y> Tr for P<(V, Cb<! Y>), V> where V: Num {
@@ -778,7 +778,7 @@ fn overlapping_trait_impls_are_shown_with_their_written_generics() {
             assert_eq!(input_tys, ["Self = P<(V, Cb<! Y>), V>"]);
             assert_eq!(
                 existing_impl.display(&trait_ref).to_string(),
-                "impl<T, U ! X> Tr for P<(T, Cb<! X>), U> where T: Num, U: Value"
+                "impl<T, U ! X> Tr for P<(T, Cb<! X>), U> where T: Num"
             );
         }
         other => panic!("expected OverlappingTraitImpls, got {other:?}"),
@@ -1126,7 +1126,7 @@ fn trait_impl_outputs_can_be_determined_through_constraint_outputs() {
         session.run(indoc! { r#"
             trait First<Self |-> Out> { fn first(x: Self) -> Out; }
             struct Wrap<I>(I)
-            impl<I, T> First for <Self = Wrap<I> |-> Out = Option<T>> where I: Iterator<Item = T>, I: Value {
+            impl<I, T> First for <Self = Wrap<I> |-> Out = Option<T>> where I: Iterator<Item = T> {
                 fn first(x: Wrap<I>) -> Option<T> {
                     let mut it = x.0;
                     next(it)
@@ -1151,7 +1151,7 @@ fn blanket_impls_with_inferred_field_requirements_overlap() {
         impl<T> Get for <Self = T> {
             fn get(s) { s.v }
         }
-        impl<T> Get for <Self = W<T>> where T: Get, T: Value {
+        impl<T> Get for <Self = W<T>> where T: Get {
             fn get(s) { get(s.0) }
         }
     "# });
@@ -1172,8 +1172,7 @@ fn impl_overlap_accounts_for_trait_output_bindings() {
 
         impl<I, T> Adapter for <Self = I |-> Output = I>
         where
-            I: Iterator<Item = T>,
-            I: Value
+            I: Iterator<Item = T>
         {
             fn adapt(value: I) -> I {
                 value
@@ -1181,9 +1180,7 @@ fn impl_overlap_accounts_for_trait_output_bindings() {
         }
 
         impl<A> Adapter for <Self = [A] |-> Output = ArrayIterator<A>>
-        where
-            A: Value
-        {
+        where nothing {
             fn adapt(value: [A]) -> ArrayIterator<A> {
                 iter(value)
             }
@@ -1219,8 +1216,7 @@ fn matching_trait_output_bindings_still_reject_real_overlap() {
 
         impl<I, T> Adapter for <Self = I |-> Output = I>
         where
-            I: Iterator<Item = T>,
-            I: Value
+            I: Iterator<Item = T>
         {
             fn adapt(value: I) -> I {
                 value

@@ -99,8 +99,7 @@ fn black_box_preserves_its_argument() {
         session.run(
             r#"
             subscript cell<T>(slot: &mut T) -> T
-            where T: Value
-            {
+            where nothing {
                 ref {
                     let local = slot;
                     yield local

@@ -462,7 +462,7 @@ fn nested_selection_relates_callback_effects_by_polarity() {
                 fn ignore(s: Base, f: () -> int ! fallible) -> int { 1 }
             }
             impl<T> Outer for <Self = Wrap<T>>
-            where T: Ignore<! E = ()>, T: Value {
+            where T: Ignore<! E = ()> {
                 fn outer(s: Wrap<T>) -> int { ignore(s.0, || 2) }
             }
             outer(Wrap(Base))
@@ -1008,7 +1008,7 @@ fn unused_effect_generics_in_a_group_disappear() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn group_with_effect_generics_passes_dictionaries() {
-    let f = "fn f<T ! E>(x: T, g: () -> int ! E, n: int) -> T where T: Num, T: Value {
+    let f = "fn f<T ! E>(x: T, g: () -> int ! E, n: int) -> T where T: Num {
         if n > 0 {
             h(x + x, g, n - 1)
         } else {
@@ -1016,7 +1016,7 @@ fn group_with_effect_generics_passes_dictionaries() {
             x
         }
     }";
-    let h = "fn h<U ! F>(x: U, g: () -> int ! F, n: int) -> U where U: Num, U: Value {
+    let h = "fn h<U ! F>(x: U, g: () -> int ! F, n: int) -> U where U: Num {
         if n > 0 {
             f(x * x, g, n - 1)
         } else {
@@ -1717,7 +1717,7 @@ fn returned_closure_takes_the_generic_it_captures() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn given_does_not_serve_a_concrete_query() {
-    let src = "fn f<T>(x: T) -> T where T: Num, T: Value {
+    let src = "fn f<T>(x: T) -> T where T: Num {
         let a: int = 1 + 2;
         if a > 2 {
             x + x
@@ -1743,7 +1743,7 @@ fn given_serves_an_inferred_query_that_becomes_the_generic() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn given_serves_an_inferred_query_in_a_group_with_contracts() {
-    let src = "fn f<T ! E>(x: T, g: () -> int ! E, n: int) -> T where T: Num, T: Value {
+    let src = "fn f<T ! E>(x: T, g: () -> int ! E, n: int) -> T where T: Num {
         let add = |a, b| a + b;
         if n > 0 {
             add(f(x, g, n - 1), x)
@@ -1866,7 +1866,7 @@ fn a_written_effect_in_a_requirement_of_a_group_stays_that_generic() {
             fn check(x: Pair<int, (() -> int ! E)>) -> int { 7 }
         }
         fn f<T, ! E>(x: T, g: () -> int ! E, n: int) -> int
-        where T: Value, Pair<T, (() -> int ! E)>: Check {
+        where Pair<T, (() -> int ! E)>: Check {
             if n > 0 { f(x, g, n - 1) }
             else { check(Pair(x, g)) }
         }
@@ -2512,7 +2512,7 @@ impl<! E> Tr for <Self = Pair<int, (() -> int ! E)> |-> ! Out = E> {
     fn tr(x: Pair<int, (() -> int ! E)>) -> int { (x.1)() }
 }
 fn step<T, ! E, O>(x: T, g: () -> int ! E) -> (() -> int ! O)
-where Pair<T, (() -> int ! E)>: Tr<! Out = O>, T: Value {
+where Pair<T, (() -> int ! E)>: Tr<! Out = O> {
     || tr(Pair(x, g))
 }";
     let body = "{
@@ -2532,7 +2532,7 @@ where Pair<T, (() -> int ! E)>: Tr<! Out = O>, T: Value {
         TestSession::new().run(&format!(
             "{prelude}
 fn f<T, ! E>(x: T, g: () -> int ! E, n: int) -> int
-where Pair<T, (() -> int ! E)>: Tr<! Out = E>, T: Value {body}
+where Pair<T, (() -> int ! E)>: Tr<! Out = E> {body}
 f(3, || 1, 2)"
         )),
         int(0)
@@ -2890,7 +2890,7 @@ const CALL_THROUGH_TRAIT: &str = indoc! { r#"
 const PURE_RUN_SERIALIZER: &str = indoc! { r#"
     struct Wrap<T>(T)
     impl<T> Serialize for Wrap<T>
-    where T: Run<! E = ()>, T: Value {
+    where T: Run<! E = ()> {
         fn serialize(x: Wrap<T>) -> DataValue {
             serialize(run(x.0))
         }
@@ -2916,7 +2916,7 @@ fn impl_inputs_cannot_fix_effects() {
         // Also through aliases, nested, and left unwritten.
         "impl Pick for Box<Pure> { fn pick(x: Box<Pure>) -> int { 1 } }",
         "impl Pick for Box<Failing> { fn pick(x: Box<Failing>) -> int { 2 } }",
-        "impl<T> Pick for Box<(T, Pure)> where T: Value { fn pick(x: Box<(T, Pure)>) -> int { 1 } }",
+        "impl<T> Pick for Box<(T, Pure)> where nothing { fn pick(x: Box<(T, Pure)>) -> int { 1 } }",
         "impl Pick for Box<() -> int> { fn pick(x: Box<() -> int>) -> int { 1 } }",
     ] {
         expect_input_restriction(
@@ -2957,7 +2957,7 @@ fn a_repeated_type_variable_equates_the_effects_of_the_caller() {
         trait Tr<Self |-> ! E> {{ fn go(x: Self) -> int ! E; }}
         struct Pair<A, B>(A, B)
         impl<T ! F> Tr for <Self = Pair<T, T> |-> ! E = F>
-        where T: Run<! E = F>, T: Value {{
+        where T: Run<! E = F> {{
             fn go(x: Pair<T, T>) -> int {{ run(x.0) + run(x.1) }}
         }}"
     );
@@ -3075,10 +3075,10 @@ type Failing = () -> int ! fallible;
 struct Pair<A, B>(A, B)
 struct Mark<T>(T)
 trait Select<Self, Other> { fn select(x: Self, y: Other) -> int; }
-impl<T> Select for <Self = Pair<T, T>, Other = Mark<int>> where T: Value {
+impl<T> Select for <Self = Pair<T, T>, Other = Mark<int>> where nothing {
     fn select(x: Pair<T, T>, y: Mark<int>) -> int { 1 }
 }
-impl<A, B> Select for <Self = Pair<A, B>, Other = Mark<bool>> where A: Value, B: Value {
+impl<A, B> Select for <Self = Pair<A, B>, Other = Mark<bool>> where nothing {
     fn select(x: Pair<A, B>, y: Mark<bool>) -> int { 2 }
 }
 let a: Cb<Pure> = Cb(|| 5);
@@ -3092,10 +3092,10 @@ type Failing = () -> int ! fallible;
 struct Pair<A, B>(A, B)
 struct Mark<T>(T)
 trait Select<Self, Other> { fn select(x: Self, y: Other) -> int; }
-impl<A, B> Select for <Self = Pair<A, B>, Other = Mark<bool>> where A: Value, B: Value {
+impl<A, B> Select for <Self = Pair<A, B>, Other = Mark<bool>> where nothing {
     fn select(x: Pair<A, B>, y: Mark<bool>) -> int { 2 }
 }
-impl<T> Select for <Self = Pair<T, T>, Other = Mark<int>> where T: Value {
+impl<T> Select for <Self = Pair<T, T>, Other = Mark<int>> where nothing {
     fn select(x: Pair<T, T>, y: Mark<int>) -> int { 1 }
 }
 let a: Cb<Pure> = Cb(|| 5);
@@ -3122,10 +3122,10 @@ impl<! E> Source for <Self = X<(() -> int ! E)> |-> Item = Cb<(() -> int ! E)>> 
     fn source(x: X<(() -> int ! E)>) -> Cb<(() -> int ! E)> { Cb(x.0) }
 }
 trait R<Self> { fn r(x: Self) -> int; }
-impl<T> R for W<T> where T: Value, X<T>: Source<Item = Cb<Pure>> {
+impl<T> R for W<T> where X<T>: Source<Item = Cb<Pure>> {
     fn r(x: W<T>) -> int { 1 }
 }
-impl<T> R for W<T> where T: Value, X<T>: Source<Item = Cb<Failing>> {
+impl<T> R for W<T> where X<T>: Source<Item = Cb<Failing>> {
     fn r(x: W<T>) -> int { 2 }
 }
 let pure: Pure = || 5;
@@ -3143,10 +3143,10 @@ impl<! E> Source for <Self = X<(() -> int ! E)> |-> Item = Cb<(() -> int ! E)>> 
     fn source(x: X<(() -> int ! E)>) -> Cb<(() -> int ! E)> { Cb(x.0) }
 }
 trait R<Self> { fn r(x: Self) -> int; }
-impl<T> R for W<T> where T: Value, X<T>: Source<Item = Cb<Failing>> {
+impl<T> R for W<T> where X<T>: Source<Item = Cb<Failing>> {
     fn r(x: W<T>) -> int { 2 }
 }
-impl<T> R for W<T> where T: Value, X<T>: Source<Item = Cb<Pure>> {
+impl<T> R for W<T> where X<T>: Source<Item = Cb<Pure>> {
     fn r(x: W<T>) -> int { 1 }
 }
 let pure: Pure = || 5;
@@ -3180,7 +3180,7 @@ trait Source<Self |-> Item> { fn source(x: Self) -> Item; }
 impl<! E> Source for <Self = Cb<! E> |-> Item = Out<(() -> int ! E)>> {
     fn source(x: Cb<! E>) -> Out<(() -> int ! E)> { Out(x.0) }
 }
-impl<T> Serialize for W<T> where T: Value, T: Source<Item = Out<Pure>> {
+impl<T> Serialize for W<T> where T: Source<Item = Out<Pure>> {
     fn serialize(x: W<T>) -> DataValue { serialize(1) }
 }
 impl<! E> Serialize for Cb<! E> {
@@ -3211,7 +3211,7 @@ impl<! F> Default for Cb<! F> {
     fn default() -> Cb<! F> { Cb(|| 5) }
 }
 struct Wrap<T>(T)
-impl<T> Default for Wrap<T> where T: Value, T: Default, T: Run<! E = ()> {
+impl<T> Default for Wrap<T> where T: Default, T: Run<! E = ()> {
     fn default() -> Wrap<T> { Wrap(default()) }
 }
 enum Maybe<! F> { #[default] None, Some(Wrap<Cb<! F>>) }
@@ -3235,10 +3235,10 @@ impl Source for <Self = Seed<int> |-> Item = Cb<Failing>> {
  fn source(x: Seed<int>) -> Cb<Failing> { Cb(||idiv(4,2)) }
 }
 trait R<Self> { fn r(x: Self) -> int; }
-impl<T> R for W<T> where T: Value, Seed<T>: Source<Item = Cb<Pure>> {
+impl<T> R for W<T> where Seed<T>: Source<Item = Cb<Pure>> {
  fn r(x: W<T>) -> int { 1 }
 }
-impl<T> R for W<T> where T: Value, Seed<T>: Source<Item = Cb<Failing>> {
+impl<T> R for W<T> where Seed<T>: Source<Item = Cb<Failing>> {
  fn r(x: W<T>) -> int { 2 }
 }
 r(W(0))"# },
@@ -3253,10 +3253,10 @@ impl Source for <Self = Seed<int> |-> Item = Cb<Failing>> {
  fn source(x: Seed<int>) -> Cb<Failing> { Cb(||idiv(4,2)) }
 }
 trait R<Self> { fn r(x: Self) -> int; }
-impl<T> R for W<T> where T: Value, Seed<T>: Source<Item = Cb<Failing>> {
+impl<T> R for W<T> where Seed<T>: Source<Item = Cb<Failing>> {
  fn r(x: W<T>) -> int { 2 }
 }
-impl<T> R for W<T> where T: Value, Seed<T>: Source<Item = Cb<Pure>> {
+impl<T> R for W<T> where Seed<T>: Source<Item = Cb<Pure>> {
  fn r(x: W<T>) -> int { 1 }
 }
 r(W(0))"# },
@@ -3289,11 +3289,11 @@ impl<! E> Run for <Self = Cb<(() -> int ! E)> |-> ! E = E> {
 }
 trait Pick<Self, Other> { fn pick(x: Self, y: Other) -> int; }
 impl<T> Pick for <Self = Cb<T>, Other = W<int>>
-where T: Value, Cb<T>: Run<! E = ()> {
+where Cb<T>: Run<! E = ()> {
  fn pick(x: Cb<T>, y: W<int>) -> int { 1 }
 }
 impl<T> Pick for <Self = Cb<T>, Other = W<float>>
-where T: Value, Cb<T>: Run<! E = fallible> {
+where Cb<T>: Run<! E = fallible> {
  fn pick(x: Cb<T>, y: W<float>) -> int { 2 }
 }
 type F = () -> int ! ();
@@ -3309,11 +3309,11 @@ impl<! E> Run for <Self = Cb<(() -> int ! E)> |-> ! E = E> {
 }
 trait Pick<Self, Other> { fn pick(x: Self, y: Other) -> int; }
 impl<T> Pick for <Self = Cb<T>, Other = W<float>>
-where T: Value, Cb<T>: Run<! E = fallible> {
+where Cb<T>: Run<! E = fallible> {
  fn pick(x: Cb<T>, y: W<float>) -> int { 2 }
 }
 impl<T> Pick for <Self = Cb<T>, Other = W<int>>
-where T: Value, Cb<T>: Run<! E = ()> {
+where Cb<T>: Run<! E = ()> {
  fn pick(x: Cb<T>, y: W<int>) -> int { 1 }
 }
 type F = () -> int ! ();
@@ -3333,11 +3333,11 @@ impl<! E> Run for <Self = Cb<(() -> int ! E)> |-> ! E = E> {
 }
 trait Pick<Self, Other> { fn pick(x: Self, y: Other) -> int; }
 impl<T> Pick for <Self = Cb<T>, Other = W<int>>
-where T: Value, Cb<T>: Run<! E = ()> {
+where Cb<T>: Run<! E = ()> {
  fn pick(x: Cb<T>, y: W<int>) -> int { 1 }
 }
 impl<T> Pick for <Self = Cb<T>, Other = W<float>>
-where T: Value, Cb<T>: Run<! E = fallible> {
+where Cb<T>: Run<! E = fallible> {
  fn pick(x: Cb<T>, y: W<float>) -> int { 2 }
 }
 type F = () -> int ! fallible;
@@ -3353,11 +3353,11 @@ impl<! E> Run for <Self = Cb<(() -> int ! E)> |-> ! E = E> {
 }
 trait Pick<Self, Other> { fn pick(x: Self, y: Other) -> int; }
 impl<T> Pick for <Self = Cb<T>, Other = W<float>>
-where T: Value, Cb<T>: Run<! E = fallible> {
+where Cb<T>: Run<! E = fallible> {
  fn pick(x: Cb<T>, y: W<float>) -> int { 2 }
 }
 impl<T> Pick for <Self = Cb<T>, Other = W<int>>
-where T: Value, Cb<T>: Run<! E = ()> {
+where Cb<T>: Run<! E = ()> {
  fn pick(x: Cb<T>, y: W<int>) -> int { 1 }
 }
 type F = () -> int ! fallible;
@@ -3392,10 +3392,10 @@ trait Gate<Self> { fn gate(x: Self) -> int; }
 impl<! E> Source for <Self = Cb<(() -> int ! E)> |-> Item = Out<(() -> int ! E)>> {
  fn source(x: Cb<(() -> int ! E)>) -> Out<(() -> int ! E)> { Out(x.0) }
 }
-impl<T> Gate for Inner<T> where T: Value, T: Source<Item = Out<Failing>> {
+impl<T> Gate for Inner<T> where T: Source<Item = Out<Failing>> {
  fn gate(x: Inner<T>) -> int { 1 }
 }
-impl<T> Serialize for Outer<T> where T: Value, Inner<T>: Gate {
+impl<T> Serialize for Outer<T> where Inner<T>: Gate {
  fn serialize(x: Outer<T>) -> DataValue { serialize(1) }
 }
 impl<! E> Serialize for Cb<(() -> int ! E)> {
@@ -3416,10 +3416,10 @@ trait Gate<Self> { fn gate(x: Self) -> int; }
 impl<! E> Serialize for Cb<(() -> int ! E)> {
  fn serialize(x: Cb<(() -> int ! E)>) -> DataValue { serialize(2) }
 }
-impl<T> Serialize for Outer<T> where T: Value, Inner<T>: Gate {
+impl<T> Serialize for Outer<T> where Inner<T>: Gate {
  fn serialize(x: Outer<T>) -> DataValue { serialize(1) }
 }
-impl<T> Gate for Inner<T> where T: Value, T: Source<Item = Out<Failing>> {
+impl<T> Gate for Inner<T> where T: Source<Item = Out<Failing>> {
  fn gate(x: Inner<T>) -> int { 1 }
 }
 impl<! E> Source for <Self = Cb<(() -> int ! E)> |-> Item = Out<(() -> int ! E)>> {
@@ -3451,10 +3451,10 @@ trait Gate<Self> { fn gate(x: Self) -> int; }
 impl<! E> Source for <Self = Cb<(() -> int ! E)> |-> Item = Out<(() -> int ! E)>> {
  fn source(x: Cb<(() -> int ! E)>) -> Out<(() -> int ! E)> { Out(x.0) }
 }
-impl<T> Gate for Inner<T> where T: Value, T: Source<Item = Out<Failing>> {
+impl<T> Gate for Inner<T> where T: Source<Item = Out<Failing>> {
  fn gate(x: Inner<T>) -> int { 1 }
 }
-impl<T> Serialize for Outer<T> where T: Value, Inner<T>: Gate {
+impl<T> Serialize for Outer<T> where Inner<T>: Gate {
  fn serialize(x: Outer<T>) -> DataValue { serialize(1) }
 }
 impl<! E> Serialize for Cb<(() -> int ! E)> {
@@ -3475,10 +3475,10 @@ trait Gate<Self> { fn gate(x: Self) -> int; }
 impl<! E> Serialize for Cb<(() -> int ! E)> {
  fn serialize(x: Cb<(() -> int ! E)>) -> DataValue { serialize(2) }
 }
-impl<T> Serialize for Outer<T> where T: Value, Inner<T>: Gate {
+impl<T> Serialize for Outer<T> where Inner<T>: Gate {
  fn serialize(x: Outer<T>) -> DataValue { serialize(1) }
 }
-impl<T> Gate for Inner<T> where T: Value, T: Source<Item = Out<Failing>> {
+impl<T> Gate for Inner<T> where T: Source<Item = Out<Failing>> {
  fn gate(x: Inner<T>) -> int { 1 }
 }
 impl<! E> Source for <Self = Cb<(() -> int ! E)> |-> Item = Out<(() -> int ! E)>> {
@@ -3587,7 +3587,7 @@ const DEFAULT_METHOD_HELPERS: &str = indoc! { r#"
     }
     struct W<T>(T)
     trait Pure<Self> { fn pure(x: Self) -> int; }
-    impl<T> Pure for W<T> where T: Run<! E = ()>, T: Value {
+    impl<T> Pure for W<T> where T: Run<! E = ()> {
         fn pure(x: W<T>) -> int { run(x.0) }
     }
     struct M<! F>(() -> int ! F)
@@ -3643,7 +3643,7 @@ fn effect_independent_selection_holds_across_modules() {
         }
         pub struct Wrap<T>(T)
         pub fn wrap<T>(x: T) -> Wrap<T> { Wrap(x) }
-        impl<T> Serialize for Wrap<T> where T: Run<! E = ()>, T: Value {
+        impl<T> Serialize for Wrap<T> where T: Run<! E = ()> {
             fn serialize(x: Wrap<T>) -> DataValue { serialize(run(x.0)) }
         }
         pub fn warm() -> DataValue { serialize((wrap(cb(|| 3)),)) }
@@ -3707,18 +3707,18 @@ fn an_effect_mismatch_does_not_hide_a_nested_output_type_mismatch() {
 struct Seed<T>(T)
 struct W<T>(T)
 trait Run<Self |-> ! E> { fn run(x: Self) -> int ! E; }
-impl<T> Run for <Self = Seed<T> |-> ! E = fallible> where T: Value {
+impl<T> Run for <Self = Seed<T> |-> ! E = fallible> where nothing {
  fn run(x: Seed<T>) -> int { 2 }
 }
 trait Get<Self |-> Item> { fn get(x: Self) -> Item; }
-impl<T> Get for <Self = Seed<T> |-> Item = int> where T: Value, Seed<T>: Run<! E = ()> {
+impl<T> Get for <Self = Seed<T> |-> Item = int> where Seed<T>: Run<! E = ()> {
  fn get(x: Seed<T>) -> int { 3 }
 }
 trait Pick<Self, Other> { fn pick(x: Self, y: Other) -> int; }
-impl<T> Pick for <Self = Seed<T>, Other = W<int>> where T: Value, Seed<T>: Get<Item = bool> {
+impl<T> Pick for <Self = Seed<T>, Other = W<int>> where Seed<T>: Get<Item = bool> {
  fn pick(x: Seed<T>, y: W<int>) -> int { 1 }
 }
-impl<T> Pick for <Self = Seed<T>, Other = W<float>> where T: Value {
+impl<T> Pick for <Self = Seed<T>, Other = W<float>> where nothing {
  fn pick(x: Seed<T>, y: W<float>) -> int { 2 }
 }
 let x: Seed<int> = Seed(0); pick(x, W(0))"# }),
@@ -3758,7 +3758,7 @@ fn an_effect_output_bound_met_by_a_written_generic_names_the_trait_and_the_gener
         ),
         (
             "struct Wrap<T>(T)
-            impl<T> Serialize for Wrap<T> where T: Run<! E = ()>, T: Value {
+            impl<T> Serialize for Wrap<T> where T: Run<! E = ()> {
                 fn serialize(x: Wrap<T>) -> DataValue { serialize(run(x.0)) }
             }
             fn f<! G>(g: () -> int ! G) -> DataValue { serialize(Wrap(Cb(g))) }",
@@ -3815,7 +3815,7 @@ fn outputs_of_a_concrete_impl_differing_only_in_effects_are_an_effect_error() {
             fn source(x: Seed) -> Cb<Failing> { Cb(|| idiv(4, 2)) }
         }
         trait R<Self> { fn r(x: Self) -> int; }
-        impl<T> R for W<T> where T: Value, Seed: Source<Item = Cb<Pure>> {
+        impl<T> R for W<T> where Seed: Source<Item = Cb<Pure>> {
             fn r(x: W<T>) -> int { 1 }
         }
     "# });

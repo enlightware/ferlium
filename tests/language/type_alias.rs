@@ -627,10 +627,7 @@ fn generic_type_aliases() {
 
         impl<I, T, O> Iterator for MapIterator<I, T, O>
         where
-            I: Iterator<Item = T>,
-            I: Value,
-            T: Value,
-            O: Value
+            I: Iterator<Item = T>
         {
             fn next(it: &mut MapIterator<I, T, O>) -> None | Some(O) {
                 match next(it.iterator) {

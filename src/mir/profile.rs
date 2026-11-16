@@ -392,7 +392,7 @@ mod tests {
             let support = session
                 .compile_for(
                     ExecutionTarget::Mir,
-                    "pub fn make<T>(value: T) where T: Value { || value }
+                    "pub fn make<T>(value: T) where nothing { || value }
                      pub fn sample(x: int) { make(x) }",
                     "captures",
                     Path::single_str("captures"),

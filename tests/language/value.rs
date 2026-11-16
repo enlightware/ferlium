@@ -238,7 +238,7 @@ fn native_drop_through_generic_value_dictionary() {
     assert_val_eq!(
         session.run(
             r#"
-            fn scoped<T>(value: T) where T: Value {
+            fn scoped<T>(value: T) where nothing {
                 let mut owned = value;
                 ();
             }
@@ -419,7 +419,7 @@ fn mutually_recursive_custom_value_impls() {
                 fn drop(x: &mut Odd<T>) {}
             }
 
-            fn show<T>(n: int, x: T) -> string where T: Value, Even<T>: Value {
+            fn show<T>(n: int, x: T) -> string where Even<T>: Value {
                 to_string(Even(n, x))
             }
 
@@ -469,9 +469,7 @@ fn named_generic_struct_auto_derives_value() {
             struct Wrapper<T>(T)
 
             fn clone_wrapper<T>(value: T) -> Wrapper<T>
-            where
-                T: Value
-            {
+            where nothing {
                 let mut wrapped = Wrapper(value);
                 wrapped
             }
@@ -833,9 +831,7 @@ fn generic_value_dictionary_for_function_type_is_compiler_provided() {
         session.run(
             r#"
             fn render<T>(value: T) -> string
-            where
-                T: Value
-            {
+            where nothing {
                 to_string(value)
             }
 
@@ -1273,9 +1269,7 @@ fn generic_mut_let_drop_uses_value_dictionary() {
         r#"
         {}
         fn scoped<T>(value: T)
-        where
-            T: Value
-        {{
+        where nothing {{
             let mut owned = value;
             ();
         }}
@@ -1384,9 +1378,7 @@ fn let_binding_from_mutable_generic_place_owns_snapshot() {
         r#"
         {}
         fn swap<T>(a: &mut T, b: &mut T)
-        where
-            T: Value
-        {{
+        where nothing {{
             let temp = b;
             b = a;
             a = temp;
@@ -1410,9 +1402,7 @@ fn generic_let_from_mutable_place_uses_value_clone_and_owns_snapshot() {
         r#"
         {}
         fn snapshot<T>(slot: &mut T) -> T
-        where
-            T: Value
-        {{
+        where nothing {{
             let owned = slot;
             owned
         }}
@@ -1442,9 +1432,7 @@ fn generic_owned_argument_from_mutable_place_uses_value_clone_and_owns_snapshot(
         struct Wrapper<T>(T)
 
         fn wrap<T>(value: T) -> Wrapper<T>
-        where
-            T: Value
-        {{
+        where nothing {{
             Wrapper(value)
         }}
 
@@ -1950,9 +1938,7 @@ fn generic_value_drop_runs_on_runtime_error() {
         r#"
         {}
         fn fail_with_owned<T>(value: T) -> int
-        where
-            T: Value
-        {{
+        where nothing {{
             let mut owned = value;
             [1][1]
         }}
@@ -2132,9 +2118,7 @@ fn named_generic_enum_auto_derives_value() {
             }
 
             fn clone_boxed<T>(value: Boxed<T>) -> Boxed<T>
-            where
-                T: Value
-            {
+            where nothing {
                 let mut boxed = value;
                 boxed
             }
@@ -2413,12 +2397,12 @@ fn managed_overlap_snapshot_is_owned_and_semantically_dropped() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn generic_managed_overlap_uses_dictionary_snapshot() {
     let source = r#"
-        fn observe<T>(a: T, p: &mut T, replacement: T) -> T where T: Value {
+        fn observe<T>(a: T, p: &mut T, replacement: T) -> T where nothing {
             p = replacement;
             a
         }
 
-        fn through<T>(slot: &mut T, replacement: T) -> T where T: Value {
+        fn through<T>(slot: &mut T, replacement: T) -> T where nothing {
             observe(slot, slot, replacement)
         }
 
@@ -3023,9 +3007,7 @@ fn recursive_generic_value_reuses_its_closed_dictionary() {
             type List<T> = Nil | Cons(T, List<T>);
 
             fn duplicate<T>(value: T) -> (T, T)
-            where
-                T: Value
-            {
+            where nothing {
                 (value, value)
             }
 
@@ -3052,9 +3034,7 @@ fn generic_derived_value_dictionary_captures_every_prerequisite_operation() {
             struct Wrapper<T>(T)
 
             fn exercise<T>(left: Wrapper<T>, right: Wrapper<T>)
-            where
-                T: Value
-            {
+            where nothing {
                 let copied = left;
                 (
                     copied == right,
@@ -3101,7 +3081,7 @@ fn variant_layout_and_ordinary_value_requirement_share_dictionary() {
     // leaf rather than becoming additional parameters of `wrap`.
     let source = r#"
         enum Option<T> { None, Some(T) }
-        fn wrap<T>(x: T) -> Option<T> where T: Value {
+        fn wrap<T>(x: T) -> Option<T> where nothing {
             let mut payload = (x,);
             let copied = payload;
             Option::Some(copied.0)
@@ -3131,7 +3111,7 @@ fn variant_layout_and_ordinary_value_requirement_share_dictionary() {
 fn variant_cases_with_the_same_payload_share_layout_dictionary() {
     let source = r#"
         enum Either<T> { Left(T), Right(T) }
-        fn choose<T>(left: bool, x: T) -> Either<T> where T: Value {
+        fn choose<T>(left: bool, x: T) -> Either<T> where nothing {
             if left { Either::Left(x) } else { Either::Right(x) }
         }
         match choose(false, 42) { Right(value) => value, _ => 0 }
@@ -3160,7 +3140,7 @@ fn variant_layout_binding_tracks_effect_polymorphic_function_members() {
     let source = r#"
         enum Callback<T ! E> { None, Some(T, () -> () ! E) }
         fn wrap<T ! E>(x: T, callback: () -> () ! E) -> Callback<T ! E>
-        where T: Value {
+        where nothing {
             Callback::Some(x, callback)
         }
         fn run() -> int {
@@ -3424,7 +3404,7 @@ fn generic_value_parameter_uses_let_convention() {
     let mut session = TestSession::new();
     let module = session.compile_and_get_module(
         r#"
-        fn identity<T>(value: T) -> T where T: Value { value }
+        fn identity<T>(value: T) -> T where nothing { value }
         identity("hello")
         "#,
     );
@@ -3741,7 +3721,7 @@ fn zero_sized_call_results_keep_drop_obligations() {
 fn array_reallocation_preserves_zero_sized_drop_obligations() {
     let source = format!(
         "{EMPTY_VALUE_STRUCT}
-         #[inline(never)] fn push<A>(values: &mut [A], value: A) where A: Value {{
+         #[inline(never)] fn push<A>(values: &mut [A], value: A) where nothing {{
              array_append(values, value);
          }}
          fn exercise() {{
@@ -4100,7 +4080,7 @@ fn value_ne_default_covers_native_and_derived_values() {
     assert_val_eq!(
         session.run(
             r#"
-        fn different<T>(left: T, right: T) -> bool where T: Value { left != right }
+        fn different<T>(left: T, right: T) -> bool where nothing { left != right }
         enum List { Nil, Cons(int, List) }
         struct Boxed<T>(T)
         let f = |x| x + 1;
@@ -4135,7 +4115,7 @@ fn value_ne_default_uses_custom_eq_and_override_takes_precedence() {
                 fn drop(target: &mut Probe) {{}}
                 {override_ne}
             }}
-            fn different<T>(left: T, right: T) -> bool where T: Value {{ left != right }}
+            fn different<T>(left: T, right: T) -> bool where nothing {{ left != right }}
             not different(Probe(1), Probe(-1)) and different(Probe(1), Probe(2))
         "#
         );

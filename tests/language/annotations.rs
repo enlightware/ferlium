@@ -72,7 +72,6 @@ fn light_annotations_hide_value_and_parent_constraints() {
     let src = indoc! { r#"
         fn needs_real<T>(value: T) -> T
         where
-            T: Value,
             T: Num,
             T: Div,
             T: Real
@@ -107,8 +106,7 @@ fn light_annotations_group_simple_unary_trait_constraints() {
         fn constrained<T>(value: T) -> T
         where
             T: Beta,
-            T: Alpha,
-            T: Value
+            T: Alpha
         {
             value
         }

@@ -1607,7 +1607,7 @@ mod tests {
 
     #[test]
     fn a_dead_generic_clone_drops_its_dispatch_places() {
-        let source = "fn discard<T>(x: T) where T: Value { let mut copy = x; () }";
+        let source = "fn discard<T>(x: T) where nothing { let mut copy = x; () }";
         let raw_module = raw(source);
         let raw_body = body_of(&raw_module, "discard");
         assert!(

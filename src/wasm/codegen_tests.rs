@@ -1023,7 +1023,7 @@ fn assert_wasm_runs<A: WasmValue + Copy, R: WasmValue + PartialEq + Debug>(
 #[wasm_bindgen_test]
 fn wasm_codegen_subscript_call_clone_and_stack_reclamation() {
     let first = r#"
-        subscript first<T>(values: &mut [T]) -> T where T: Value {
+        subscript first<T>(values: &mut [T]) -> T where nothing {
             ref mut { values[0] }
         }
         fn compute(x: int) -> int {
@@ -1055,7 +1055,7 @@ fn wasm_codegen_subscript_call_clone_and_stack_reclamation() {
     let reclaim = r#"
         #[inline(never)]
         fn identity<T>(value: T) -> T { value }
-        subscript cell<T>(slot: &mut T) -> T where T: Value {
+        subscript cell<T>(slot: &mut T) -> T where nothing {
             mut {
                 let mut local = slot;
                 yield local;
@@ -1181,7 +1181,7 @@ fn wasm_codegen_subscript_caller_failure_resumes_owned_evidence() {
     // caller while the projection is open. Its cleanup must still resume the accessor, and so
     // release that environment. The generic driver keeps the accessor generic in raw programs.
     let source = r#"
-        subscript cell<T>(slot: &mut [int], value: T) -> [int] where T: Value {
+        subscript cell<T>(slot: &mut [int], value: T) -> [int] where nothing {
             mut {
                 let values = [(value, value)];
                 let mut local = slot;
@@ -1191,7 +1191,7 @@ fn wasm_codegen_subscript_caller_failure_resumes_owned_evidence() {
             }
         }
         #[inline(never)]
-        fn drive<T>(slot: &mut [int], value: T, index: int) where T: Value {
+        fn drive<T>(slot: &mut [int], value: T, index: int) where nothing {
             slot->[cell](value)[index] += 1
         }
         fn compute(x: int) -> int {
@@ -1426,7 +1426,7 @@ fn wasm_codegen_compact_closure_captures_clone_and_drop() {
             &mut session,
             r#"
             #[inline(never)]
-            fn maker<T>(flag: bool, value: T, n: int, last: bool) where T: Value {
+            fn maker<T>(flag: bool, value: T, n: int, last: bool) where nothing {
                 || if flag and last and to_string(value) == to_string(to_string(n)) {
                     n
                 } else { -1 }
@@ -1671,10 +1671,10 @@ fn wasm_codegen_captured_trait_evidence() {
             pub trait Tag<Self> { fn tag(value: Self) -> int; }
             impl Tag for int { fn tag(value: int) -> int { value } }
             pub struct Wrapper<T>(T)
-            impl<T> Tag for Wrapper<T> where T: Tag, T: Value {
+            impl<T> Tag for Wrapper<T> where T: Tag {
                 fn tag(value: Wrapper<T>) -> int { tag(value.0) + 1 }
             }
-            pub fn forward<T>(value: T) -> int where T: Tag, T: Value { tag(value) }
+            pub fn forward<T>(value: T) -> int where T: Tag { tag(value) }
         "#,
                 "captured",
                 Path::single_str("captured"),
@@ -2424,7 +2424,7 @@ fn wasm_codegen_dynamic_callee_reclaims_its_stack_frontier() {
         &mut session,
         r#"
             #[inline(never)]
-            fn replace<T>(slot: &mut T, value: T) where T: Value { slot = value; }
+            fn replace<T>(slot: &mut T, value: T) where nothing { slot = value; }
             fn compute(limit: int) -> int {
                 let mut value = (0, false);
                 let mut i = 0;
@@ -3631,7 +3631,7 @@ fn wasm_codegen_value_ne_defaults_and_overrides() {
                     fn drop(p: &mut Probe) {{}}
                     {override_ne}
                 }}
-                fn different<T>(a: T, b: T) -> bool where T: Value {{ a != b }}
+                fn different<T>(a: T, b: T) -> bool where nothing {{ a != b }}
                 fn compute(x: int) -> bool {{
                     different(x, 7) and different(Derived(x), Derived(7))
                         and different([x], [7]) and different(Probe(x), Probe(7))

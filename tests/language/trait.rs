@@ -188,8 +188,7 @@ fn a_call_site_records_how_it_instantiated_its_callee() {
     let module = session.compile_and_get_module(indoc! {r#"
         fn twice_it<T>(x: T) -> T
         where
-            T: Num,
-            T: Value
+            T: Num
         {
             x + x
         }
@@ -198,8 +197,7 @@ fn a_call_site_records_how_it_instantiated_its_callee() {
 
         fn forwarding<U>(y: U) -> U
         where
-            U: Num,
-            U: Value
+            U: Num
         {
             twice_it(y)
         }
@@ -267,16 +265,13 @@ fn generic_trait_method_function_argument_keeps_source_place_passing() {
         }
 
         fn apply<T>(f: (T) -> int, value: T) -> int
-        where
-            T: Value
-        {
+        where nothing {
             f(value)
         }
 
         fn run<T>(value: T) -> int
         where
-            T: Describe,
-            T: Value
+            T: Describe
         {
             apply(describe, value)
         }
@@ -345,8 +340,7 @@ fn blanket_impl_dictionary_closes_over_prerequisite_evidence() {
 
             impl<T> Describe for Wrapper<T>
             where
-                T: Describe,
-                T: Value
+                T: Describe
             {
                 fn describe(value: Wrapper<T>) -> int {
                     describe(value.0) + 1
@@ -355,16 +349,13 @@ fn blanket_impl_dictionary_closes_over_prerequisite_evidence() {
 
             fn forward<T>(value: T) -> int
             where
-                T: Describe,
-                T: Value
+                T: Describe
             {
                 describe(value)
             }
 
             fn invoke<T>(function: (T) -> int, value: T) -> int
-            where
-                T: Value
-            {
+            where nothing {
                 function(value)
             }
 
@@ -394,8 +385,7 @@ fn closed_dictionary_clones_and_drops_a_closure_environment() {
 
             impl<T> Describe for Wrapper<T>
             where
-                T: Describe,
-                T: Value
+                T: Describe
             {
                 fn describe(value: Wrapper<T>) -> int {
                     describe(value.0) + 1
@@ -403,9 +393,7 @@ fn closed_dictionary_clones_and_drops_a_closure_environment() {
             }
 
             fn duplicate<T>(value: T) -> (T, T)
-            where
-                T: Value
-            {
+            where nothing {
                 (value, value)
             }
 
@@ -437,8 +425,7 @@ fn capturing_blanket_dictionary_is_selected_across_modules() {
 
                 impl<T> Describe for Wrapper<T>
                 where
-                    T: Describe,
-                    T: Value
+                    T: Describe
                 {
                     fn describe(value: Wrapper<T>) -> int {
                         describe(value.0) + 1
@@ -447,8 +434,7 @@ fn capturing_blanket_dictionary_is_selected_across_modules() {
 
                 pub fn forward<T>(value: T) -> int
                 where
-                    T: Describe,
-                    T: Value
+                    T: Describe
                 {
                     describe(Wrapper(value))
                 }
@@ -480,17 +466,14 @@ fn generic_callers_with_different_evidence_prefixes_clone_closed_functions() {
         }
 
         fn first<T>(value: T) -> ((int) -> T, (int) -> T)
-        where
-            T: Value
-        {
+        where nothing {
             let function = |ignored| value;
             (function, function)
         }
 
         fn second<T>(value: T) -> ((int) -> T, (int) -> T)
         where
-            T: Mark,
-            T: Value
+            T: Mark
         {
             mark(value);
             let function = |ignored| value;
@@ -1391,7 +1374,7 @@ fn trait_default_generic_and_sibling_calls() {
             fn double(x: Self) -> int { size(x) * 2 }
             fn quadruple(x: Self) -> int;
         }
-        impl<T> Size for [T] where T: Value {
+        impl<T> Size for [T] where nothing {
             fn size(x: [T]) -> int { len(x) }
             fn quadruple(x: [T]) -> int { double(x) * 2 }
         }
@@ -1462,7 +1445,7 @@ fn trait_default_cross_module_blanket_dictionary() {
             fn size(x: Self) -> int;
             fn double(x: Self) -> int { size(x) * 2 }
         }
-        impl<T> Size for [T] where T: Value {
+        impl<T> Size for [T] where nothing {
             fn size(x: [T]) -> int { len(x) }
         }
     "#},
@@ -1608,7 +1591,7 @@ fn trait_default_l2_module_functions_can_use_local_blanket_impls() {
                 fn size(x: Self) -> int;
                 fn double(x: Self) -> int { size(x) * 2 }
             }
-            impl<T> Size for [T] where T: Value {
+            impl<T> Size for [T] where nothing {
                 fn size(x: [T]) -> int { len(x) }
             }
             fn local_use(x: [int]) -> int { double(x) }
@@ -1630,7 +1613,7 @@ fn trait_default_recursive_dispatch_obeys_call_depth_limit() {
         "trait Parent<Self> { fn parent(x: Self) -> int; } trait Child<Self>: Parent<Self> { fn child(x: Self) -> int { parent(x) } } impl Parent for int { fn parent(x: int) -> int { child(x) } } impl Child for int {} child(1)",
         "trait Other<Self> { fn other(x: Self) -> int; } trait Loop<Self> where Self: Other { fn cycle(x: Self) -> int { other_helper(x) } } fn other_helper<T>(x: T) -> int where T: Other { other(x) } impl Other for int { fn other(x: int) -> int { cycle(x) } } impl Loop for int {} cycle(1)",
         "trait Loop<Self> { fn a(x: Self) -> int { b(x) } fn b(x: Self) -> int; } impl Loop for int { fn b(x: int) -> int { a(x) } } a(1)",
-        "trait Loop<Self> { fn a(x: Self) -> int; fn b(x: Self) -> int; } impl<T> Loop for [T] where T: Value { fn a(x: [T]) -> int { b(x) } fn b(x: [T]) -> int { a(x) } } a([1])",
+        "trait Loop<Self> { fn a(x: Self) -> int; fn b(x: Self) -> int; } impl<T> Loop for [T] where nothing { fn a(x: [T]) -> int { b(x) } fn b(x: [T]) -> int { a(x) } } a([1])",
     ] {
         assert_recursion_is_bounded(&mut session, source);
     }
@@ -1738,7 +1721,7 @@ fn recursion_through_ownership_operations_is_bounded() {
         let source = format!(
             r#"
             struct Probe(int)
-            fn copy<T>(x: T) -> T where T: Value {{ x }}
+            fn copy<T>(x: T) -> T where nothing {{ x }}
             fn make_temporary() {{ let temporary = Probe(0); () }}
             impl Value for Probe {{
                 fn eq(x: Probe, y: Probe) -> bool {{ x.0 == y.0 }}
@@ -1995,7 +1978,7 @@ fn trait_default_given_owners_survive_constraint_deduplication() {
             fn first(x: Self) -> int;
             fn second(x: Self) -> int;
         }
-        impl<T> Size for [T] where T: Value {
+        impl<T> Size for [T] where nothing {
             fn size(x: [T]) -> int { len(x) }
             fn first(x: [T]) -> int { size(x) }
             fn second(x: [T]) -> int { let f = || size(x); f() }
@@ -2022,7 +2005,7 @@ fn trait_default_given_used_by_generic_operator() {
     let mut session = TestSession::new();
     assert_val_eq!(session.run(indoc! {r#"
         struct Wrapped<T> { value: T }
-        impl<T> Num for Wrapped<T> where T: Num, T: Value {
+        impl<T> Num for Wrapped<T> where T: Num {
             fn add(left: Wrapped<T>, right: Wrapped<T>) -> Wrapped<T> { left - (-right) }
             fn sub(left: Wrapped<T>, right: Wrapped<T>) -> Wrapped<T> { Wrapped { value: left.value - right.value } }
             fn mul(left: Wrapped<T>, right: Wrapped<T>) -> Wrapped<T> { Wrapped { value: left.value * right.value } }
@@ -2042,7 +2025,7 @@ fn trait_default_given_used_by_generic_for_loop() {
     assert_val_eq!(
         session.run(indoc! {r#"
         struct Bag<T> { data: [T], nested: bool }
-        impl<T> Seq for <Self = Bag<T> |-> Item = T, Iter = ArrayIterator<T>> where T: Value {
+        impl<T> Seq for <Self = Bag<T> |-> Item = T, Iter = ArrayIterator<T>> where nothing {
             fn iter(bag: Bag<T>) -> ArrayIterator<T> {
                 if bag.nested {
                     let inner = Bag { data: bag.data, nested: false };
@@ -2100,7 +2083,7 @@ fn trait_default_multi_input_givens() {
     for implementation in [
         "impl Pair for <int, string> { fn pair(a: int, b: string) -> int { a } }",
         "impl Pair { fn pair(a: int, b: string) -> int { a } }",
-        "impl<T> Pair for <int, [T]> where T: Value { fn pair(a: int, b: [T]) -> int { a } }",
+        "impl<T> Pair for <int, [T]> where nothing { fn pair(a: int, b: [T]) -> int { a } }",
     ] {
         let argument = if implementation.contains("impl<T>") {
             "[1]"
@@ -2164,10 +2147,10 @@ fn trait_improvement_keeps_generic_inputs_with_matching_heads() {
         r#"impl Extract for <Self = int |-> Item = int> {
             fn extract(value: int) -> int { value }
         }"#,
-        r#"impl<T> Extract for <Self = [T] |-> Item = T> where T: Value {
+        r#"impl<T> Extract for <Self = [T] |-> Item = T> where nothing {
             fn extract(value: [T]) -> T { value[0] }
         }"#,
-        r#"impl<T> Extract for <Self = Wrapped<T> |-> Item = T> where T: Value {
+        r#"impl<T> Extract for <Self = Wrapped<T> |-> Item = T> where nothing {
             fn extract(value: Wrapped<T>) -> T { value.value }
         }"#,
     ];

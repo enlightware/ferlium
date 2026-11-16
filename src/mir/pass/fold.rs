@@ -2237,7 +2237,7 @@ mod tests {
         session.set_mir_optimization(MirOptimization::Enabled);
         let module = session.emit_mir(
             "fold",
-            "fn open<T>(value: T, n: int) -> T where T: Value {\
+            "fn open<T>(value: T, n: int) -> T where nothing {\
                  let mut concrete = [1, 2]; concrete[n] = 3; value\
              }",
         );

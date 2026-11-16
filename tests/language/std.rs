@@ -99,7 +99,7 @@ fn typed_native_entries_through_interpreters_and_dictionaries() {
         session.run(
             r#"
             fn apply(f, value) { f(value) }
-            fn duplicate<T>(value: T) where T: Value { (value, value) }
+            fn duplicate<T>(value: T) where nothing { (value, value) }
             let mut original = " ab ";
             let trimmed = apply(string_trim, original);
             string_push_str(original, trimmed);
@@ -426,9 +426,7 @@ fn ferlium_function_inputs_follow_interpreter_calling_convention() {
         session.run(
             r#"
             fn append_wrapper<A>(array: &mut [A], value: A)
-            where
-                A: Value
-            {
+            where nothing {
                 array_append(array, value);
             }
 
@@ -1323,7 +1321,7 @@ fn array_deque_operations_match_a_model() {
 fn array_reallocation_moves_managed_ranges_between_offsets() {
     let mut session = TestSession::new();
     let source = r#"
-        #[inline(never)] fn push<A>(values: &mut [A], value: A) where A: Value {
+        #[inline(never)] fn push<A>(values: &mut [A], value: A) where nothing {
             array_append(values, value);
         }
         let mut values = [["a"], ["b"], ["c"], ["d"]];
@@ -3534,7 +3532,7 @@ fn hash_collections_are_values_after_clone_and_nesting() {
     // Generic and derived values use the same comparison.
     assert_val_eq!(
         run(format!(
-            "fn same<T>(a: T, b: T) -> bool where T: Value {{ a == b }}
+            "fn same<T>(a: T, b: T) -> bool where nothing {{ a == b }}
             same(set_of({ASCENDING}), set_of({DESCENDING}))"
         )),
         bool(true)

@@ -2434,9 +2434,7 @@ fn mut_only_subscript_can_infer_shared_signature() {
 fn separate_members_share_inferred_generic_subscript_signature() {
     let value = run_experimental_subscript_source(indoc! { r#"
         subscript cell<T>(slot: &mut T)
-        where
-            T: Value
-        {
+        where nothing {
             ref {
                 slot
             }
@@ -2460,9 +2458,7 @@ fn separate_members_share_inferred_generic_subscript_signature() {
 fn omitted_generic_subscript_return_is_independent_of_first_type_param() {
     let value = run_experimental_subscript_source(indoc! { r#"
         subscript wrap<T>(slot: T)
-        where
-            T: Value
-        {
+        where nothing {
             ref {
                 let local = [slot];
                 yield local
@@ -2480,9 +2476,7 @@ fn omitted_generic_subscript_return_is_independent_of_first_type_param() {
 fn placeholder_generic_subscript_return_is_independent_of_first_type_param() {
     let value = run_experimental_subscript_source(indoc! { r#"
         subscript wrap<T>(slot: T) -> _
-        where
-            T: Value
-        {
+        where nothing {
             ref {
                 let local = [slot];
                 yield local
@@ -2503,9 +2497,7 @@ fn explicit_generic_subscript_return_annotation_is_enforced() {
     // annotated element return type `T`.
     assert_experimental_compile_error(indoc! { r#"
         subscript wrap<T>(slot: T) -> T
-        where
-            T: Value
-        {
+        where nothing {
             ref {
                 let local = [slot];
                 yield local
@@ -4521,9 +4513,7 @@ fn shared_ref_mut_subscript_member_serves_reads_and_writes() {
 fn parameterized_named_subscript_instantiates_at_use_sites() {
     let value = run_experimental_subscript_source(indoc! { r#"
         subscript cell<T>(slot: &mut T) -> T
-        where
-            T: Value
-        {
+        where nothing {
             ref {
                 let local = slot;
                 yield local
@@ -4553,19 +4543,19 @@ fn yielded_generic_frame_keeps_evidence_across_module_calls() {
     session
         .try_compile_module(
             "access",
-            "pub fn relay<T>(value: T) -> T where T: Value { value }",
+            "pub fn relay<T>(value: T) -> T where nothing { value }",
         )
         .unwrap();
     assert_val_eq!(
         session.run(indoc! { r#"
-            subscript cell<T>(slot: &mut T) -> T where T: Value {
+            subscript cell<T>(slot: &mut T) -> T where nothing {
                 mut {
                     let mut local = slot;
                     yield local;
                     slot = local
                 }
             }
-            fn replace<T>(slot: &mut T, value: T) where T: Value {
+            fn replace<T>(slot: &mut T, value: T) where nothing {
                 let unrelated = access::relay((42, true));
                 slot = value
             }
@@ -5026,7 +5016,7 @@ fn a_recursive_subscript_whose_contracts_do_not_settle_is_refused() {
             fn tr(x) { (x.1)() + 1 }
         }
         fn step<T, ! E, O>(x: T, g: () -> int ! E) -> (() -> int ! O)
-        where Pair<T, (() -> int ! E)>: Tr<! Out = O>, T: Value { || tr(Pair(x, g)) }
+        where Pair<T, (() -> int ! E)>: Tr<! Out = O> { || tr(Pair(x, g)) }
         fn pure_only(f: () -> int ! ()) -> int { f() }
     "# };
     let bodies = |base: &str| {
@@ -5051,7 +5041,7 @@ fn a_recursive_subscript_whose_contracts_do_not_settle_is_refused() {
             bodies("0")
         ))
         .expect_recursive_group_does_not_settle("f", "Pair<T, ");
-    let written = "subscript f<T, ! E>(slot: &mut int, x: T, g: () -> int ! E, n: int) -> int\nwhere Pair<T, (() -> int ! E)>: Tr<! Out = E>, T: Value ";
+    let written = "subscript f<T, ! E>(slot: &mut int, x: T, g: () -> int ! E, n: int) -> int\nwhere Pair<T, (() -> int ! E)>: Tr<! Out = E> ";
     let uses = indoc! { r#"
         fn read() -> int {
             let mut slot = 0;
@@ -5124,9 +5114,7 @@ fn a_function_of_the_group_of_a_subscript_reads_it_as_a_field() {
 fn first_class_subscript_value_captures_hidden_evidence() {
     let value = run_experimental_subscript_source(indoc! { r#"
             subscript cell<T>(slot: &mut T) -> T
-            where
-                T: Value
-            {
+            where nothing {
                 ref {
                     let local = slot;
                     yield local
@@ -5295,9 +5283,7 @@ fn mutable_subscript_result_replaces_matching_callback_types() {
 fn first_class_subscript_value_passes_captured_hidden_evidence() {
     let value = run_experimental_subscript_source(indoc! { r#"
             subscript cell<T>(slot: &mut T) -> T
-            where
-                T: Value
-            {
+            where nothing {
                 ref {
                     let local = slot;
                     yield local
@@ -5332,7 +5318,7 @@ fn first_class_subscript_value_passes_captured_hidden_evidence() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn generic_first_class_subscript_in_same_module() {
     let subscript = indoc! { r#"
-        subscript cell<T>(value: &mut T) -> T where T: Value {
+        subscript cell<T>(value: &mut T) -> T where nothing {
             ref { let local = value; yield local; }
             mut { let mut local = value; yield local; value = local; }
         }
@@ -5380,9 +5366,7 @@ fn first_class_subscript_value_hir_captures_hidden_evidence() {
     let module_id = session
         .compile(indoc! { r#"
             subscript cell<T>(slot: &mut T) -> T
-            where
-                T: Value
-            {
+            where nothing {
                 ref {
                     let local = slot;
                     yield local
@@ -5984,7 +5968,7 @@ fn a_declared_field_typed_before_its_receiver_is_an_instance_of_its_subscript() 
 
         fn get(x) { x.value }
         fn through(b) { get(b) }
-        fn generic<T, O>(b: Box<T>) -> O where T: Read<Out = O>, T: Value, O: Value {
+        fn generic<T, O>(b: Box<T>) -> O where T: Read<Out = O> {
             let field = |x| x.value;
             field(b)
         }
@@ -6026,7 +6010,7 @@ fn a_declared_field_typed_before_its_receiver_is_an_instance_of_its_subscript() 
         trait Use<Self |-> ! F> { fn use_it(x: Self) -> int ! F; }
         struct Pair<T, U>(T, U)
         impl<T, ! E> Use for <Self = Pair<T, (() -> int ! E)> |-> ! F = E>
-        where T: Run<! E = E>, T: Value {
+        where T: Run<! E = E> {
             fn use_it(x) { x.1() }
         }
         fn pure_only(f: () -> int ! ()) -> int { f() }
@@ -6050,7 +6034,7 @@ fn a_declared_field_typed_before_its_receiver_is_an_instance_of_its_subscript() 
             let field = |x| x.value;
             field(Box(7))
         }
-        fn generic<T, ! E>(b: Box<T>) -> int where T: Run<! E = E>, T: Value {
+        fn generic<T, ! E>(b: Box<T>) -> int where T: Run<! E = E> {
             let field = |x| x.value;
             field(b)
         }

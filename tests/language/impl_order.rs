@@ -89,7 +89,7 @@ fn improvement_waits_for_unfinished_impls() {
         trait Use<Self> { fn use_it(x: Self) -> int ! fallible; }
     "# };
     let items = [
-        "impl<T> Extract for <Self = [T] |-> Item = T> where T: Value { fn extract(value: [T]) -> T { value[0] } }",
+        "impl<T> Extract for <Self = [T] |-> Item = T> where nothing { fn extract(value: [T]) -> T { value[0] } }",
         "fn first(x) { extract([x]) }",
         "impl Use for int { fn use_it(x: int) -> int { first(x) + 1 } }",
     ];

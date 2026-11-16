@@ -4469,7 +4469,7 @@ mod tests {
         let module = compile(
             &mut session,
             "subscript cell<T>(slot: &mut T) -> T\n\
-             where T: Value {\n\
+             where nothing {\n\
                  ref { let local = slot; yield local }\n\
                  mut { let mut local = slot; yield local; slot = local }\n\
              }\n\
@@ -4507,7 +4507,7 @@ mod tests {
         session.set_allow_experimental(true);
         let module = compile(
             &mut session,
-            "subscript cell<T>(slot: &mut T) -> T where T: Value {\n\
+            "subscript cell<T>(slot: &mut T) -> T where nothing {\n\
                  ref { let local = slot; yield local }\n\
                  mut { let mut local = slot; yield local; slot = local }\n\
              }\n\
@@ -4598,7 +4598,7 @@ mod tests {
         session.set_allow_experimental(true);
         let module = compile(
             &mut session,
-            "subscript cell<T>(slot: &mut T) -> T where T: Value {\n\
+            "subscript cell<T>(slot: &mut T) -> T where nothing {\n\
                  ref { let local = slot; yield local }\n\
              }",
             "bare_subscript",
@@ -4729,7 +4729,7 @@ mod tests {
         let module = compile(
             &mut session,
             "subscript cell<T>(slot: &mut T) -> T\n\
-             where T: Value { ref { let local = slot; yield local } }\n\
+             where nothing { ref { let local = slot; yield local } }\n\
              fn use_cell() { let accessor = cell; let mut value = 3; value->[accessor] }",
             "physical_link",
         );

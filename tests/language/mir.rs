@@ -3878,8 +3878,7 @@ fn inlined_pure_callback_of_a_fallible_parameter_is_called_directly() {
             }
             impl<T ! E> Apply for <Self = W<T> |-> ! E = E>
             where
-                T: Apply<! E = E>,
-                T: Value
+                T: Apply<! E = E>
             {
                 fn apply(s, x, f) { apply(s.0, x, f) }
             }

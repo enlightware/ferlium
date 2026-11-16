@@ -3490,8 +3490,8 @@ mod tests {
         let mut session = CompilerSession::new();
         let module = compile(
             &mut session,
-            "fn inner<T>(x: T) -> T where T: Value { x }\n\
-             fn outer<T>(x: T) -> T where T: Value { inner(x) }\n\
+            "fn inner<T>(x: T) -> T where nothing { x }\n\
+             fn outer<T>(x: T) -> T where nothing { inner(x) }\n\
              fn use_it(x: string) -> string { outer(x) }",
         );
         let site = site(&session, module, "use_it", "outer");
@@ -3521,8 +3521,8 @@ mod tests {
         let mut session = CompilerSession::new();
         let module = compile(
             &mut session,
-            "fn inner<T>(x: T) -> T where T: Value { x }\n\
-             fn outer<T>(x: T) -> T where T: Value { inner(x) }\n\
+            "fn inner<T>(x: T) -> T where nothing { x }\n\
+             fn outer<T>(x: T) -> T where nothing { inner(x) }\n\
              fn use_it(x: string) -> string { outer(x) }",
         );
         let mut site = site(&session, module, "use_it", "outer");
@@ -3550,8 +3550,8 @@ mod tests {
         let mut session = CompilerSession::new();
         let module = compile(
             &mut session,
-            "fn inner<T>(x: T) -> T where T: Value { x }\n\
-             fn outer<T>(x: T) -> T where T: Value { inner(x) }\n\
+            "fn inner<T>(x: T) -> T where nothing { x }\n\
+             fn outer<T>(x: T) -> T where nothing { inner(x) }\n\
              fn use_it(x: string) -> string { outer(x) }",
         );
         let site = site(&session, module, "use_it", "outer");
@@ -3709,8 +3709,8 @@ fn use_it(x: int) { with_zero(x) }",
         session.set_mir_optimization(MirOptimization::Enabled);
         let module = session.emit_mir(
             "dynamic",
-            "fn inner<T>(value: T) -> T where T: Value { let copy = value; copy }\n\
-             fn outer<T>(value: T) -> T where T: Value { inner(value) }",
+            "fn inner<T>(value: T) -> T where nothing { let copy = value; copy }\n\
+             fn outer<T>(value: T) -> T where nothing { inner(value) }",
         );
         let caller = module
             .split("fn outer")
@@ -3857,8 +3857,8 @@ fn use_it(x: int) { with_zero(x) }",
         let module = compile(
             &mut session,
             "enum Boxed<T> { Empty, Item(T) }\n\
-             fn wrap<T>(x: T) -> Boxed<T> where T: Value { Boxed::Item(x) }\n\
-             fn unwrap_or<T>(x: Boxed<T>, fallback: T) -> T where T: Value {\n\
+             fn wrap<T>(x: T) -> Boxed<T> where nothing { Boxed::Item(x) }\n\
+             fn unwrap_or<T>(x: Boxed<T>, fallback: T) -> T where nothing {\n\
                  match x { Boxed::Item(value) => value, Boxed::Empty => fallback }\n\
              }\n\
              fn wrap_int(x: int) -> Boxed<int> { wrap(x) }\n\
