@@ -1,5 +1,5 @@
 use crate::{SourceId, Location, LocatedError};
-use crate::ast::{UstrSpan, Path, UseTree, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, Pattern, PatternKind as PatK, PatternVar, PLetPattern as LetPattern, LetPatternKind as LetPatK, LetRecordPatternField, MapLiteralEntry, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PSubscriptDefinition as SubscriptDefinition, SubscriptMember, SubscriptMemberMode, PTraitDefinition as TraitDefinition, TraitAssociatedConstDecl, TraitAssociatedConstImpl, TraitDefinitionItem, TraitImplItem, TraitMethod, TraitMethodArg, PTraitImpl as TraitImpl, PTraitImplFor as TraitImplForHeader, PTypeConstraint as TypeConstraint, PTypeConstraintInput as TypeConstraintInput, PTypeConstraintOutput as TypeConstraintOutput, TypeConstraintEffectOutput, GenericParams, PTypeDef as TypeDef, TypeAlias, PType as Type, PFnType as FnType, PFnEffects, PEffect, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg, PExprArena, PExprId};
+use crate::ast::{UstrSpan, Path, UseTree, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, Pattern, PatternKind as PatK, PatternVar, PLetPattern as LetPattern, LetPatternKind as LetPatK, LetRecordPatternField, MapLiteralEntry, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PSubscriptDefinition as SubscriptDefinition, SubscriptMember, SubscriptMemberMode, PTraitDefinition as TraitDefinition, TraitAssociatedConstDecl, TraitAssociatedConstImpl, TraitDefinitionItem, TraitImplItem, TraitMethod, TraitMethodArg, PTraitImpl as TraitImpl, PTraitImplFor as TraitImplForHeader, PTypeConstraint as TypeConstraint, PTypeConstraintInput as TypeConstraintInput, PTypeConstraintOutput as TypeConstraintOutput, TypeConstraintEffectOutput, WhereClauseKind, GenericParams, PTypeDef as TypeDef, TypeAlias, PType as Type, PFnType as FnType, PFnEffects, PEffect, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg, PExprArena, PExprId};
 use crate::hir::value::LiteralValue;
 use crate::types::r#type::{
     Type as IrType,
@@ -128,7 +128,8 @@ ParentConstraintList: Vec<TypeConstraint> = {
 }
 
 TraitImpl: TraitImpl = {
-    <l:@L> "impl" <generic_params:GenericParams?> <trait_name:Sp<UIdentifier>> <where_clause:WhereClause?> "{" <items:TraitImplItem*> "}" <r:@R> => {
+    <l:@L> "impl" <generic_params:GenericParams?> <trait_name:Sp<UIdentifier>> <where_clause:RequirementClause?> "{" <items:TraitImplItem*> "}" <r:@R> => {
+        let where_clause = where_clause.unwrap_or((vec![], WhereClauseKind::Partial));
         let mut associated_consts = Vec::new();
         let mut functions = Vec::new();
         for item in items {
@@ -141,14 +142,16 @@ TraitImpl: TraitImpl = {
             generic_params: generic_params.unwrap_or_default(),
             trait_name,
             for_trait: None,
-            where_clause: where_clause.unwrap_or_default(),
+            where_clause: where_clause.0,
+            where_kind: where_clause.1,
             associated_consts,
             functions,
             function_sccs: (),
             span: span(l, r, source_id),
         }
     },
-    <l:@L> "impl" <generic_params:GenericParams?> <trait_name:Sp<UIdentifier>> "for" <for_trait:TraitImplForHeader> <where_clause:WhereClause?> "{" <items:TraitImplItem*> "}" <r:@R> => {
+    <l:@L> "impl" <generic_params:GenericParams?> <trait_name:Sp<UIdentifier>> "for" <for_trait:TraitImplForHeader> <where_clause:RequirementClause?> "{" <items:TraitImplItem*> "}" <r:@R> => {
+        let where_clause = where_clause.unwrap_or((vec![], WhereClauseKind::Partial));
         let mut associated_consts = Vec::new();
         let mut functions = Vec::new();
         for item in items {
@@ -161,7 +164,8 @@ TraitImpl: TraitImpl = {
             generic_params: generic_params.unwrap_or_default(),
             trait_name,
             for_trait: Some(for_trait),
-            where_clause: where_clause.unwrap_or_default(),
+            where_clause: where_clause.0,
+            where_kind: where_clause.1,
             associated_consts,
             functions,
             function_sccs: (),
@@ -251,7 +255,8 @@ UseTree: UseTree = {
 }
 
 Function: ModuleFunction = {
-    <doc:DOC_COMMENT*> <attributes:(Attribute)*> <visibility:Visibility> <l:@L> "fn" <name:Sp<UIdentifier>> <generic_params:GenericParams?> <al:@L> "(" <args:ModuleFunctionArgs> ")" <ret:SpFnRet<"P">?> <where_clause:WhereClause?> <ar:@R> <body:Es<Block>> <r:@R> =>
+    <doc:DOC_COMMENT*> <attributes:(Attribute)*> <visibility:Visibility> <l:@L> "fn" <name:Sp<UIdentifier>> <generic_params:GenericParams?> <al:@L> "(" <args:ModuleFunctionArgs> ")" <ret:SpFnRet<"P">?> <where_clause:RequirementClause?> <ar:@R> <body:Es<Block>> <r:@R> => {
+        let where_clause = where_clause.unwrap_or((vec![], WhereClauseKind::Partial));
         ModuleFunction::new(
             visibility,
             name,
@@ -259,16 +264,19 @@ Function: ModuleFunction = {
             args,
             span(al, ar, source_id),
             ret,
-            where_clause.unwrap_or_default(),
+            where_clause.0,
+            where_clause.1,
             attributes,
             body,
             span(l, r, source_id),
             parse_doc_comments(doc),
-        ),
+        )
+    },
 }
 
 SubscriptDefinition: SubscriptDefinition = {
-    <doc:DOC_COMMENT*> <visibility:Visibility> <l:@L> "subscript" <header:SubscriptHeader> <al:@L> "(" <args:ModuleFunctionArgs> ")" <ret:SpFnRet<"P">?> <where_clause:WhereClause?> <ar:@R> "{" <members:SubscriptMember*> "}" <r:@R> => {
+    <doc:DOC_COMMENT*> <visibility:Visibility> <l:@L> "subscript" <header:SubscriptHeader> <al:@L> "(" <args:ModuleFunctionArgs> ")" <ret:SpFnRet<"P">?> <where_clause:RequirementClause?> <ar:@R> "{" <members:SubscriptMember*> "}" <r:@R> => {
+        let where_clause = where_clause.unwrap_or((vec![], WhereClauseKind::Partial));
         SubscriptDefinition {
             visibility,
             name: header.1,
@@ -277,7 +285,8 @@ SubscriptDefinition: SubscriptDefinition = {
             args,
             args_span: span(al, ar, source_id),
             ret_ty: ret,
-            where_clause: where_clause.unwrap_or_default(),
+            where_clause: where_clause.0,
+            where_kind: where_clause.1,
             members,
             span: span(l, r, source_id),
             doc: parse_doc_comments(doc),
@@ -685,6 +694,32 @@ GenericParamList: GenericParams = {
         GenericParams::new(vec![], effect_params),
 }
 
+// The requirements of a function, impl or subscript. A written list is complete: the definer
+// solves every other requirement. A trailing `..` makes it partial, open to inferred
+// requirements, and `none` states that the caller supplies no evidence.
+RequirementClause: (Vec<TypeConstraint>, WhereClauseKind) = {
+    "where" <list:RequirementList> => {
+        let (constraints, partial) = list;
+        (constraints, if partial { WhereClauseKind::Partial } else { WhereClauseKind::Complete })
+    },
+    "where" <l:@L> <kw:Identifier> <r:@R> =>? if kw == "none" {
+        Ok((vec![], WhereClauseKind::Complete))
+    } else {
+        error("expected `none`, `..` or a requirement".into(), span(l, r, source_id))
+    },
+}
+
+// The written requirements, and whether a trailing `..` makes the list partial.
+RequirementList: (Vec<TypeConstraint>, bool) = {
+    <c:TypeConstraint> => (vec![c], false),
+    <c:TypeConstraint> "," <rest:RequirementList> => {
+        let (mut constraints, partial) = rest;
+        constraints.insert(0, c);
+        (constraints, partial)
+    },
+    ".." => (vec![], true),
+}
+
 WhereClause: Vec<TypeConstraint> = {
     "where" <first:TypeConstraint> <rest:("," <TypeConstraint>)*> => ext_f(first, rest),
 }
@@ -790,8 +825,10 @@ TypeConstraintOutputBindings: (Vec<TypeConstraintOutput>, Vec<TypeConstraintEffe
     "<" <bindings:AssociatedOutputBindingSection> ">" => bindings,
 }
 
+// An output may be `_`, to infer; desugaring allows it only in the requirements of a function,
+// an impl or a subscript.
 AssociatedTypeBinding: TypeConstraintOutput = {
-    <name:Sp<UIdentifier>> "=" <ty:Sp<Type<"", "", "">>> => TypeConstraintOutput { name, ty },
+    <name:Sp<UIdentifier>> "=" <ty:Sp<Type<"P", "", "">>> => TypeConstraintOutput { name, ty },
 }
 
 AssociatedTypeBindingList: Vec<TypeConstraintOutput> = {

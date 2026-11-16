@@ -267,7 +267,13 @@ pub enum InvalidTraitConstraintKind {
     },
     MissingOutputBindings {
         names: Vec<Ustr>,
+        /// Whether `_` may stand for an output here, as in a requirement of a function, an
+        /// impl or a subscript.
+        holes_allowed: bool,
     },
+    /// `_` stands for an output where only a requirement of a function, an impl or a subscript
+    /// may have one.
+    HoleNotAllowed,
     UnknownOutputEffectBinding {
         name: Ustr,
     },
@@ -306,9 +312,24 @@ impl InvalidTraitConstraintKind {
             DuplicateOutputBinding { name } => {
                 format!("Duplicate output type parameter `{name}` for trait `{trait_name}`")
             }
-            MissingOutputBindings { names } => format!(
-                "Missing output type parameters {} for trait `{trait_name}`",
-                iterable_to_string(names, ", ")
+            MissingOutputBindings {
+                names,
+                holes_allowed,
+            } => {
+                let mut message = format!(
+                    "Missing output type parameters {} for trait `{trait_name}`",
+                    iterable_to_string(names, ", ")
+                );
+                if *holes_allowed {
+                    message.push_str(&format!(
+                        ": write `{} = _` to infer it",
+                        names.first().map_or("Output", |name| name.as_str())
+                    ));
+                }
+                message
+            }
+            HoleNotAllowed => format!(
+                "Only the outputs of a requirement of a function, an impl or a subscript can be `_`, not those of trait `{trait_name}` here"
             ),
             UnknownOutputEffectBinding { name } => {
                 format!("Unknown output effect parameter `{name}` for trait `{trait_name}`")
@@ -382,6 +403,24 @@ pub(crate) const ORPHAN_RULE_HINT: &str = "an implementation of a trait of anoth
 
 /// Why a public contract cannot name a private trait or type.
 pub(crate) const PRIVATE_NAME_HINT: &str = "the contract of a public item may only name public traits and types; make it public, and mark a type `#[private_repr]` to keep its representation private";
+
+/// The message of an error for a requirement that a complete `where` clause neither writes nor
+/// implies, and that the definition cannot solve. `unnamed` tells whether it is on a type that
+/// no generic names, so that the clause cannot write it as is.
+pub(crate) fn undeclared_requirement_message(
+    requirement: &impl fmt::Display,
+    unnamed: bool,
+) -> String {
+    if unnamed {
+        format!(
+            "Requirement `{requirement}` is on a type that no generic names, and cannot be solved here: name the type with a generic and write the requirement in the `where` clause, or end the clause with `..` to infer it"
+        )
+    } else {
+        format!(
+            "Requirement `{requirement}` is not among the written requirements, and cannot be solved here: write it in the `where` clause, or end the clause with `..` to infer it"
+        )
+    }
+}
 
 /// When an implementation is private.
 pub(crate) const PRIVATE_IMPL_HINT: &str = "an implementation is private only when its first input defined in this module, with no bare type parameter before it, is a private type; otherwise it is public, and its inputs and outputs must be public";
@@ -1202,7 +1241,16 @@ pub enum CompilationErrorImpl<S: Scope> {
         type_names: FxHashMap<TypeVar, Ustr>,
         span: Location,
     },
-    /// A parent of a public trait names a private trait or type.
+    /// Under a complete `where` clause, a requirement of the body that the clause neither writes
+    /// nor implies, and that the definition cannot solve itself.
+    UndeclaredRequirement {
+        requirement: S::PubTypeConstraint,
+        type_names: FxHashMap<TypeVar, Ustr>,
+        /// Whether the requirement is on a type that no generic names, which only a resolved
+        /// error knows.
+        unnamed: bool,
+        span: Location,
+    },
     /// The contract of a public item names a private trait or type.
     PrivateNameInPublicContract {
         item_kind: PublicItemKind,
@@ -1571,8 +1619,8 @@ impl InternalCompilationError {
         mut self,
         names: impl IntoIterator<Item = (TypeVar, Ustr)>,
     ) -> Self {
-        if let CompilationErrorImpl::PrivateRequirementInPublicContract { type_names, .. } =
-            &mut *self.0
+        if let CompilationErrorImpl::PrivateRequirementInPublicContract { type_names, .. }
+        | CompilationErrorImpl::UndeclaredRequirement { type_names, .. } = &mut *self.0
         {
             type_names.extend(names);
         }
@@ -1994,6 +2042,17 @@ impl FormatWith<SourceTable> for CompilationError {
             } => write!(
                 f,
                 "Cannot publish private requirement `{requirement}` at {}. Its evidence must be constructible for every input type from public requirements",
+                fmt_span(span),
+            ),
+            UndeclaredRequirement {
+                requirement,
+                unnamed,
+                span,
+                ..
+            } => write!(
+                f,
+                "{} {}",
+                undeclared_requirement_message(requirement, *unnamed),
                 fmt_span(span),
             ),
             PrivateNameInPublicContract {
@@ -2964,6 +3023,24 @@ impl CompilationError {
                 compilation_error!(PrivateRequirementInPublicContract {
                     requirement: requirement.format_with(&display).to_string(),
                     type_names,
+                    span,
+                })
+            }
+            UndeclaredRequirement {
+                requirement,
+                type_names,
+                span,
+                ..
+            } => {
+                let unnamed = requirement
+                    .inner_ty_vars()
+                    .iter()
+                    .any(|var| !type_names.contains_key(var));
+                let display = TypeDisplayEnv::new(env, &type_names);
+                compilation_error!(UndeclaredRequirement {
+                    requirement: requirement.format_with(&display).to_string(),
+                    type_names,
+                    unnamed,
                     span,
                 })
             }

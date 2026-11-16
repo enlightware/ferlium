@@ -39,7 +39,8 @@ use crate::{
         effects::{EffType, EffectVar, EffectsInstSubst},
         r#trait::{TraitAssociatedConstIndex, TraitMethodIndex},
         trait_solver::{
-            EvidencePlan, TraitSolver, alpha_canonicalize_types, trait_solver_from_module,
+            EvidencePlan, ReductionLeaves, TraitSolver, alpha_canonicalize_types,
+            trait_solver_from_module,
         },
         r#type::{Type, TypeDef, TypeKind, TypeVar},
         type_constraints::named_type_constraints_in_types,
@@ -451,6 +452,7 @@ pub(super) fn emit_auto_value_impls(
                     .reduce_public_requirements(
                         constraints,
                         &[input_ty],
+                        ReductionLeaves::Public,
                         &mut inference,
                         solver_arena,
                     )

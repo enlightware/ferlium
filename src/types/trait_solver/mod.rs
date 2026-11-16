@@ -20,7 +20,8 @@ pub(crate) use canonical::{
     alpha_canonicalize_types_with_instantiation, application_key,
 };
 pub(crate) use context_reduction::{
-    DeclaredFieldUse, EvidencePlan, EvidencePlanSource, REDUCTION_WORK_LIMIT, UniformDictionaryKey,
+    DeclaredFieldUse, EvidencePlan, EvidencePlanSource, REDUCTION_WORK_LIMIT, ReductionLeaves,
+    UniformDictionaryKey, is_written_leaf,
 };
 pub(crate) use matching::{input_heads_may_match, output_effect_fits};
 pub(crate) use probe::{ConstraintAssumptions, TraitSolverProbe};

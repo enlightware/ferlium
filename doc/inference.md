@@ -122,6 +122,32 @@ custom methods without eagerly building cyclic captures. Cycles consisting only 
 prerequisites remain errors. Other derivations currently require ground inputs.
 
 As with other inferred requirements, changing a private helper may tighten the published contract.
+A [written clause](#written-requirements) fixes the contract instead.
+
+### Written requirements
+
+A written `where` clause of a function, subscript or implementation is complete.
+Callers supply exactly the trait requirements it lists, and the definition solves every other trait requirement of its body itself, or is an error.
+A trailing `..` makes the clause partial: what it does not list is inferred and published as without a clause.
+`where none` is the empty complete clause.
+The clauses of structs, enums and traits have no body to infer from, and are complete already.
+
+The definition solves its other requirements by the reduction of [public requirements](#public-requirements), with the written requirements as leaves instead of the public names.
+A requirement whose trait and input types match a written one is left to the callers.
+Any other is reduced through the impls visible where the item is defined, and one that reaches no leaf is an error at its use.
+A written requirement without generics is checked at the definition and is not published.
+So the same body under a partial clause and under a complete one listing what inference would publish runs the same impls.
+Requirements on the structure of a type, such as a field, an element or a variant, are not trait requirements: they stay inferred and are published with the types they describe.
+
+A written requirement implies the parents and `where` constraints of its trait, transitively, as every impl of the trait satisfies them.
+The body may use these implied requirements, and they become parameters only when it does, which changes no caller.
+
+In a recursive group, a function with a complete clause shows the other functions, at each round, only its written, implied and structural requirements, and reduces the rest after the last round.
+A requirement that another function would add to its contract is an error.
+Such a function currently publishes all its implied requirements, used or not.
+
+In a written requirement, `_` stands for an output to infer, as in `S: Seq<Item = _>`.
+Implementation headers and type and trait definitions do not allow it.
 
 ## Type relations
 

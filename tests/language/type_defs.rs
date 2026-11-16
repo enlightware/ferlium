@@ -173,7 +173,10 @@ fn map_iterator_impl_with_where_clause_src() -> &'static str {
     indoc! { r#"
         impl<I, T, O> Iterator for MapIterator<I, T, O>
         where
-            I: Iterator<Item = T>
+            I: Iterator<Item = T>,
+            I: Value,
+            T: Value,
+            O: Value
         {
             fn next(it: &mut MapIterator<I, T, O>) -> None | Some(O) {
                 match next(it.iterator) {
@@ -1795,7 +1798,10 @@ fn compiled_impl_headers_use_source_syntax() {
 
                 impl<I, T, O> Iterator for TransformIter<I, T, O>
                 where
-                    I: Iterator<Item = T>
+                    I: Iterator<Item = T>,
+                    I: Value,
+                    T: Value,
+                    O: Value
                 {
                     fn next(it: &mut TransformIter<I, T, O>) -> None | Some(O) {
                         match next(it.iterator) {

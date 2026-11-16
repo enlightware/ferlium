@@ -419,7 +419,7 @@ fn mutually_recursive_custom_value_impls() {
                 fn drop(x: &mut Odd<T>) {}
             }
 
-            fn show<T>(n: int, x: T) -> string where T: Value {
+            fn show<T>(n: int, x: T) -> string where T: Value, Even<T>: Value {
                 to_string(Even(n, x))
             }
 

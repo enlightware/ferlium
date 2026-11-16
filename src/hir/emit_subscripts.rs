@@ -259,6 +259,7 @@ pub(super) fn synthetic_subscript_member_function(
         args_span: subscript.args_span,
         ret_ty: subscript.ret_ty,
         where_clause: subscript.where_clause.clone(),
+        where_kind: subscript.where_kind,
         attributes: Vec::new(),
         body: member.body,
         span: member.span,

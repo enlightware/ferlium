@@ -127,6 +127,28 @@ impl CompilationError {
         }
     }
 
+    /// Expects an `UndeclaredRequirement` error for `expected_requirement`, as displayed, on a
+    /// type that a generic names or not as `expected_unnamed` says.
+    pub fn expect_undeclared_requirement(
+        &self,
+        expected_requirement: &str,
+        expected_unnamed: bool,
+    ) {
+        match self.deref() {
+            CompilationErrorImpl::UndeclaredRequirement {
+                requirement,
+                unnamed,
+                ..
+            } => {
+                assert_eq!(requirement, expected_requirement);
+                assert_eq!(*unnamed, expected_unnamed, "{self:?}");
+            }
+            _ => panic!(
+                "expect_undeclared_requirement called on non-UndeclaredRequirement error {self:?}"
+            ),
+        }
+    }
+
     pub fn expect_unbound_ty_var(&self) {
         use CompilationErrorImpl::*;
         // TODO: once ty_var normalization is implemented, pass the ty_var as parameter

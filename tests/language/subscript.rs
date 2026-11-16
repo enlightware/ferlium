@@ -5026,7 +5026,7 @@ fn a_recursive_subscript_whose_contracts_do_not_settle_is_refused() {
             fn tr(x) { (x.1)() + 1 }
         }
         fn step<T, ! E, O>(x: T, g: () -> int ! E) -> (() -> int ! O)
-        where Pair<T, (() -> int ! E)>: Tr<! Out = O> { || tr(Pair(x, g)) }
+        where Pair<T, (() -> int ! E)>: Tr<! Out = O>, T: Value { || tr(Pair(x, g)) }
         fn pure_only(f: () -> int ! ()) -> int { f() }
     "# };
     let bodies = |base: &str| {
@@ -5051,7 +5051,7 @@ fn a_recursive_subscript_whose_contracts_do_not_settle_is_refused() {
             bodies("0")
         ))
         .expect_recursive_group_does_not_settle("f", "Pair<T, ");
-    let written = "subscript f<T, ! E>(slot: &mut int, x: T, g: () -> int ! E, n: int) -> int\nwhere Pair<T, (() -> int ! E)>: Tr<! Out = E> ";
+    let written = "subscript f<T, ! E>(slot: &mut int, x: T, g: () -> int ! E, n: int) -> int\nwhere Pair<T, (() -> int ! E)>: Tr<! Out = E>, T: Value ";
     let uses = indoc! { r#"
         fn read() -> int {
             let mut slot = 0;
@@ -5984,7 +5984,7 @@ fn a_declared_field_typed_before_its_receiver_is_an_instance_of_its_subscript() 
 
         fn get(x) { x.value }
         fn through(b) { get(b) }
-        fn generic<T, O>(b: Box<T>) -> O where T: Read<Out = O> {
+        fn generic<T, O>(b: Box<T>) -> O where T: Read<Out = O>, T: Value, O: Value {
             let field = |x| x.value;
             field(b)
         }
@@ -6026,7 +6026,7 @@ fn a_declared_field_typed_before_its_receiver_is_an_instance_of_its_subscript() 
         trait Use<Self |-> ! F> { fn use_it(x: Self) -> int ! F; }
         struct Pair<T, U>(T, U)
         impl<T, ! E> Use for <Self = Pair<T, (() -> int ! E)> |-> ! F = E>
-        where T: Run<! E = E> {
+        where T: Run<! E = E>, T: Value {
             fn use_it(x) { x.1() }
         }
         fn pure_only(f: () -> int ! ()) -> int { f() }
@@ -6050,7 +6050,7 @@ fn a_declared_field_typed_before_its_receiver_is_an_instance_of_its_subscript() 
             let field = |x| x.value;
             field(Box(7))
         }
-        fn generic<T, ! E>(b: Box<T>) -> int where T: Run<! E = E> {
+        fn generic<T, ! E>(b: Box<T>) -> int where T: Run<! E = E>, T: Value {
             let field = |x| x.value;
             field(b)
         }

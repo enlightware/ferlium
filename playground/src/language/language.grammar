@@ -40,6 +40,9 @@
 
 kw<term> { @specialize[@name={term}]<Identifier, term> }
 
+// A word that is a keyword only where the grammar expects it, and an identifier elsewhere.
+contextualKw<term> { @extend[@name={term}]<Identifier, term> }
+
 @skip { whitespace | LineComment | BlockComment }
 
 @top ModuleAndExpr {
@@ -86,11 +89,11 @@ parentConstraints {
 }
 
 Function {
-    Attribute* visibility kw<'fn'> Identifier GenericParams? '(' identifierWithOptTypeArgs ')' fnRet? whereClause? Block
+    Attribute* visibility kw<'fn'> Identifier GenericParams? '(' identifierWithOptTypeArgs ')' fnRet? requirementClause? Block
 }
 
 SubscriptDef {
-    visibility kw<'subscript'> subscriptHeader '(' identifierWithOptTypeArgs ')' fnRet? whereClause? '{' SubscriptMember* '}'
+    visibility kw<'subscript'> subscriptHeader '(' identifierWithOptTypeArgs ')' fnRet? requirementClause? '{' SubscriptMember* '}'
 }
 
 subscriptHeader {
@@ -125,7 +128,7 @@ TraitAssociatedConst {
 }
 
 TraitImpl {
-    kw<'impl'> GenericParams? Identifier (kw<'for'> traitImplForType)? whereClause? '{' TraitImplItem* '}'
+    kw<'impl'> GenericParams? Identifier (kw<'for'> traitImplForType)? requirementClause? '{' TraitImplItem* '}'
 }
 
 TraitImplItem {
@@ -356,6 +359,12 @@ variantTypeTupleNoRecord {
 
 variantTypeRecord {
     Identifier recordType
+}
+
+// The requirements of a function, impl or subscript: a complete list, made partial by a trailing `..`, or
+// `none` when the caller supplies no evidence.
+requirementClause {
+    kw<'where'> (whereConstraint (',' whereConstraint)* (',' '..')? | '..' | contextualKw<'none'>)
 }
 
 whereClause {

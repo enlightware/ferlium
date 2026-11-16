@@ -107,7 +107,8 @@ fn light_annotations_group_simple_unary_trait_constraints() {
         fn constrained<T>(value: T) -> T
         where
             T: Beta,
-            T: Alpha
+            T: Alpha,
+            T: Value
         {
             value
         }

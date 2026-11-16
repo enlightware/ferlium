@@ -219,6 +219,7 @@ where
 
 impl<V> Deserialize for HashSet<V>
 where
+	V: Deserialize,
 	V: Value
 {
 	fn deserialize(data) -> HashSet<V> {
@@ -253,7 +254,9 @@ where
 
 impl<K, V> Deserialize for HashMap<K, V>
 where
+	K: Deserialize,
 	K: Value,
+	V: Deserialize,
 	V: Value
 {
 	fn deserialize(data) -> HashMap<K, V> {

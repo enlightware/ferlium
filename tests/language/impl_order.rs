@@ -572,7 +572,7 @@ fn projections_preserve_written_generics_before_trait_improvement() {
              struct P<T>({shape})"
         );
         let use_impl = format!(
-            "impl<T> Use for P<T> where [T]: Hidden {{
+            "impl<T> Use for P<T> where [T]: Hidden, .. {{
                 fn use_it(x: P<T>) -> int {{ hidden([{projection}]) }}
              }}"
         );

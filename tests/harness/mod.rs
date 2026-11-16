@@ -7,6 +7,7 @@ use ferlium::{
     compiler::error::{CompilationError, SourceFailureKind},
     compiler::test_support::add_module_source,
     eval::{EvalResult, RuntimeError},
+    format::FormatWith,
     hir::function::{CallableDefinition, Function},
     hir::native_functions::{
         NativeDropFn, NativeFn0, NativeFnN, NativeFnR, NativeFnRM, NativeFnRR, NativeOptionalFnN,
@@ -1431,7 +1432,7 @@ impl TestSession {
             r#"
             use std::*;
             impl<A, B> TestWitnessedProject for <Self = Witnessed<A, B> |-> Output = B>
-                where A: TestAssoc<Output = B> {
+                where A: TestAssoc<Output = B>, A: Value {
                 fn witness_project(value: Witnessed<A, B>) -> B { project(value.0) }
             }
             impl<A, B ! F> TestEff for <Self = Option<A> |-> Output = B ! E = F>
@@ -1847,6 +1848,25 @@ impl TestSession {
 // helper functions to construct values easily to make tests more readable
 
 /// The value of type unit
+/// Renders the published signature of function `name` of the module compiled from `src`.
+pub fn signature(session: &mut TestSession, src: &str, name: &str) -> String {
+    let module_id = session.compile(src).module_id;
+    let compiler_session = session.session();
+    let module = compiler_session.expect_fresh_module(module_id);
+    let rendered = module.format_with(&compiler_session.modules()).to_string();
+    let with_generics = format!("fn {name}<");
+    let without_generics = format!("fn {name}(");
+    let line = rendered
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with(&with_generics) || line.starts_with(&without_generics))
+        .unwrap_or_else(|| panic!("no function {name} in module:\n{rendered}"));
+    match line.rfind(" (#") {
+        Some(index) => line[..index].to_string(),
+        None => line.to_string(),
+    }
+}
+
 pub fn unit() -> ExpectedValue {
     ExpectedValue::typed(unit_value(), Type::unit())
 }

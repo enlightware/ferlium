@@ -229,6 +229,28 @@ pub enum PType {
     Function(B<PFnType>),
 }
 impl PType {
+    /// The span of the first `_` in this type, a type to infer, if there is one.
+    pub fn first_hole(&self, span: Location) -> Option<Location> {
+        use PType::*;
+        match self {
+            Infer => Some(span),
+            Never | Unit | Resolved(_) | Path(_) => None,
+            AppliedPath { args, .. } | Tuple(args) => {
+                args.iter().find_map(|(ty, span)| ty.first_hole(*span))
+            }
+            Variant(items) | Record(items) => items
+                .iter()
+                .find_map(|(_, (ty, span))| ty.first_hole(*span)),
+            Array(inner) => inner.0.first_hole(inner.1),
+            Function(fn_type) => fn_type
+                .args
+                .iter()
+                .map(|arg| &arg.ty)
+                .chain([&fn_type.ret])
+                .find_map(|(ty, span)| ty.first_hole(*span)),
+        }
+    }
+
     pub fn function_type(fn_type: PFnType) -> Self {
         PType::Function(b(fn_type))
     }

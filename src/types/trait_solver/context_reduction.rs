@@ -16,7 +16,7 @@ use ustr::Ustr;
 
 use crate::{
     FxHashMap, FxHashSet, Location,
-    compiler::error::InternalCompilationError,
+    compiler::error::{CompilationErrorImpl, InternalCompilationError},
     hir::{
         FnInstData, NodeArena, dictionary::DictionaryReq,
         emit_hir::instantiate_function_descr_in_place, function::CallableDefinition,
@@ -383,6 +383,18 @@ impl EvidencePlan {
     }
 }
 
+/// The requirements that reduction keeps as those of the item, which its callers supply.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ReductionLeaves<'a> {
+    /// Under a partial `where` clause of an exported item: the requirements that name only
+    /// public traits and types.
+    Public,
+    /// Under a complete `where` clause: the written requirements and those that they imply, in
+    /// the inference of the item, and the requirements on the structure of a type whose head is
+    /// unknown, which the clause does not close.
+    Written(&'a [PubTypeConstraint]),
+}
+
 pub(crate) struct ReducedRequirements {
     pub(crate) requirements: Vec<PubTypeConstraint>,
     pub(crate) evidence: EvidencePlan,
@@ -427,7 +439,38 @@ enum UniformSelection {
     Deferred,
 }
 
-fn is_closed_trait_requirement(constraint: &PubTypeConstraint) -> bool {
+/// Whether a complete clause leaves `constraint` to the callers: it is among `written`, the
+/// requirements that the clause writes and those that they imply, or it is on the structure of
+/// a type, which the clause does not close. The type must not answer it, which is checked apart.
+pub(crate) fn is_written_leaf(
+    constraint: &PubTypeConstraint,
+    written: &[PubTypeConstraint],
+    inference: &mut UnifiedTypeInference,
+) -> bool {
+    match constraint {
+        PubTypeConstraint::HaveTrait {
+            trait_id,
+            input_tys,
+            ..
+        } => {
+            // Effects select no implementation, so they do not tell requirements apart.
+            let erased = |tys: &[Type]| instantiate_types(tys, &mut EffectErasingMapper);
+            let inputs = erased(&inference.substitute_in_types(input_tys));
+            written.iter().any(|written| {
+                matches!(inference.substitute_in_constraint(written),
+                    PubTypeConstraint::HaveTrait { trait_id: id, input_tys, .. }
+                    if id == *trait_id && erased(&input_tys) == inputs)
+            })
+        }
+        // It is the `Value` of its payload, which is reduced as such.
+        PubTypeConstraint::VariantPayloadLayout { .. } => false,
+        PubTypeConstraint::TupleAtIndexIs { .. }
+        | PubTypeConstraint::ProjectionSubscriptIs { .. }
+        | PubTypeConstraint::TypeHasVariant { .. } => true,
+    }
+}
+
+fn is_ground_trait_requirement(constraint: &PubTypeConstraint) -> bool {
     matches!(constraint, PubTypeConstraint::HaveTrait { input_tys, output_tys, output_effs, .. }
         if input_tys.iter().chain(output_tys).all(TypeLike::is_constant)
             && output_effs.iter().all(|effect| !effect.has_variables()))
@@ -881,6 +924,20 @@ impl TraitSolver<'_> {
         check.public
     }
 
+    /// Whether reduction keeps `constraint` as a requirement of the item. The type that it is
+    /// about must not answer it, which is checked apart.
+    fn is_reduction_leaf(
+        &self,
+        constraint: &PubTypeConstraint,
+        leaves: ReductionLeaves<'_>,
+        inference: &mut UnifiedTypeInference,
+    ) -> bool {
+        match leaves {
+            ReductionLeaves::Public => self.requirement_is_public(constraint),
+            ReductionLeaves::Written(written) => is_written_leaf(constraint, written, inference),
+        }
+    }
+
     /// Whether the type that `constraint` is about answers it, as in inference: its
     /// representation, a field, an element or a variant of it, once its head is known.
     fn type_answers(
@@ -1138,12 +1195,14 @@ impl TraitSolver<'_> {
         }))
     }
 
-    /// Replace private requirements by public evidence leaves. Substitutions stay in the item's
-    /// inference context, including output-only variables determined by the private evidence.
+    /// Replace the requirements that are not `leaves` by the evidence that the item builds from
+    /// leaves. Substitutions stay in the item's inference context, including output-only
+    /// variables determined by the evidence that the item builds.
     pub(crate) fn reduce_public_requirements(
         &mut self,
         constraints: Vec<PubTypeConstraint>,
         rigid_inputs: &[Type],
+        leaves: ReductionLeaves<'_>,
         inference: &mut UnifiedTypeInference,
         arena: &mut NodeArena,
     ) -> Result<ReducedRequirements, InternalCompilationError> {
@@ -1154,31 +1213,57 @@ impl TraitSolver<'_> {
         let result = self.reduce_public_requirements_in_inference(
             constraints,
             rigid_inputs,
+            leaves,
             inference,
             arena,
         );
         inference.restore_effects_finalized(finalized);
-        result
+        // Under a complete clause, what is not reduced is not written.
+        result.map_err(|error| match (leaves, &*error) {
+            (
+                ReductionLeaves::Written(_),
+                CompilationErrorImpl::PrivateRequirementInPublicContract {
+                    requirement,
+                    type_names,
+                    span,
+                },
+            ) => internal_compilation_error!(UndeclaredRequirement {
+                requirement: requirement.clone(),
+                type_names: type_names.clone(),
+                unnamed: false,
+                span: *span,
+            }),
+            _ => error,
+        })
     }
 
     fn reduce_public_requirements_in_inference(
         &mut self,
         constraints: Vec<PubTypeConstraint>,
         rigid_inputs: &[Type],
+        leaves: ReductionLeaves<'_>,
         inference: &mut UnifiedTypeInference,
         arena: &mut NodeArena,
     ) -> Result<ReducedRequirements, InternalCompilationError> {
-        if constraints.iter().all(|c| self.requirement_is_public(c)) {
+        if matches!(leaves, ReductionLeaves::Public)
+            && constraints.iter().all(|c| self.requirement_is_public(c))
+        {
             return Ok(ReducedRequirements {
                 requirements: constraints,
                 evidence: EvidencePlan::default(),
             });
         }
-        let original = constraints
+        let Some(original) = constraints
             .iter()
-            .find(|c| !self.requirement_is_public(c))
-            .unwrap()
-            .clone();
+            .find(|c| !self.is_reduction_leaf(c, leaves, inference))
+            .or(constraints.first())
+            .cloned()
+        else {
+            return Ok(ReducedRequirements {
+                requirements: constraints,
+                evidence: EvidencePlan::default(),
+            });
+        };
         let rigid = reduction_rigid_types(&constraints, rigid_inputs, inference);
         let declared = inference.field_uses().len();
         let mut evidence = EvidencePlan::default();
@@ -1196,6 +1281,7 @@ impl TraitSolver<'_> {
                 if self.reduce_evidence_node(
                     id,
                     &rigid,
+                    leaves,
                     inference,
                     arena,
                     &mut work,
@@ -1207,15 +1293,27 @@ impl TraitSolver<'_> {
                     deferred.push(id);
                 }
             }
-            let mut leaves = evidence
+            let mut kept = evidence
                 .nodes
                 .iter()
                 .filter(|node| matches!(node.source, EvidencePlanSource::Public))
                 .map(|node| inference.substitute_in_constraint(&node.constraint))
                 .collect::<Vec<_>>();
-            inference.coalesce_constraint_outputs(&mut leaves, &|id| {
-                self.output_effect_polarities(id)
-            })?;
+            // A requirement that a complete clause leaves to the callers has the outputs of the
+            // written or implied one that it matches.
+            if let ReductionLeaves::Written(written) = leaves {
+                let mut with_written = kept.clone();
+                with_written.extend(
+                    written
+                        .iter()
+                        .map(|c| inference.substitute_in_constraint(c)),
+                );
+                inference.coalesce_constraint_outputs(&mut with_written, &|id| {
+                    self.output_effect_polarities(id)
+                })?;
+            }
+            inference
+                .coalesce_constraint_outputs(&mut kept, &|id| self.output_effect_polarities(id))?;
             if !inference.declared_generics_intact(&rigid) {
                 return Err(unresolved(&original));
             }
@@ -1225,8 +1323,8 @@ impl TraitSolver<'_> {
             // that same node: incoming edges keep their identity, without a graph-wide redirect.
             for (id, node) in evidence.nodes.iter_mut().enumerate() {
                 if matches!(node.source, EvidencePlanSource::Public)
-                    && (!self.requirement_is_public(&node.constraint)
-                        || is_closed_trait_requirement(&node.constraint)
+                    && (!self.is_reduction_leaf(&node.constraint, leaves, inference)
+                        || is_ground_trait_requirement(&node.constraint)
                         || self.type_answers(&node.constraint)?)
                 {
                     node.source = EvidencePlanSource::Pending;
@@ -1239,7 +1337,7 @@ impl TraitSolver<'_> {
                 evidence.field_uses = inference.field_uses()[declared..].to_vec();
                 evidence.substitute(inference);
                 return Ok(ReducedRequirements {
-                    requirements: leaves,
+                    requirements: kept,
                     evidence,
                 });
             }
@@ -1342,6 +1440,7 @@ impl TraitSolver<'_> {
         &mut self,
         id: usize,
         rigid_inputs: &[Type],
+        leaves: ReductionLeaves<'_>,
         inference: &mut UnifiedTypeInference,
         arena: &mut NodeArena,
         work: &mut usize,
@@ -1351,9 +1450,9 @@ impl TraitSolver<'_> {
         // What a type whose head is known answers is not a requirement to publish, whatever
         // the names in it.
         let by_type = self.type_answers(&constraint)?;
-        if !by_type && self.requirement_is_public(&constraint) {
+        if !by_type && self.is_reduction_leaf(&constraint, leaves, inference) {
             evidence.nodes[id].constraint = constraint.clone();
-            evidence.nodes[id].source = if is_closed_trait_requirement(&constraint) {
+            evidence.nodes[id].source = if is_ground_trait_requirement(&constraint) {
                 let PubTypeConstraint::HaveTrait {
                     trait_id,
                     input_tys,

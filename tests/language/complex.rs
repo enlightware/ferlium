@@ -280,7 +280,8 @@ fn function_where_clauses_are_enforced() {
         session.run(indoc! { r#"
             fn keep_ord<T>(value: T) -> T
             where
-                T: Ord
+                T: Ord,
+                T: Value
             {
                 value
             }
@@ -294,7 +295,8 @@ fn function_where_clauses_are_enforced() {
         indoc! { r#"
             fn keep_ord<T>(value: T) -> T
             where
-                T: Ord
+                T: Ord,
+                T: Value
             {
                 value
             }

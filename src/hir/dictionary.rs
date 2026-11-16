@@ -163,7 +163,7 @@ impl DictionaryReq {
     }
 
     /// Whether this is a trait requirement without type or effect variables.
-    pub(crate) fn is_closed_trait_impl(&self) -> bool {
+    pub(crate) fn is_ground_trait_impl(&self) -> bool {
         match self {
             Self::TraitImpl {
                 input_tys,

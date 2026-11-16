@@ -913,7 +913,8 @@ fn removing_a_store_exposes_identical_calls() {
             }
             impl<T ! E> Tr for <Self = W<T> |-> ! E = (fallible, E)>
             where
-                T: Tr<! E = E>
+                T: Tr<! E = E>,
+                T: Value
             {
                 fn m(s, x) {
                     idiv(m(s.0, x), 1)

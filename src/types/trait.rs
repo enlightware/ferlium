@@ -204,6 +204,52 @@ impl TraitValidationError {
     }
 }
 
+/// A source of fresh type and effect variables.
+pub(crate) trait FreshVariables {
+    fn fresh_type(&mut self) -> Type;
+    fn fresh_effect(&mut self) -> EffType;
+}
+
+/// Pushes `constraint` to `constraints`, with the requirements that it implies: the parent and
+/// the `where` constraints of its trait, transitively, at its types. A type or an effect that the
+/// constraints of a trait name besides its parameters gets a fresh variable for each use of the
+/// trait. A constraint already in `constraints` is not pushed again.
+pub(crate) fn push_with_implied(
+    constraint: PubTypeConstraint,
+    env: ModuleEnv<'_>,
+    constraints: &mut Vec<PubTypeConstraint>,
+    fresh: &mut impl FreshVariables,
+) {
+    if constraints.contains(&constraint) {
+        return;
+    }
+    constraints.push(constraint.clone());
+    if let PubTypeConstraint::HaveTrait {
+        trait_id,
+        input_tys,
+        output_tys,
+        output_effs,
+        ..
+    } = constraint
+    {
+        let def = env.trait_def(trait_id);
+        let mut subst = def.param_subst_for(&input_tys, &output_tys, &output_effs);
+        // Each declaration owns the variables omitted from its named parameters.
+        // Rename those before expansion, so ancestors cannot reuse local indices.
+        for parent in def.parent_constraints.iter().chain(&def.constraints) {
+            for var in parent.inner_ty_vars() {
+                subst.0.entry(var).or_insert_with(|| fresh.fresh_type());
+            }
+            for var in parent.inner_effect_vars().into_iter().sorted() {
+                subst.1.entry(var).or_insert_with(|| fresh.fresh_effect());
+            }
+        }
+        for parent in def.parent_constraints.iter().chain(&def.constraints) {
+            push_with_implied(parent.instantiate_simple(&subst), env, constraints, fresh);
+        }
+    }
+}
+
 impl Trait {
     /// The evidence available while checking a default body. Parent constraints are
     /// explicit hidden arguments, just as they are for ordinary generic functions.
@@ -214,54 +260,18 @@ impl Trait {
         env: ModuleEnv<'_>,
         span: Location,
     ) -> Result<TypeScheme<FnType>, InternalCompilationError> {
-        fn expand(
-            constraint: PubTypeConstraint,
-            env: ModuleEnv<'_>,
-            constraints: &mut Vec<PubTypeConstraint>,
-            next_type: &mut u32,
-            next_effect: &mut u32,
-        ) {
-            if constraints.contains(&constraint) {
-                return;
+        struct Counters {
+            next_type: u32,
+            next_effect: u32,
+        }
+        impl FreshVariables for Counters {
+            fn fresh_type(&mut self) -> Type {
+                self.next_type += 1;
+                Type::variable_id(self.next_type - 1)
             }
-            constraints.push(constraint.clone());
-            if let PubTypeConstraint::HaveTrait {
-                trait_id,
-                input_tys,
-                output_tys,
-                output_effs,
-                ..
-            } = constraint
-            {
-                let def = env.trait_def(trait_id);
-                let mut subst = def.param_subst_for(&input_tys, &output_tys, &output_effs);
-                // Each declaration owns the variables omitted from its named parameters.
-                // Rename those before expansion, so ancestors cannot reuse local indices.
-                for parent in def.parent_constraints.iter().chain(&def.constraints) {
-                    for var in parent.inner_ty_vars() {
-                        subst.0.entry(var).or_insert_with(|| {
-                            let fresh = Type::variable_id(*next_type);
-                            *next_type += 1;
-                            fresh
-                        });
-                    }
-                    for var in parent.inner_effect_vars().into_iter().sorted() {
-                        subst.1.entry(var).or_insert_with(|| {
-                            let fresh = EffType::single_variable_id(*next_effect);
-                            *next_effect += 1;
-                            fresh
-                        });
-                    }
-                }
-                for parent in def.parent_constraints.iter().chain(&def.constraints) {
-                    expand(
-                        parent.instantiate_simple(&subst),
-                        env,
-                        constraints,
-                        next_type,
-                        next_effect,
-                    );
-                }
+            fn fresh_effect(&mut self) -> EffType {
+                self.next_effect += 1;
+                EffType::single_variable_id(self.next_effect - 1)
             }
         }
         let inputs = (0..self.input_type_count())
@@ -274,19 +284,20 @@ impl Trait {
             .map(EffType::single_variable_id)
             .collect();
         let mut constraints = Vec::new();
-        let mut next_type = self.input_type_count() + self.output_type_count();
-        let mut next_effect = self.output_effect_count();
-        expand(
+        let mut counters = Counters {
+            next_type: self.input_type_count() + self.output_type_count(),
+            next_effect: self.output_effect_count(),
+        };
+        push_with_implied(
             PubTypeConstraint::new_have_trait(trait_id, inputs, outputs, effects, span),
             env,
             &mut constraints,
-            &mut next_type,
-            &mut next_effect,
+            &mut counters,
         );
         // Use the same functional-dependency unification as ordinary inference:
         // do not silently choose one branch when explicit outputs disagree.
-        let mut inference = UnifiedTypeInference::new_with_ty_vars(next_type);
-        for _ in 0..next_effect {
+        let mut inference = UnifiedTypeInference::new_with_ty_vars(counters.next_type);
+        for _ in 0..counters.next_effect {
             inference.fresh_effect_var();
         }
         inference.coalesce_constraint_outputs(&mut constraints, &|id| {

@@ -9,6 +9,7 @@ mod annotations;
 mod attributes;
 mod bits;
 mod compilation_environment;
+mod complete_clauses;
 mod complex;
 mod effect_inference;
 mod effects;

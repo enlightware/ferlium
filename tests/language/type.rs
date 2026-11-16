@@ -1126,7 +1126,7 @@ fn trait_impl_outputs_can_be_determined_through_constraint_outputs() {
         session.run(indoc! { r#"
             trait First<Self |-> Out> { fn first(x: Self) -> Out; }
             struct Wrap<I>(I)
-            impl<I, T> First for <Self = Wrap<I> |-> Out = Option<T>> where I: Iterator<Item = T> {
+            impl<I, T> First for <Self = Wrap<I> |-> Out = Option<T>> where I: Iterator<Item = T>, I: Value {
                 fn first(x: Wrap<I>) -> Option<T> {
                     let mut it = x.0;
                     next(it)
@@ -1151,7 +1151,7 @@ fn blanket_impls_with_inferred_field_requirements_overlap() {
         impl<T> Get for <Self = T> {
             fn get(s) { s.v }
         }
-        impl<T> Get for <Self = W<T>> where T: Get {
+        impl<T> Get for <Self = W<T>> where T: Get, T: Value {
             fn get(s) { get(s.0) }
         }
     "# });

@@ -64,19 +64,38 @@ Unlike type parameters, explicit effect parameters are checked: the body must wo
 ### Function-level `where` clauses
 
 Functions may also carry an explicit `where` clause.
-This makes trait requirements part of the function's declared interface rather than leaving them entirely implicit.
+It lists the trait requirements that callers must meet.
 
 ```ferlium
 fn keep_ord<T>(value: T) -> T
 where
-    T: Ord
+    T: Ord,
+    T: Value
 {
     value
 }
 ```
 
-This is especially useful when a function's behavior depends on trait-supported operations and you want that dependency to be visible in the source.
-The body is still checked against the declared constraints, so an invalid call is rejected just as it would be for an inferred constraint.
+A written clause is complete: callers supply exactly what it lists, and the function solves every other requirement of its body itself, or is rejected.
+Returning `value` copies it, which needs `Value`, so the clause lists it.
+A requirement also allows those it implies: with `T: Real`, the body may use `+`, as `Real` requires `Num`.
+Requirements on the fields of a type, such as reading `x.a`, are not listed: they remain inferred.
+
+Ending the clause with `..` infers the rest:
+
+```ferlium
+fn keep_ord<T>(value: T) -> T
+where
+    T: Ord,
+    ..
+{
+    value
+}
+```
+
+`where none` states that callers supply nothing.
+In a requirement, `_` stands for an output to infer, as in `S: Seq<Item = _, Iter = I>`.
+The same rules apply to the `where` clauses of `impl` blocks and subscripts.
 
 ## Nominal types
 

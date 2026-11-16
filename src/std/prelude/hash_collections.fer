@@ -187,7 +187,8 @@ where
 
 impl<V> Inspect for HashSet<V>
 where
-	V: Inspect
+	V: Inspect,
+	V: Value
 {
 	fn inspect(value: HashSet<V>) -> string {
 		hash_collection_inspect(value)
@@ -209,7 +210,9 @@ where
 impl<K, V> Inspect for HashMapEntry<K, V>
 where
 	K: Inspect,
-	V: Inspect
+	K: Value,
+	V: Inspect,
+	V: Value
 {
 	fn inspect(value: HashMapEntry<K, V>) -> string {
 		let mut rendered = inspect(value.key);
@@ -456,7 +459,10 @@ where
 impl<K, V> Inspect for HashMap<K, V>
 where
 	K: Inspect,
-	V: Inspect
+	K: Value,
+	V: Inspect,
+	V: Value,
+	(K, V): Inspect
 {
 	fn inspect(value: HashMap<K, V>) -> string {
 		hash_collection_inspect(value)

@@ -62,7 +62,7 @@ use crate::{
         },
         mutability::{MutType, MutVar, MutVarKey},
         never::reject_reserved_name,
-        r#trait::{Trait, TraitMethodIndex},
+        r#trait::{FreshVariables, Trait, TraitMethodIndex},
         trait_solver::{TraitSolver, TraitSolverProbe},
         r#type::{
             CallImplType, CallResultConvention, FnArgType, FnType, SubscriptMemberType,
@@ -326,6 +326,16 @@ enum PreparedNamedSubscriptAccessor {
     Ready(NamedSubscriptCall),
     /// Accessor argument evaluation diverges before any yielded place can exist.
     DivergedBeforeYield(NodeId),
+}
+
+impl FreshVariables for TypeInference {
+    fn fresh_type(&mut self) -> Type {
+        self.fresh_type_var_ty()
+    }
+
+    fn fresh_effect(&mut self) -> EffType {
+        self.fresh_effect_var_ty()
+    }
 }
 
 impl TypeInference {

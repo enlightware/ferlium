@@ -2,34 +2,47 @@
 
 impl<F, T> Cast for <From = [F], To = [T]>
 where
-	Cast<From = F, To = T>
+	Cast<From = F, To = T>,
+	F: Value,
+	T: Value
 {
 	fn cast(array: [F]) -> [T] {
 		map(array, (|element| cast(element): ((F) -> T ! fallible)))
 	}
 }
 
+// Partial: callers still supply the evidence of the adaptor and of `FromIterator`, which the
+// optimizer does not yet fold when built here from constant evidence.
 impl<A, B ! MapperEffect> Map for <Self = [A], Mapped = B |-> Item = A, Output = [B] ! MapperEffect = MapperEffect, MapEffect = (fallible, MapperEffect)>
 where
-	A: Value
+	A: Value,
+	B: Value,
+	..
 {
 	fn map(value: [A], mapper: (A) -> B ! MapperEffect) -> [B] {
 		from_iter(MapIterator { iterator: ArrayIterator { array: value, index: 0 }, mapper })
 	}
 }
 
+// Partial: callers still supply the evidence of the adaptor and of `FromIterator`, which the
+// optimizer does not yet fold when built here from constant evidence.
 impl<A ! PredicateEffect> Filter for <Self = [A] |-> Item = A, Output = [A] ! PredicateEffect = PredicateEffect, FilterEffect = (fallible, PredicateEffect)>
 where
-	A: Value
+	A: Value,
+	..
 {
 	fn filter(value: [A], predicate: (A) -> bool ! PredicateEffect) -> [A] {
 		from_iter(FilterIterator { iterator: ArrayIterator { array: value, index: 0 }, filter: predicate })
 	}
 }
 
+// Partial: callers still supply the evidence of the adaptor and of `FromIterator`, which the
+// optimizer does not yet fold when built here from constant evidence.
 impl<A, B ! MapperEffect> FilterMap for <Self = [A], Mapped = B |-> Item = A, Output = [B] ! MapperEffect = MapperEffect, FilterMapEffect = (fallible, MapperEffect)>
 where
-	A: Value
+	A: Value,
+	B: Value,
+	..
 {
 	fn filter_map(value: [A], mapper: (A) -> Option<B> ! MapperEffect) -> [B] {
 		from_iter(FilterMapIterator { iterator: ArrayIterator { array: value, index: 0 }, filter_map: mapper })
@@ -248,7 +261,8 @@ impl<A> Reverse for <Self = [A]> {
 /// Returns a reversed copy of `value`.
 pub fn reversed<S>(value: S) -> S
 where
-	Reverse<Self = S>
+	Reverse<Self = S>,
+	S: Value
 {
 	let mut result = value;
 	reverse(result);
@@ -321,7 +335,8 @@ where
 /// Returns a sorted copy of `value` using `compare`.
 pub fn sorted_by<S, A>(value: S, compare: (A, A) -> Ordering ! fallible) -> S
 where
-	SortBy<Self = S |-> Item = A>
+	SortBy<Self = S |-> Item = A>,
+	S: Value
 {
 	let mut result = value;
 	sort_by(result, compare);
@@ -332,7 +347,8 @@ where
 pub fn sorted<S, A>(value: S) -> S
 where
 	SortBy<Self = S |-> Item = A>,
-	A: Ord
+	A: Ord,
+	S: Value
 {
 	sorted_by(value, |left, right| cmp(left, right))
 }

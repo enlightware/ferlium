@@ -595,7 +595,7 @@ mod tests {
             requirements.validate_runtime(ModuleEnv::new(&module, session.raw_modules())),
             Err(NativeRequirementError::InvalidEntry {
                 function: id,
-                error: NativeContractError::NotClosed
+                error: NativeContractError::NotGround
             })
         );
     }

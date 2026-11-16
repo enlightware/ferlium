@@ -4252,7 +4252,7 @@ mod tests {
         assert!(matches!(
             collect(&module),
             Err(BackendReadinessError::InvalidNativeEntry {
-                error: NativeContractError::NotClosed,
+                error: NativeContractError::NotGround,
                 ..
             })
         ));

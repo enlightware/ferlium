@@ -520,7 +520,7 @@ fn generic_trait_method_call_uses_concrete_dictionary_method_signature() {
     let mut session = TestSession::new();
     assert_val_eq!(
         session.run(indoc! {r#"
-            fn cmp_wrapper<A>(left: A, right: A)
+            fn cmp_wrapper<A>(left: A, right: A) -> int
             where
                 A: Ord
             {

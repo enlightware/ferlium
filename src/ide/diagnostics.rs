@@ -13,6 +13,7 @@ use crate::{
         MutabilityMustBeContext, MutabilityMustBeWhat, ORPHAN_RULE_HINT, PRIVATE_IMPL_HINT,
         PRIVATE_NAME_HINT, WhatIsNotAProductType, WhichProductTypeIsNot, effect_arguments_message,
         format_output_effect_mismatches, impl_effect_restriction_message, overlap_effects_hint,
+        undeclared_requirement_message,
     },
     parser::location::SourceTable,
     types::effects::NamedEffectRow,
@@ -401,6 +402,15 @@ pub(super) fn compilation_error_to_data(
         PrivateRequirementInPublicContract { requirement, span, .. } => vec![error_data_from_location(
             span,
             format!("Cannot publish private requirement `{requirement}`. Its evidence must be constructible for every input type from public requirements"),
+        )],
+        UndeclaredRequirement {
+            requirement,
+            unnamed,
+            span,
+            ..
+        } => vec![error_data_from_location(
+            span,
+            undeclared_requirement_message(requirement, *unnamed),
         )],
         PrivateNameInPublicContract {
             item_kind,

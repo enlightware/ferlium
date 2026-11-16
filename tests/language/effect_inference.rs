@@ -9,7 +9,7 @@ use test_log::test;
 use indoc::{formatdoc, indoc};
 use ustr::ustr;
 
-use crate::harness::{TestSession, float, int, string};
+use crate::harness::{TestSession, float, int, signature, string};
 use ferlium::{
     compiler::error::{CompilationErrorImpl, ImplEffectRestriction, SourceFailureKind},
     format::FormatWith,
@@ -18,25 +18,6 @@ use ferlium::{
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
-
-/// Renders the published signature of function `name` of the module compiled from `src`.
-fn signature(session: &mut TestSession, src: &str, name: &str) -> String {
-    let module_id = session.compile(src).module_id;
-    let compiler_session = session.session();
-    let module = compiler_session.expect_fresh_module(module_id);
-    let rendered = module.format_with(&compiler_session.modules()).to_string();
-    let with_generics = format!("fn {name}<");
-    let without_generics = format!("fn {name}(");
-    let line = rendered
-        .lines()
-        .map(str::trim)
-        .find(|line| line.starts_with(&with_generics) || line.starts_with(&without_generics))
-        .unwrap_or_else(|| panic!("no function {name} in module:\n{rendered}"));
-    match line.rfind(" (#") {
-        Some(index) => line[..index].to_string(),
-        None => line.to_string(),
-    }
-}
 
 /// Runs `call` after `prelude` and the two `functions`, declared in both orders.
 fn assert_in_both_orders(prelude: &str, functions: [&str; 2], call: &str, expected: isize) {
@@ -481,7 +462,7 @@ fn nested_selection_relates_callback_effects_by_polarity() {
                 fn ignore(s: Base, f: () -> int ! fallible) -> int { 1 }
             }
             impl<T> Outer for <Self = Wrap<T>>
-            where T: Ignore<! E = ()> {
+            where T: Ignore<! E = ()>, T: Value {
                 fn outer(s: Wrap<T>) -> int { ignore(s.0, || 2) }
             }
             outer(Wrap(Base))
@@ -1027,7 +1008,7 @@ fn unused_effect_generics_in_a_group_disappear() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn group_with_effect_generics_passes_dictionaries() {
-    let f = "fn f<T ! E>(x: T, g: () -> int ! E, n: int) -> T where T: Num {
+    let f = "fn f<T ! E>(x: T, g: () -> int ! E, n: int) -> T where T: Num, T: Value {
         if n > 0 {
             h(x + x, g, n - 1)
         } else {
@@ -1035,7 +1016,7 @@ fn group_with_effect_generics_passes_dictionaries() {
             x
         }
     }";
-    let h = "fn h<U ! F>(x: U, g: () -> int ! F, n: int) -> U where U: Num {
+    let h = "fn h<U ! F>(x: U, g: () -> int ! F, n: int) -> U where U: Num, U: Value {
         if n > 0 {
             f(x * x, g, n - 1)
         } else {
@@ -1736,7 +1717,7 @@ fn returned_closure_takes_the_generic_it_captures() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn given_does_not_serve_a_concrete_query() {
-    let src = "fn f<T>(x: T) -> T where T: Num {
+    let src = "fn f<T>(x: T) -> T where T: Num, T: Value {
         let a: int = 1 + 2;
         if a > 2 {
             x + x
@@ -1762,7 +1743,7 @@ fn given_serves_an_inferred_query_that_becomes_the_generic() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn given_serves_an_inferred_query_in_a_group_with_contracts() {
-    let src = "fn f<T ! E>(x: T, g: () -> int ! E, n: int) -> T where T: Num {
+    let src = "fn f<T ! E>(x: T, g: () -> int ! E, n: int) -> T where T: Num, T: Value {
         let add = |a, b| a + b;
         if n > 0 {
             add(f(x, g, n - 1), x)
@@ -1885,7 +1866,7 @@ fn a_written_effect_in_a_requirement_of_a_group_stays_that_generic() {
             fn check(x: Pair<int, (() -> int ! E)>) -> int { 7 }
         }
         fn f<T, ! E>(x: T, g: () -> int ! E, n: int) -> int
-        where Pair<T, (() -> int ! E)>: Check {
+        where T: Value, Pair<T, (() -> int ! E)>: Check {
             if n > 0 { f(x, g, n - 1) }
             else { check(Pair(x, g)) }
         }
@@ -2531,7 +2512,7 @@ impl<! E> Tr for <Self = Pair<int, (() -> int ! E)> |-> ! Out = E> {
     fn tr(x: Pair<int, (() -> int ! E)>) -> int { (x.1)() }
 }
 fn step<T, ! E, O>(x: T, g: () -> int ! E) -> (() -> int ! O)
-where Pair<T, (() -> int ! E)>: Tr<! Out = O> {
+where Pair<T, (() -> int ! E)>: Tr<! Out = O>, T: Value {
     || tr(Pair(x, g))
 }";
     let body = "{
@@ -2551,7 +2532,7 @@ where Pair<T, (() -> int ! E)>: Tr<! Out = O> {
         TestSession::new().run(&format!(
             "{prelude}
 fn f<T, ! E>(x: T, g: () -> int ! E, n: int) -> int
-where Pair<T, (() -> int ! E)>: Tr<! Out = E> {body}
+where Pair<T, (() -> int ! E)>: Tr<! Out = E>, T: Value {body}
 f(3, || 1, 2)"
         )),
         int(0)
@@ -2909,7 +2890,7 @@ const CALL_THROUGH_TRAIT: &str = indoc! { r#"
 const PURE_RUN_SERIALIZER: &str = indoc! { r#"
     struct Wrap<T>(T)
     impl<T> Serialize for Wrap<T>
-    where T: Run<! E = ()> {
+    where T: Run<! E = ()>, T: Value {
         fn serialize(x: Wrap<T>) -> DataValue {
             serialize(run(x.0))
         }
@@ -2976,7 +2957,7 @@ fn a_repeated_type_variable_equates_the_effects_of_the_caller() {
         trait Tr<Self |-> ! E> {{ fn go(x: Self) -> int ! E; }}
         struct Pair<A, B>(A, B)
         impl<T ! F> Tr for <Self = Pair<T, T> |-> ! E = F>
-        where T: Run<! E = F> {{
+        where T: Run<! E = F>, T: Value {{
             fn go(x: Pair<T, T>) -> int {{ run(x.0) + run(x.1) }}
         }}"
     );
@@ -3606,7 +3587,7 @@ const DEFAULT_METHOD_HELPERS: &str = indoc! { r#"
     }
     struct W<T>(T)
     trait Pure<Self> { fn pure(x: Self) -> int; }
-    impl<T> Pure for W<T> where T: Run<! E = ()> {
+    impl<T> Pure for W<T> where T: Run<! E = ()>, T: Value {
         fn pure(x: W<T>) -> int { run(x.0) }
     }
     struct M<! F>(() -> int ! F)
@@ -3662,7 +3643,7 @@ fn effect_independent_selection_holds_across_modules() {
         }
         pub struct Wrap<T>(T)
         pub fn wrap<T>(x: T) -> Wrap<T> { Wrap(x) }
-        impl<T> Serialize for Wrap<T> where T: Run<! E = ()> {
+        impl<T> Serialize for Wrap<T> where T: Run<! E = ()>, T: Value {
             fn serialize(x: Wrap<T>) -> DataValue { serialize(run(x.0)) }
         }
         pub fn warm() -> DataValue { serialize((wrap(cb(|| 3)),)) }
@@ -3777,7 +3758,7 @@ fn an_effect_output_bound_met_by_a_written_generic_names_the_trait_and_the_gener
         ),
         (
             "struct Wrap<T>(T)
-            impl<T> Serialize for Wrap<T> where T: Run<! E = ()> {
+            impl<T> Serialize for Wrap<T> where T: Run<! E = ()>, T: Value {
                 fn serialize(x: Wrap<T>) -> DataValue { serialize(run(x.0)) }
             }
             fn f<! G>(g: () -> int ! G) -> DataValue { serialize(Wrap(Cb(g))) }",
@@ -4370,9 +4351,9 @@ fn an_imported_impl_builds_private_evidence_from_its_consumers_requirements() {
         .replace("struct Cb", "pub struct Cb")
         .replace("trait Run", "pub trait Run")
         + "trait Check<Self> {}\nimpl<T> Check for [T] where T: Run<! E = ()> {}\n"
-        + &named_value_impl("Wrap", "[T]: Check").replace("struct Wrap", "pub struct Wrap")
+        + &named_value_impl("Wrap", "[T]: Check, ..").replace("struct Wrap", "pub struct Wrap")
         + "pub trait Show<Self> { fn show(x: Self) -> string; }
-impl<T> Show for Wrap<T> where [T]: Check { fn show(x: Wrap<T>) -> string { \"shown\" } }
+impl<T> Show for Wrap<T> where [T]: Check, .. { fn show(x: Wrap<T>) -> string { \"shown\" } }
 ";
     for (call, expected) in [
         ("to_string(lib::Wrap(lib::Cb(g)))", "Wrap"),

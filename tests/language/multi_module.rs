@@ -585,7 +585,8 @@ fn generated_trait_artifacts_are_private() {
     let module_id = compile_module(
         &mut session,
         "base",
-        "pub fn mapped(values: [int]) -> [int] { map(values, |x| x + 1) }",
+        // `collect` has no clause, so the consumer answers the requirements of the adaptor.
+        "pub fn mapped(values: [int]) -> [int] { collect(map(iter(values), |x| x + 1)) }",
     );
     let module = session.session().expect_fresh_module(module_id);
     let generated = module
@@ -695,7 +696,7 @@ fn generated_trait_method_names_disambiguate_impls_with_same_inputs() {
 
             impl<A> Adapter for <Self = [A] |-> Output = [A]>
             where
-                [A]: Small
+                [A]: Small, ..
             {
                 fn adapt(value: [A]) -> [A] {
                     value
@@ -704,7 +705,7 @@ fn generated_trait_method_names_disambiguate_impls_with_same_inputs() {
 
             impl<A> Adapter for <Self = [A] |-> Output = ArrayIterator<A>>
             where
-                [A]: Big
+                [A]: Big, ..
             {
                 fn adapt(value: [A]) -> ArrayIterator<A> {
                     iter(value)
@@ -757,7 +758,7 @@ fn coherence_checks_imported_prerequisites_with_their_private_impls() {
             pub trait P<Self> {}
             struct W<T>(T)
             impl<T> Hidden for W<T> {}
-            impl<T> P for [T] where W<T>: Hidden {}
+            impl<T> P for [T] where W<T>: Hidden, .. {}
         "# },
     );
     let err = session
@@ -767,8 +768,8 @@ fn coherence_checks_imported_prerequisites_with_their_private_impls() {
                 pub trait Q<Self> {}
                 pub trait R<Self> {}
                 impl<T> Q for [T] {}
-                impl<T> R for [T] where [T]: base::P {}
-                impl<T> R for [T] where [T]: Q {}
+                impl<T> R for [T] where [T]: base::P, .. {}
+                impl<T> R for [T] where [T]: Q, .. {}
             "# },
         )
         .unwrap_err();
@@ -2020,7 +2021,7 @@ fn an_impl_is_private_only_through_its_owning_input() {
     }
 }
 
-const SEALED_MODULE: &str = "#[sealed]\npub trait Shape<Self> { fn area(x: Self) -> int ! fallible; }\npub struct Square(int)\nimpl Shape for Square { fn area(x: Square) -> int { x.0 * x.0 } }\nimpl<T> Shape for [T] where T: Shape { fn area(x: [T]) -> int { area(x[0]) } }";
+const SEALED_MODULE: &str = "#[sealed]\npub trait Shape<Self> { fn area(x: Self) -> int ! fallible; }\npub struct Square(int)\nimpl Shape for Square { fn area(x: Square) -> int { x.0 * x.0 } }\nimpl<T> Shape for [T] where T: Shape, T: Value { fn area(x: [T]) -> int { area(x[0]) } }";
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
@@ -2133,7 +2134,7 @@ fn a_private_impl_conflicting_with_a_dependency_is_rejected_in_its_module() {
 fn a_public_impl_solves_its_private_requirement_in_its_scope() {
     // `a`'s `Use` impl solves `Conv<X, T>` in `a`'s private scope. `X` cannot leave `a`, so no
     // other module can ask for that application.
-    let a = "use c::{Conv, Use};\nstruct X;\npub struct P<T>(T)\nimpl<T> Conv for <A = X, B = T> { fn conv(a, b) { 1 } }\nimpl<T> Use for P<T> where Conv<X, T> { fn use_(x) { conv(X, x.0) } }";
+    let a = "use c::{Conv, Use};\nstruct X;\npub struct P<T>(T)\nimpl<T> Conv for <A = X, B = T> { fn conv(a, b) { 1 } }\nimpl<T> Use for P<T> where Conv<X, T>, .. { fn use_(x) { conv(X, x.0) } }";
     let mut session = TestSession::new();
     compile_module(&mut session, "c", CONV_MODULE);
     compile_module(&mut session, "a", a);
@@ -2146,7 +2147,7 @@ fn a_public_impl_solves_its_private_requirement_with_outputs_in_its_scope() {
     // `a`'s public `Use` impl needs `a`'s private `Conv` impl, solved in `a`'s scope, which
     // determines the output of `Use`.
     let c = "pub trait Conv<A, B |-> Out> { fn conv(a: A, b: B) -> Out; }\npub trait Use<Self |-> Out> { fn use_(x: Self) -> Out; }";
-    let a = "use c::{Conv, Use};\nstruct X;\npub struct P<T>(T)\nimpl<T> Conv for <A = X, B = T |-> Out = int> { fn conv(a: X, b: T) -> int { 1 } }\nimpl<T, O> Use for <Self = P<T> |-> Out = O> where Conv<A = X, B = T |-> Out = O> { fn use_(x: P<T>) -> O { conv(X, x.0) } }";
+    let a = "use c::{Conv, Use};\nstruct X;\npub struct P<T>(T)\nimpl<T> Conv for <A = X, B = T |-> Out = int> { fn conv(a: X, b: T) -> int { 1 } }\nimpl<T, O> Use for <Self = P<T> |-> Out = O> where Conv<A = X, B = T |-> Out = O>, .. { fn use_(x: P<T>) -> O { conv(X, x.0) } }";
     let mut session = TestSession::new();
     compile_module(&mut session, "c", c);
     compile_module(&mut session, "a", a);
@@ -2157,7 +2158,7 @@ fn a_public_impl_solves_its_private_requirement_with_outputs_in_its_scope() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn a_private_impl_overrides_derivation_in_its_scope() {
     // In `a`'s scope, `X<int>` is inspected by `a`'s private impl, not by derivation.
-    let a = "struct X<T>(T)\npub struct P<T>(T)\nimpl<T> Inspect for X<T> { fn inspect(x: X<T>) -> string { \"custom\" } }\npub trait Use<Self> { fn use_(x: Self) -> string ! fallible; }\nimpl<T> Use for P<T> where X<T>: Inspect { fn use_(x: P<T>) -> string { inspect(X(x.0)) } }";
+    let a = "struct X<T>(T)\npub struct P<T>(T)\nimpl<T> Inspect for X<T> { fn inspect(x: X<T>) -> string { \"custom\" } }\npub trait Use<Self> { fn use_(x: Self) -> string ! fallible; }\nimpl<T> Use for P<T> where X<T>: Inspect, .. { fn use_(x: P<T>) -> string { inspect(X(x.0)) } }";
     let mut session = TestSession::new();
     compile_module(&mut session, "a", a);
     assert_val_eq!(session.run("a::Use::use_(a::P(0))"), string("custom"));
@@ -2167,8 +2168,8 @@ fn a_private_impl_overrides_derivation_in_its_scope() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn public_impls_build_private_evidence_from_the_consumers_evidence() {
     let declarations = [
-        "impl<T> Hidden for [T] where T: Inspect { fn hidden(x: [T]) -> string { inspect(x[0]) } }",
-        "impl<T> Use for P<T> where [T]: Hidden { fn use_(x: P<T>) -> string { hidden([x.0]) } }",
+        "impl<T> Hidden for [T] where T: Inspect, .. { fn hidden(x: [T]) -> string { inspect(x[0]) } }",
+        "impl<T> Use for P<T> where [T]: Hidden, .. { fn use_(x: P<T>) -> string { hidden([x.0]) } }",
     ];
     for reverse in [false, true] {
         let mut declarations = declarations;
@@ -2183,7 +2184,7 @@ fn public_impls_build_private_evidence_from_the_consumers_evidence() {
                 fn run(x: Cb<(() -> int ! E)>) -> int {{ x.0() }}
             }}
             struct X<T>(T)
-            impl<T> Inspect for X<T> where T: Run<! E = ()> {{
+            impl<T> Inspect for X<T> where T: Run<! E = ()>, .. {{
                 fn inspect(x: X<T>) -> string {{ "custom" }}
             }}
             trait Hidden<Self> {{ fn hidden(x: Self) -> string ! fallible; }}
@@ -2204,7 +2205,7 @@ fn public_impls_build_private_evidence_from_the_consumers_evidence() {
 fn private_requirements_fail_at_the_public_impl_definition() {
     for hidden_impl in [
         "",
-        "impl<T> Hidden for [T] where [[T]]: Hidden { fn hidden(x: [T]) -> int { hidden([x]) } }",
+        "impl<T> Hidden for [T] where [[T]]: Hidden, .. { fn hidden(x: [T]) -> int { hidden([x]) } }",
     ] {
         let mut session = TestSession::new();
         let source = format!(
@@ -2213,7 +2214,7 @@ fn private_requirements_fail_at_the_public_impl_definition() {
             pub struct P<T>(T)
             pub trait Use<Self> {{ fn use_(x: Self) -> int; }}
             {hidden_impl}
-            impl<T> Use for P<T> where [T]: Hidden {{ fn use_(x: P<T>) -> int {{ hidden([x.0]) }} }}
+            impl<T> Use for P<T> where [T]: Hidden, .. {{ fn use_(x: P<T>) -> int {{ hidden([x.0]) }} }}
         "#
         );
         assert!(
@@ -2257,7 +2258,7 @@ fn exported_functions_reduce_private_requirements() {
         "a",
         r#"
         trait Hidden<Self> { fn hidden(x: Self) -> string ! fallible; }
-        impl<T> Hidden for [T] where T: Inspect {
+        impl<T> Hidden for [T] where T: Inspect, .. {
             fn hidden(x: [T]) -> string { inspect(x[0]) }
         }
         pub fn f<T>(x: T) -> string { hidden([x]) }
@@ -2302,7 +2303,7 @@ fn exported_recursive_groups_with_an_effect_generic_reduce_private_requirements(
                 &format!(
                     r#"
                 trait Hidden<Self> {{ fn hidden(x: Self) -> string ! fallible; }}
-                impl<T> Hidden for [T] where T: Inspect {{
+                impl<T> Hidden for [T] where T: Inspect, .. {{
                     fn hidden(x: [T]) -> string {{ inspect(x[0]) }}
                 }}
                 {}
@@ -2362,7 +2363,7 @@ fn exported_recursive_groups_with_an_effect_generic_reduce_private_requirements(
                 trait Hidden<Self> {{
                     fn hidden(x: Self) -> string ! fallible;
                 }}
-                impl<T, O> Hidden for [T] where T: Read<Out = O>, O: Inspect {{
+                impl<T, O> Hidden for [T] where T: Read<Out = O>, O: Inspect, .. {{
                     fn hidden(x: [T]) -> string {{ inspect(read(x[0])) }}
                 }}
                 impl Read for <Self = int |-> Out = int> {{
@@ -2417,7 +2418,7 @@ fn exported_recursive_groups_reduce_private_requirements() {
             &format!(
                 r#"
             trait Hidden<Self> {{ fn hidden(x: Self) -> string ! fallible; }}
-            impl<T> Hidden for [T] where T: Inspect {{
+            impl<T> Hidden for [T] where T: Inspect, .. {{
                 fn hidden(x: [T]) -> string {{ inspect(x[0]) }}
             }}
             {}
@@ -2437,7 +2438,7 @@ fn exported_subscripts_reduce_private_requirements() {
     // `T: Inspect`, also for the value of the subscript that a body takes.
     let hidden = indoc! { r#"
         trait Hidden<Self |-> ! E> { fn hidden(x: Self) -> int ! E; }
-        impl<T> Hidden for <Self = [T] |-> ! E = fallible> where T: Inspect {
+        impl<T> Hidden for <Self = [T] |-> ! E = fallible> where T: Inspect, .. {
             fn hidden(x) { string_len(inspect(x[0])) }
         }
     "# };
@@ -2566,7 +2567,7 @@ fn exported_subscripts_reduce_private_requirements() {
                     trait HiddenRead<Self> {{
                         fn hidden_read(x: Self) -> int ! fallible;
                     }}
-                    impl<T, O> HiddenRead for [T] where T: Read<Out = O>, O: Inspect {{
+                    impl<T, O> HiddenRead for [T] where T: Read<Out = O>, O: Inspect, .. {{
                         fn hidden_read(x: [T]) -> int {{ string_len(inspect(read(x[0]))) }}
                     }}
                     pub subscript cell(slot: &mut int, key) -> int {{
@@ -2720,13 +2721,13 @@ fn private_reduction_quantifies_outputs_of_its_public_leaves() {
         r#"
         pub trait Read<Self |-> Out> { fn read(x: Self) -> Out; }
         trait Hidden<Self> { fn hidden(x: Self) -> string ! fallible; }
-        impl<T, O> Hidden for [T] where T: Read<Out = O>, O: Inspect {
+        impl<T, O> Hidden for [T] where T: Read<Out = O>, O: Inspect, .. {
             fn hidden(x: [T]) -> string { inspect(read(x[0])) }
         }
         pub fn f<T>(x: T) -> string { hidden([x]) }
         pub struct P<T>(T)
         pub trait Use<Self> { fn use_(x: Self) -> string ! fallible; }
-        impl<T> Use for P<T> where [T]: Hidden {
+        impl<T> Use for P<T> where [T]: Hidden, .. {
             fn use_(x: P<T>) -> string { hidden([x.0]) }
         }
     "#,
@@ -2778,7 +2779,7 @@ fn public_value_evidence_builds_a_private_custom_field_dictionary() {
         impl Read for <Self = int |-> Out = int> { fn read(x: int) -> int { x } }
         impl Read for <Self = bool |-> Out = bool> { fn read(x: bool) -> bool { x } }
         struct Cell<T>(T)
-        impl<T, O> Value for Cell<T> where T: Value, T: Read<Out = O>, O: Value {
+        impl<T, O> Value for Cell<T> where T: Value, T: Read<Out = O>, O: Value, .. {
             fn eq(x: Cell<T>, y: Cell<T>) -> bool { eq(x.0, y.0) }
             fn to_string(x: Cell<T>) -> string { to_string(read(x.0)) }
             fn hash(x: Cell<T>, state: &mut hasher) { hash(x.0, state) }
@@ -2800,7 +2801,7 @@ fn public_value_evidence_builds_a_private_custom_field_dictionary() {
         r#"
         use a::Read;
         struct Local<T>(T)
-        impl<T, O> Read for <Self = Local<T> |-> Out = O> where T: Read<Out = O> {
+        impl<T, O> Read for <Self = Local<T> |-> Out = O> where T: Read<Out = O>, .. {
             fn read(x: Local<T>) -> O { read(x.0) }
         }
         pub fn rendered<T>(x: T) -> string { to_string(a::make(Local(x))) }
@@ -2846,7 +2847,7 @@ fn reducing_outputs_rechecks_the_public_impl_head() {
         }
         pub struct P<T>(T)
         pub trait Get<Self |-> Out> { fn get(x: Self) -> Out; }
-        impl<T, O> Get for <Self = P<T> |-> Out = O> where [T]: Conv<Out = O> {
+        impl<T, O> Get for <Self = P<T> |-> Out = O> where [T]: Conv<Out = O>, .. {
             fn get(x: P<T>) -> O { conv([x.0]) }
         }
     "#,
@@ -2892,8 +2893,8 @@ fn public_leaves_are_conditions_not_specializations_of_the_impl_head() {
 fn written_impl_bounds_publish_the_consumers_requirement_after_projection() {
     let impls = [
         "impl Read for [int] { fn read(x: [int]) -> int { 7 } }",
-        "impl<T> Hidden for [T] where [T]: Read { fn hidden(x: [T]) -> int { read(x) } }",
-        "impl<T> Use for P<T> where [T]: Hidden { fn use_it(x: P<T>) -> int { hidden([x.0]) } }",
+        "impl<T> Hidden for [T] where [T]: Read, .. { fn hidden(x: [T]) -> int { read(x) } }",
+        "impl<T> Use for P<T> where [T]: Hidden, .. { fn use_it(x: P<T>) -> int { hidden([x.0]) } }",
     ];
     for reverse in [false, true] {
         let mut impls = impls;
@@ -2918,7 +2919,7 @@ fn written_impl_bounds_publish_the_consumers_requirement_after_projection() {
             &mut session,
             "b",
             "use a::Read;
-             pub fn g<T>(x: T) -> int where [T]: Read {
+             pub fn g<T>(x: T) -> int where [T]: Read, .. {
                  a::Use::use_it(a::P(x)) + a::f(a::P(x))
              }",
         );
@@ -2980,7 +2981,7 @@ fn recorded_private_evidence_is_shared_across_calls_functions_and_lambdas() {
         "shared",
         r#"
         trait Hidden<Self> { fn hidden(x: Self) -> string ! fallible; }
-        impl<T> Hidden for [T] where T: Inspect {
+        impl<T> Hidden for [T] where T: Inspect, .. {
             fn hidden(x: [T]) -> string { inspect(x[0]) }
         }
         pub fn twice<T>(x: T, y: T) -> string { concat(hidden([x]), hidden([y])) }
@@ -3016,7 +3017,7 @@ fn private_requirement_errors_use_the_declarations_generic_names() {
         ),
         (
             "implementation",
-            "trait Hidden<Self> { fn hidden(x: Self) -> int; } pub struct P<T>(T) pub trait Use<Self> { fn use_(x: Self) -> int; } impl<Element> Use for P<Element> where Element: Hidden { fn use_(x: P<Element>) -> int { hidden(x.0) } }",
+            "trait Hidden<Self> { fn hidden(x: Self) -> int; } pub struct P<T>(T) pub trait Use<Self> { fn use_(x: Self) -> int; } impl<Element> Use for P<Element> where Element: Hidden, .. { fn use_(x: P<Element>) -> int { hidden(x.0) } }",
         ),
     ] {
         let mut session = TestSession::new();
@@ -3048,10 +3049,10 @@ fn private_selection_does_not_choose_a_public_prerequisites_output() {
             for item in [
                 "pub fn f<T>(x: T) -> int { hidden2(read(x)) }".to_owned(),
                 format!(
-                    "impl<T, O> Hidden for [T] where {prerequisites} {{ fn hidden(x: [T]) -> int {{ hidden2(read(x[0])) }} }} pub fn f<T>(x: T) -> int {{ hidden([x]) }}"
+                    "impl<T, O> Hidden for [T] where {prerequisites}, .. {{ fn hidden(x: [T]) -> int {{ hidden2(read(x[0])) }} }} pub fn f<T>(x: T) -> int {{ hidden([x]) }}"
                 ),
                 format!(
-                    "impl<T, O> Use for P<T> where {prerequisites} {{ fn use_(x: P<T>) -> int {{ hidden2(read(x.0)) }} }}"
+                    "impl<T, O> Use for P<T> where {prerequisites}, .. {{ fn use_(x: P<T>) -> int {{ hidden2(read(x.0)) }} }}"
                 ),
             ] {
                 let declarations = format!("{}\n{item}", impls.join("\n"));
@@ -3125,8 +3126,8 @@ fn a_uniform_private_output_can_determine_a_later_private_input() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn recorded_private_captures_preserve_distinct_effect_bounds() {
     let impls = [
-        "impl<T> H1 for W<T> where W<T>: Hid<! E = ()> { fn h1(x: W<T>) -> int { hid(x) } }",
-        "impl<T> H2 for W<T> where W<T>: Hid<! E = (fallible)> { fn h2(x: W<T>) -> int { hid(x) } }",
+        "impl<T> H1 for W<T> where W<T>: Hid<! E = ()>, .. { fn h1(x: W<T>) -> int { hid(x) } }",
+        "impl<T> H2 for W<T> where W<T>: Hid<! E = (fallible)>, .. { fn h2(x: W<T>) -> int { hid(x) } }",
     ];
     for reverse in [false, true] {
         let mut impls = impls;
@@ -3143,7 +3144,7 @@ fn recorded_private_captures_preserve_distinct_effect_bounds() {
                 pub trait Run<Self |-> ! E> {{ fn run(x: Self) -> int ! E; }}
                 struct W<T>(T)
                 trait Hid<Self |-> ! E> {{ fn hid(x: Self) -> int ! E; }}
-                impl<T, ! E> Hid for <Self = W<T> |-> ! E = E> where T: Run<! E = E> {{
+                impl<T, ! E> Hid for <Self = W<T> |-> ! E = E> where T: Run<! E = E>, .. {{
                     fn hid(x: W<T>) -> int {{ run(x.0) }}
                 }}
                 trait H1<Self> {{ fn h1(x: Self) -> int; }}
@@ -3319,7 +3320,7 @@ fn private_value_prerequisite_cycles_still_need_a_generated_anchor() {
             struct B<T>(T)
             {first}
             {second}
-            pub fn f<T>(x: T) -> string where T: Value {{ to_string(A(x)) }}
+            pub fn f<T>(x: T) -> string where T: Value, .. {{ to_string(A(x)) }}
         "#
         );
         assert!(
@@ -3528,7 +3529,7 @@ fn an_exported_function_reads_a_field_of_a_private_type_through_a_private_implem
             }
             #[private_repr]
             struct Marked<T>(T)
-            subscript Marked<T>.value(self) -> T where T: Mark, T: Scale {
+            subscript Marked<T>.value(self) -> T where T: Mark, T: Scale, .. {
                 ref {
                     let local = scale(self.0);
                     yield local
@@ -3697,4 +3698,37 @@ fn an_exported_function_uses_a_private_implementation_that_reads_through_a_repre
         session.run("to_string(b::all())"),
         string("(x, 4, 1, 2.5, 3, 6, (9, 2), w)")
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_exported_complete_clause_writes_only_public_requirements() {
+    let mut session = TestSession::new();
+    // A complete clause publishes what it writes, so an exported function cannot write a private
+    // trait, but solves one that it does not write.
+    for (name, clause, fails) in [
+        ("written", "where T: Hidden, T: Value", true),
+        ("solved", "where T: Value", false),
+    ] {
+        let source = format!(
+            "trait Hidden<Self> {{ fn hidden(x: Self) -> int; }}
+            impl<T> Hidden for [T] {{ fn hidden(x: [T]) -> int {{ 1 }} }}
+            pub fn f<T>(x: T) -> int {clause} {{ hidden([x]) }}"
+        );
+        if fails {
+            assert!(module_fails_with(
+                &mut session,
+                name,
+                &source,
+                |error| matches!(
+                    error,
+                    CompilationErrorImpl::PrivateRequirementInPublicContract { requirement, .. }
+                        if requirement == "T: Hidden"
+                )
+            ));
+        } else {
+            compile_module(&mut session, name, &source);
+            assert_val_eq!(session.run("solved::f(3)"), int(1));
+        }
+    }
 }

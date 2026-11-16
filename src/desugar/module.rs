@@ -989,6 +989,7 @@ impl PModule {
                         method.args_span,
                         method.ret_ty.clone(),
                         vec![],
+                        ast::WhereClauseKind::Partial,
                         vec![],
                         body,
                         method.span,
@@ -1303,6 +1304,7 @@ impl ast::TraitDefinition {
         let mut next_effect_var = self.output_effect_names.len() as u32;
         let parent_constraints = desugar_type_constraints_with_next_effect_var(
             &self.parent_constraints,
+            false,
             &generic_ty_params,
             Some(&generic_eff_params),
             &mut next_effect_var,
@@ -1311,6 +1313,7 @@ impl ast::TraitDefinition {
         )?;
         let constraints = desugar_type_constraints_with_next_effect_var(
             &self.where_clause,
+            false,
             &generic_ty_params,
             Some(&generic_eff_params),
             &mut next_effect_var,
@@ -1652,6 +1655,7 @@ impl PModuleFunction {
             .unwrap_or(0);
         let where_clause = desugar_type_constraints_with_next_effect_var(
             &self.where_clause,
+            true,
             &generic_ty_params,
             Some(&generic_eff_params),
             &mut next_effect_var,
@@ -1666,6 +1670,7 @@ impl PModuleFunction {
             args_span: self.args_span,
             ret_ty,
             where_clause,
+            where_kind: self.where_kind,
             attributes: self.attributes,
             body,
             span: self.span,
@@ -1745,6 +1750,7 @@ impl ast::PSubscriptDefinition {
             .unwrap_or(0);
         let where_clause = desugar_type_constraints_with_next_effect_var(
             &self.where_clause,
+            true,
             &generic_ty_params,
             Some(&generic_eff_params),
             &mut next_effect_var,
@@ -1809,6 +1815,7 @@ impl ast::PSubscriptDefinition {
                 args_span: self.args_span,
                 ret_ty,
                 where_clause,
+                where_kind: self.where_kind,
                 members,
                 span: self.span,
                 doc: self.doc,

@@ -93,7 +93,8 @@ struct Wrapper<T>(T)
 
 impl<T> SizedSeq for Wrapper<T>
 where
-    T: SizedSeq
+    T: SizedSeq,
+    T: Value
 {
     fn len(wrapper: Wrapper<T>) {
         len(wrapper.0)
@@ -104,6 +105,7 @@ where
 Here, `Wrapper<T>` is a sized sequence whenever its inner value is.
 The extra constraints become part of the impl itself.
 They participate in trait selection and in coherence checking, just like the types named in the impl header.
+As for functions, the clause is complete: the impl solves any other requirement of its methods itself.
 
 ## Explicit bindings
 

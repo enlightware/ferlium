@@ -402,6 +402,7 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
 
 fn desugar_type_constraint(
     constraint: &ast::PTypeConstraint,
+    holes_allowed: bool,
     generic_ty_params: &GenericTyParams,
     generic_eff_params: Option<&GenericEffParams>,
     next_effect_var: &mut u32,
@@ -495,6 +496,9 @@ fn desugar_type_constraint(
             .output_types
             .iter()
             .map(|output| {
+                if !holes_allowed && let Some(span) = output.ty.0.first_hole(output.ty.1) {
+                    return Err(hole_not_allowed(&constraint.trait_name, span));
+                }
                 Ok((
                     output.name,
                     output.ty.0.desugar_with_ty_and_eff_params(
@@ -508,7 +512,7 @@ fn desugar_type_constraint(
                 ))
             })
             .collect::<Result<Vec<_>, _>>()?,
-        TraitConstraintBindingKind::Output,
+        TraitConstraintBindingKind::Output { holes_allowed },
         &constraint.trait_name,
         constraint.span,
     )?;
@@ -550,8 +554,12 @@ fn desugar_type_constraint(
     ))
 }
 
+/// Desugars `constraints`, whose outputs may be `_` if `holes_allowed`, as in the requirements
+/// of a function, an impl or a subscript.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn desugar_type_constraints_with_next_effect_var(
     constraints: &[ast::PTypeConstraint],
+    holes_allowed: bool,
     generic_ty_params: &GenericTyParams,
     generic_eff_params: Option<&GenericEffParams>,
     next_effect_var: &mut u32,
@@ -563,6 +571,7 @@ pub(crate) fn desugar_type_constraints_with_next_effect_var(
         .map(|constraint| {
             desugar_type_constraint(
                 constraint,
+                holes_allowed,
                 generic_ty_params,
                 generic_eff_params,
                 next_effect_var,
@@ -1066,6 +1075,7 @@ impl PTypeDef {
             .unwrap_or(0);
         let constraints = desugar_type_constraints_with_next_effect_var(
             &self.where_clause,
+            false,
             &generic_ty_params,
             Some(&generic_eff_params),
             &mut next_effect_var,
@@ -1444,6 +1454,9 @@ fn desugar_trait_impl_for(
             .output_types
             .into_iter()
             .map(|output| {
+                if let Some(span) = output.ty.0.first_hole(output.ty.1) {
+                    return Err(hole_not_allowed(&trait_path, span));
+                }
                 Ok((
                     output.name,
                     (
@@ -1460,7 +1473,9 @@ fn desugar_trait_impl_for(
                 ))
             })
             .collect::<Result<Vec<_>, _>>()?,
-        TraitConstraintBindingKind::Output,
+        TraitConstraintBindingKind::Output {
+            holes_allowed: false,
+        },
         &trait_path,
         for_trait.span,
     )?;
@@ -1938,6 +1953,7 @@ impl PTraitImpl {
         let mut next_effect_var = implicit_effect_var(Some(&generic_eff_params)).name() + 1;
         let where_clause = desugar_type_constraints_with_next_effect_var(
             &self.where_clause,
+            true,
             &generic_ty_params,
             Some(&generic_eff_params),
             &mut next_effect_var,
@@ -1951,6 +1967,7 @@ impl PTraitImpl {
                 trait_name: self.trait_name,
                 for_trait,
                 where_clause,
+                where_kind: self.where_kind,
                 associated_consts: self.associated_consts,
                 functions,
                 function_sccs,
@@ -2236,7 +2253,18 @@ mod recursive_alias_tests {
 #[derive(Clone, Copy)]
 enum TraitConstraintBindingKind {
     Input,
-    Output,
+    /// Outputs, which may be `_` if `holes_allowed`.
+    Output {
+        holes_allowed: bool,
+    },
+}
+
+fn hole_not_allowed(trait_name: &ast::Path, span: Location) -> InternalCompilationError {
+    internal_compilation_error!(InvalidTraitConstraint {
+        trait_name: trait_name.to_string(),
+        kind: InvalidTraitConstraintKind::HoleNotAllowed,
+        span,
+    })
 }
 
 fn desugar_named_type_bindings<T>(
@@ -2261,7 +2289,7 @@ fn desugar_named_type_bindings<T>(
                     TraitConstraintBindingKind::Input => {
                         InvalidTraitConstraintKind::UnknownInputBinding { name }
                     }
-                    TraitConstraintBindingKind::Output => {
+                    TraitConstraintBindingKind::Output { .. } => {
                         InvalidTraitConstraintKind::UnknownOutputBinding { name }
                     }
                 },
@@ -2276,7 +2304,7 @@ fn desugar_named_type_bindings<T>(
                     TraitConstraintBindingKind::Input => {
                         InvalidTraitConstraintKind::DuplicateInputBinding { name }
                     }
-                    TraitConstraintBindingKind::Output => {
+                    TraitConstraintBindingKind::Output { .. } => {
                         InvalidTraitConstraintKind::DuplicateOutputBinding { name }
                     }
                 },
@@ -2299,8 +2327,11 @@ fn desugar_named_type_bindings<T>(
                 TraitConstraintBindingKind::Input => {
                     InvalidTraitConstraintKind::MissingInputBindings { names }
                 }
-                TraitConstraintBindingKind::Output => {
-                    InvalidTraitConstraintKind::MissingOutputBindings { names }
+                TraitConstraintBindingKind::Output { holes_allowed } => {
+                    InvalidTraitConstraintKind::MissingOutputBindings {
+                        names,
+                        holes_allowed,
+                    }
                 }
             },
             span,

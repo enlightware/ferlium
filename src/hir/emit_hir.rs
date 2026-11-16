@@ -1357,6 +1357,7 @@ impl ModuleEmission<'_> {
                     imp.span,
                     None,
                     vec![],
+                    WhereClauseKind::Partial,
                     vec![],
                     body,
                     imp.span,
@@ -1395,6 +1396,7 @@ impl ModuleEmission<'_> {
                 .collect(),
             for_trait: imp.for_trait.as_ref(),
             impl_constraints: &imp.where_clause,
+            impl_where_kind: imp.where_kind,
         };
         let recursive_function_names = imp
             .function_sccs

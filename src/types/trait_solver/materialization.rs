@@ -355,7 +355,7 @@ impl<'a> TraitSolver<'a> {
         else {
             return false;
         };
-        requirement.is_closed_trait_impl()
+        requirement.is_ground_trait_impl()
             && self.solving_stack.contains(&(*trait_id, input_tys.clone()))
     }
 

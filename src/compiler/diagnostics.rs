@@ -178,6 +178,7 @@ pub(crate) fn diagnostics_from_error(
         | UnboundTypeVar { span, .. }
         | UnresolvedConstraints { span, .. }
         | PrivateRequirementInPublicContract { span, .. }
+        | UndeclaredRequirement { span, .. }
         | PrivateNameInPublicContract { span, .. }
         | InvalidVariantConstructor { span }
         | VariantNameConflictsWithType { span, .. }

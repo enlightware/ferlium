@@ -298,7 +298,7 @@ pub struct NativeSignature {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeContractError {
-    NotClosed,
+    NotGround,
     Fallibility,
     ResultConvention,
     ArgumentCount,
@@ -313,8 +313,8 @@ pub enum NativeContractError {
 impl fmt::Display for NativeContractError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotClosed => {
-                f.write_str("typed native entries require a closed, unconstrained signature")
+            Self::NotGround => {
+                f.write_str("typed native entries require a ground, unconstrained signature")
             }
             Self::Fallibility => f.write_str(
                 "native entry failure convention differs from its source-failure effects",
@@ -362,7 +362,7 @@ impl NativeSignature {
         }
         let ty = &definition.ty_scheme.ty;
         if !ty.is_constant() || !definition.ty_scheme.constraints.is_empty() {
-            return Err(NativeContractError::NotClosed);
+            return Err(NativeContractError::NotGround);
         }
         let may_fail = ty
             .effects
@@ -2223,13 +2223,13 @@ pub(crate) mod tests {
                 .validate(&definition)
                 .unwrap_err()
                 .to_string()
-                .contains("closed")
+                .contains("ground")
         );
         definition = function.definition.clone();
         definition.ty_scheme.ty.effects = EffType::single_variable_id(0);
         assert_eq!(
             signature.validate(&definition),
-            Err(NativeContractError::NotClosed)
+            Err(NativeContractError::NotGround)
         );
         assert_eq!(signature.result.ty(), int_type());
         let mut wrong_transport = signature.clone();

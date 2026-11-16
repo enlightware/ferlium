@@ -11,7 +11,7 @@ use ustr::Ustr;
 use super::emit_subscripts::attach_subscript_member;
 use crate::{
     FxHashMap, FxHashSet, Location, Modules,
-    ast::{self, DExprArena, DModuleFunctionArg},
+    ast::{self, DExprArena, DModuleFunctionArg, WhereClauseKind},
     compiler::{
         CompilationCapabilities,
         diagnostics::CompilationWarning,
@@ -54,8 +54,10 @@ use crate::{
         effect_polarity::trait_output_effect_polarities,
         effects::{EffType, Effect, EffectVar, EffectsInstSubst},
         mutability::MutType,
-        r#trait::{Trait, TraitDefaultMethod, TraitMethodIndex},
-        trait_solver::{EvidencePlan, TraitSolver, trait_solver_from_module},
+        r#trait::{Trait, TraitDefaultMethod, TraitMethodIndex, push_with_implied},
+        trait_solver::{
+            EvidencePlan, ReductionLeaves, TraitSolver, is_written_leaf, trait_solver_from_module,
+        },
         r#type::{
             CallResultConvention, FnArgType, FnType, Type, TypeDisplayEnv, TypeInstSubst, TypeVar,
         },
@@ -89,6 +91,7 @@ pub(super) struct EmitTraitCtx<'a> {
     pub(super) generic_effect_param_names: Vec<Ustr>,
     pub(super) for_trait: Option<&'a ast::DTraitImplFor>,
     pub(super) impl_constraints: &'a [PubTypeConstraint],
+    pub(super) impl_where_kind: WhereClauseKind,
 }
 
 pub(crate) struct EmitTraitOutput {
@@ -618,7 +621,7 @@ fn unconstrained_diverging_returns<'func>(
 /// `subst` extended for the requirements of a declaration: an output effect left unwritten in
 /// one is inferred, so it gets a variable of its own. The annotations of the bodies keep `subst`,
 /// in which no such effect has a variable.
-fn with_unwritten_requirement_effects<'a>(
+fn with_undeclared_requirement_effects<'a>(
     mut subst: Cow<'a, InstSubst>,
     requirements: &[PubTypeConstraint],
     ty_inf: &mut TypeInference,
@@ -631,6 +634,103 @@ fn with_unwritten_requirement_effects<'a>(
         }
     }
     subst
+}
+
+/// Whether `a` and `b` are applications of one trait at the same inputs, which their outputs
+/// are then the same for.
+fn same_trait_application(a: &PubTypeConstraint, b: &PubTypeConstraint) -> bool {
+    matches!((a, b), (
+        PubTypeConstraint::HaveTrait { trait_id: a_trait, input_tys: a_inputs, .. },
+        PubTypeConstraint::HaveTrait { trait_id: b_trait, input_tys: b_inputs, .. },
+    ) if a_trait == b_trait && a_inputs == b_inputs)
+}
+
+/// What a complete `where` clause gives to the inference of what it is of.
+#[derive(Clone, Debug, Default)]
+struct CompleteClause {
+    /// The requirements that reduction keeps: those that the clause writes and those that they
+    /// imply.
+    leaves: Vec<PubTypeConstraint>,
+    /// The implied requirements that the bodies may use, each with the given that supplies
+    /// it. One that a body uses is published with the written ones; the others are not.
+    implied: Vec<(GivenId, PubTypeConstraint)>,
+}
+
+impl CompleteClause {
+    /// Adds the requirements of a complete clause that writes `written` to `ty_inf`: those written,
+    /// which the item publishes, and the ones that they imply, which it publishes if it uses
+    /// them. With `implied_as_givens` false, the implied ones are published too.
+    fn declare(
+        written: impl IntoIterator<Item = PubTypeConstraint>,
+        implied_as_givens: bool,
+        env: ModuleEnv<'_>,
+        ty_inf: &mut TypeInference,
+    ) -> Self {
+        let written = written.into_iter().collect::<Vec<_>>();
+        let mut implied = Vec::new();
+        for requirement in &written {
+            let span = requirement.use_site();
+            let mut implication = Vec::new();
+            push_with_implied(requirement.clone(), env, &mut implication, ty_inf);
+            for constraint in implication.into_iter().skip(1) {
+                // A requirement that the clause writes, or that it implies already, is one, with
+                // the same outputs.
+                let same_application =
+                    |other: &&PubTypeConstraint| same_trait_application(other, &constraint);
+                if let Some(same) = written.iter().chain(&implied).find(same_application) {
+                    let (
+                        PubTypeConstraint::HaveTrait { output_tys, .. },
+                        PubTypeConstraint::HaveTrait {
+                            output_tys: same_output_tys,
+                            ..
+                        },
+                    ) = (&constraint, same)
+                    else {
+                        unreachable!("only trait applications are the same application")
+                    };
+                    for (output, same_output) in output_tys.iter().zip(same_output_tys) {
+                        ty_inf.add_same_type_constraint(*output, *same_output, span);
+                    }
+                    continue;
+                }
+                implied.push(constraint.instantiate_location_cloned(span));
+            }
+        }
+        for constraint in &written {
+            ty_inf.add_pub_constraint(constraint.clone());
+        }
+        let mut leaves = written;
+        leaves.extend(implied.iter().cloned());
+        let implied = if implied_as_givens {
+            implied
+                .into_iter()
+                .map(|constraint| (ty_inf.add_given_constraint(constraint.clone()), constraint))
+                .collect()
+        } else {
+            for constraint in implied {
+                ty_inf.add_pub_constraint(constraint);
+            }
+            Vec::new()
+        };
+        Self { leaves, implied }
+    }
+
+    /// The implied requirements that `function` uses, as they are now.
+    fn used_implied(
+        &self,
+        function: LocalFunctionId,
+        ty_inf: &mut UnifiedTypeInference,
+    ) -> Vec<PubTypeConstraint> {
+        let used = self
+            .implied
+            .iter()
+            .filter(|(given, _)| ty_inf.given_used_by(function, *given))
+            .map(|(_, constraint)| constraint)
+            .collect::<Vec<_>>();
+        used.into_iter()
+            .map(|constraint| ty_inf.substitute_in_constraint(constraint))
+            .collect()
+    }
 }
 
 /// The fixed signature of a function of a recursive group of functions.
@@ -892,6 +992,10 @@ struct Settlement {
     /// For each requirement of the contracts of the round in progress, effects left out, the
     /// number of requirements of these contracts that differ from it only by effects.
     alike: FxHashMap<PubTypeConstraint, usize>,
+    /// For each function with a complete `where` clause, the requirements that it leaves to its
+    /// callers: its contract has only these, and those on the structure of its types. It solves
+    /// the others itself, when it is published.
+    written_leaves: Vec<Option<Vec<PubTypeConstraint>>>,
 }
 
 impl Settlement {
@@ -1176,6 +1280,7 @@ impl Settlement {
                 &self.signatures[index],
                 &self.requirements[index],
                 &self.requirement_ranks[index],
+                self.written_leaves[index].as_deref(),
                 written_effects,
                 ty_inf,
             );
@@ -1279,6 +1384,7 @@ fn baseline_requirements<'a>(
     functions: &[LocalFunctionId],
     units: &[usize],
     written_roots: &[Vec<Type>],
+    written_leaves: &[Option<Vec<PubTypeConstraint>>],
     exported: bool,
     pending_functions: &mut PendingModuleFunctions,
     associated_lambdas: &FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
@@ -1329,7 +1435,8 @@ fn baseline_requirements<'a>(
         .zip(&mut added)
         .enumerate()
     {
-        if units[index] != index {
+        // A function with a complete clause solves its requirements itself when it is published.
+        if units[index] != index || written_leaves[index].is_some() {
             // As for the first body of its definition, below.
             continue;
         }
@@ -1341,9 +1448,11 @@ fn baseline_requirements<'a>(
             .map(|arg| arg.ty)
             .chain(roots.iter().copied())
             .collect::<Vec<_>>();
-        let Some(reduced) = public_requirements(
+        let Some(reduced) = reduced_requirements(
             requirements,
             &rigid,
+            ReductionLeaves::Public,
+            false,
             input.function,
             roots,
             *id,
@@ -1392,9 +1501,18 @@ fn baseline_requirements<'a>(
             .cloned()
             .collect();
         ty_inf.replace_remaining_constraints(kept);
-        for (id, added) in functions.iter().zip(added) {
+        // A function with a complete clause keeps what another function replaced, as its own.
+        for ((index, id), added) in functions.iter().enumerate().zip(&mut added) {
+            if written_leaves[index].is_some() && units[index] == index {
+                added.extend(
+                    own_requirements[index]
+                        .iter()
+                        .filter(|requirement| replaced.contains(*requirement))
+                        .cloned(),
+                );
+            }
             let mut ty_inf = ty_inf.constraint_owner_scope(*id);
-            for requirement in added {
+            for requirement in added.drain(..) {
                 let requirement = ty_inf.substitute_in_constraint(&requirement);
                 ty_inf.add_requirement(requirement);
             }
@@ -1428,16 +1546,27 @@ impl TypeMapper for RoundEffects<'_> {
 }
 
 /// The contract that a function has after a round: its signature and its requirements in the
-/// baseline, with the effects that the round found, numbered, the written generics first.
+/// baseline, with the effects that the round found, numbered, the written generics first. If
+/// the function has a complete `where` clause, its requirements are only `written_leaves`, those
+/// that it leaves to its callers.
 ///
 /// Also returns the effect variables of the signature in the order of their numbers.
 fn round_contract(
     signature: &FnType,
     requirements: &[PubTypeConstraint],
     requirement_ranks: &[usize],
+    written_leaves: Option<&[PubTypeConstraint]>,
     written_effects: &[EffectVar],
     ty_inf: &mut UnifiedTypeInference,
 ) -> (GroupContract, Vec<EffectVar>) {
+    let (requirements, requirement_ranks): (Vec<_>, Vec<_>) = requirements
+        .iter()
+        .zip(requirement_ranks)
+        .filter(|(requirement, _)| {
+            written_leaves.is_none_or(|leaves| is_written_leaf(requirement, leaves, ty_inf))
+        })
+        .map(|(requirement, rank)| (requirement.clone(), *rank))
+        .unzip();
     let mut effects = RoundEffects(ty_inf);
     let ty = signature.map(&mut effects);
     let requirements = requirements
@@ -1454,7 +1583,7 @@ fn round_contract(
     let ty = ty.map(&mut variables);
     let mut constraints = Vec::new();
     let mut ranks = Vec::new();
-    for (requirement, rank) in requirements.iter().zip(requirement_ranks) {
+    for (requirement, rank) in requirements.iter().zip(&requirement_ranks) {
         let constraint = requirement.map(&mut variables);
         match constraints.iter().position(|known| *known == constraint) {
             Some(known) => ranks[known] = min(ranks[known], *rank),
@@ -1808,14 +1937,18 @@ fn fit_declared_signature(
     Ok(constraints.into_iter().unique().collect())
 }
 
-/// The public form of the requirements `constraints` of function `id`: those that name
-/// something private are replaced by the public ones that give their evidence, and the body
-/// records how. `None` if all are public already. `rigid` are the types that the requirements
-/// must not determine, and `written_roots` the written type generics of the function.
+/// The requirements that function `id` publishes, from those, `constraints`, that its types
+/// reach: those that are not `leaves` are replaced by the leaves that give their evidence, and
+/// the body records how. `None` if all are public already and the leaves are the public ones.
+/// `rigid` are the types that the requirements must not determine, and `written_roots` the
+/// written type generics of the function. If the function is `exported`, what it publishes must
+/// be public, written requirements included.
 #[allow(clippy::too_many_arguments)]
-fn public_requirements(
+fn reduced_requirements(
     constraints: &[PubTypeConstraint],
     rigid: &[Type],
+    leaves: ReductionLeaves<'_>,
+    exported: bool,
     function: &ast::DModuleFunction,
     written_roots: &[Type],
     id: LocalFunctionId,
@@ -1827,24 +1960,47 @@ fn public_requirements(
     solver_arena: &mut NodeArena,
 ) -> Result<Option<Vec<PubTypeConstraint>>, InternalCompilationError> {
     let mut solver = trait_solver_from_module!(output, others);
-    if constraints.iter().all(|c| solver.requirement_is_public(c)) {
+    if matches!(leaves, ReductionLeaves::Public)
+        && constraints.iter().all(|c| solver.requirement_is_public(c))
+    {
         return Ok(None);
     }
-    let reduced = solver
-        .reduce_public_requirements(constraints.to_vec(), rigid, ty_inf, solver_arena)
-        .map_err(|error| {
-            error.with_private_requirement_names(
-                function
-                    .generic_params
-                    .type_params()
-                    .iter()
-                    .zip(written_roots)
-                    .filter_map(|(name, root)| {
-                        let root = ty_inf.substitute_in_type(*root);
-                        Some((*root.data().as_variable()?, name.0))
-                    }),
-            )
-        })?;
+    let type_names = |ty_inf: &mut UnifiedTypeInference| {
+        function
+            .generic_params
+            .type_params()
+            .iter()
+            .zip(written_roots)
+            .filter_map(|(name, root)| {
+                let root = ty_inf.substitute_in_type(*root);
+                Some((*root.data().as_variable()?, name.0))
+            })
+            .collect::<Vec<_>>()
+    };
+    let reduced = match solver.reduce_public_requirements(
+        constraints.to_vec(),
+        rigid,
+        leaves,
+        ty_inf,
+        solver_arena,
+    ) {
+        Ok(reduced) => reduced,
+        Err(error) => return Err(error.with_private_requirement_names(type_names(ty_inf))),
+    };
+    if exported
+        && let Some(private) = reduced
+            .requirements
+            .iter()
+            .find(|requirement| !solver.requirement_is_public(requirement))
+    {
+        return Err(internal_compilation_error!(
+            PrivateRequirementInPublicContract {
+                requirement: private.clone(),
+                type_names: type_names(ty_inf).into_iter().collect(),
+                span: private.use_site(),
+            }
+        ));
+    }
     let generated = solver.finish().commit(
         &mut output.functions,
         &mut output.def_table,
@@ -2149,6 +2305,8 @@ struct GroupDeclarations {
     function_annotation_substs: Vec<InstSubst>,
     /// The signature that its trait declares for a default method.
     declared_signatures: Vec<Option<TypeScheme<FnType>>>,
+    /// For each function with a complete `where` clause, what the clause gives.
+    complete_clauses: Vec<Option<CompleteClause>>,
     function_explicit_root_tys: Vec<Vec<Type>>,
     /// The variable of each written effect generic of each function.
     function_written_effects: Vec<Vec<EffectVar>>,
@@ -2187,6 +2345,8 @@ struct ImplHead {
     explicit_trait_impl: Option<ExplicitTraitImpl>,
     /// The implementation itself, given to its methods.
     self_given: Option<GivenId>,
+    /// If the header has a complete `where` clause, what it gives.
+    complete_clause: Option<CompleteClause>,
     trait_output: EmitTraitOutput,
 }
 
@@ -2371,17 +2531,30 @@ fn declare_trait_impl(
                 .instantiate_location_cloned(trait_ctx.span),
         );
     }
-    let subst = with_unwritten_requirement_effects(
+    let subst = with_undeclared_requirement_effects(
         impl_annotation_subst
             .as_ref()
             .map_or_else(Default::default, Cow::Borrowed),
         trait_ctx.impl_constraints,
         ty_inf,
     );
-    let mut mapper = BitmapInstantiationMapper::new(&subst);
-    for constraint in trait_ctx.impl_constraints {
-        ty_inf.add_pub_constraint(constraint.map(&mut mapper));
-    }
+    // A `_` in an output is a type to infer, of its own.
+    let written = trait_ctx
+        .impl_constraints
+        .iter()
+        .map(|constraint| constraint.map(&mut AnnotationTypeMapper::new(ty_inf, Some(&subst))))
+        .collect::<Vec<_>>();
+    let complete_clause = match trait_ctx.impl_where_kind {
+        WhereClauseKind::Partial => {
+            for constraint in written {
+                ty_inf.add_pub_constraint(constraint);
+            }
+            None
+        }
+        WhereClauseKind::Complete => {
+            Some(CompleteClause::declare(written, true, *module_env, ty_inf))
+        }
+    };
     let self_given = Some(
         ty_inf.add_given_constraint(PubTypeConstraint::new_have_trait(
             trait_ctx.trait_id,
@@ -2409,6 +2582,7 @@ fn declare_trait_impl(
         outer_annotation_eff_var_count,
         explicit_trait_impl,
         self_given,
+        complete_clause,
         trait_output,
     })
 }
@@ -2458,6 +2632,7 @@ where
     let mut local_fns = Vec::new();
     let mut function_annotation_substs = Vec::new();
     let mut declared_signatures = Vec::new();
+    let mut complete_clauses: Vec<Option<CompleteClause>> = Vec::new();
     let mut function_explicit_root_tys = Vec::new();
     // The variable of each written effect generic of each function.
     let mut function_written_effects: Vec<Vec<EffectVar>> = Vec::new();
@@ -2478,6 +2653,7 @@ where
             args_span,
             ret_ty,
             where_clause,
+            where_kind,
             attributes,
             span,
             doc,
@@ -2504,9 +2680,9 @@ where
                     ),
                 }));
             }
-            if let Some(constraint) = where_clause.first() {
+            if !where_clause.is_empty() || *where_kind == WhereClauseKind::Complete {
                 return Err(internal_compilation_error!(Unsupported {
-                    span: constraint.use_site(),
+                    span: where_clause.first().map_or(*span, |c| c.use_site()),
                     reason: format!(
                         "Method-local where clauses on trait impl methods are not supported yet: method `{}` in impl of trait `{}`",
                         name.0, trait_ctx.trait_def.name
@@ -2615,16 +2791,36 @@ where
             args_ty = signature.member_args(projection_key.is_some(), member_kind);
             ret_ty_ty = signature.ret;
         }
-        let subst = with_unwritten_requirement_effects(
+        let subst = with_undeclared_requirement_effects(
             Cow::Borrowed(&annotation_subst),
             where_clause,
             ty_inf,
         );
-        let mut mapper = BitmapInstantiationMapper::new(&subst);
+        // A `_` in an output is a type to infer, of its own.
+        let written = where_clause
+            .iter()
+            .map(|constraint| constraint.map(&mut AnnotationTypeMapper::new(ty_inf, Some(&subst))))
+            .collect::<Vec<_>>();
         let declared_requirements = ty_inf.constraint_scope_start();
-        for constraint in where_clause {
-            ty_inf.add_pub_constraint(constraint.map(&mut mapper));
-        }
+        let complete = match where_kind {
+            WhereClauseKind::Partial => {
+                for constraint in written {
+                    ty_inf.add_pub_constraint(constraint);
+                }
+                None
+            }
+            // The bodies of a subscript share the requirements of the first.
+            WhereClauseKind::Complete if unit != local_fns.len() => complete_clauses[unit].clone(),
+            // A given is seen by every body of the inference, so in a group of several
+            // functions, the implied requirements are published.
+            WhereClauseKind::Complete => Some(CompleteClause::declare(
+                written,
+                matches!(mode, GroupMode::Normal),
+                ModuleEnv::new(output, others),
+                ty_inf,
+            )),
+        };
+        complete_clauses.push(complete);
         if let GroupMode::Settle { slots, .. } = mode {
             // A declared requirement is of its function, as those that its body makes.
             ty_inf.own_constraints_since(declared_requirements, slots[unit]);
@@ -2890,6 +3086,7 @@ where
         owners,
         function_annotation_substs,
         declared_signatures,
+        complete_clauses,
         function_explicit_root_tys,
         function_written_effects,
         function_attrs,
@@ -3344,6 +3541,7 @@ where
         impl_annotation_subst,
         explicit_trait_impl,
         self_given,
+        complete_clause,
         mut trait_output,
         ..
     } = head;
@@ -3463,26 +3661,70 @@ where
         })?;
 
         let input_tys = ty_inf.substitute_in_types(&trait_output.input_tys);
-        if output.is_trait_impl_exportable(trait_ctx.trait_id, &input_tys, others) {
+        let exportable = output.is_trait_impl_exportable(trait_ctx.trait_id, &input_tys, others);
+        // A complete clause leaves to the users what it writes, whether the impl is exportable or
+        // not.
+        let leaves = match &complete_clause {
+            Some(complete) => Some(ReductionLeaves::Written(&complete.leaves)),
+            None if exportable => Some(ReductionLeaves::Public),
+            None => None,
+        };
+        if let Some(leaves) = leaves {
+            let type_names = |ty_inf: &mut UnifiedTypeInference| {
+                impl_ctx
+                    .generic_type_params
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, name)| {
+                        let root = *impl_annotation_subst
+                            .as_ref()?
+                            .0
+                            .get(&TypeVar::new(index as u32))?;
+                        let root = ty_inf.substitute_in_type(root);
+                        Some((*root.data().as_variable()?, name.0))
+                    })
+                    .collect::<Vec<_>>()
+            };
             ty_inf.normalize_remaining_constraints();
-            let constraints = ty_inf.remaining_constraints().to_vec();
+            let mut constraints = ty_inf.remaining_constraints().to_vec();
+            // The implied requirements that a method uses are requirements of the impl.
+            if let Some(complete) = &complete_clause {
+                for id in &local_fns {
+                    for constraint in complete.used_implied(*id, &mut ty_inf) {
+                        if !constraints.contains(&constraint) {
+                            constraints.push(constraint);
+                        }
+                    }
+                }
+            }
             let mut solver = trait_solver_from_module!(output, others);
-            let constraints = solver
-                .reduce_public_requirements(constraints, &input_tys, &mut ty_inf, solver_arena)
-                .map_err(|error| {
-                    error.with_private_requirement_names(
-                        impl_ctx.generic_type_params.iter().enumerate().filter_map(
-                            |(index, name)| {
-                                let root = *impl_annotation_subst
-                                    .as_ref()?
-                                    .0
-                                    .get(&TypeVar::new(index as u32))?;
-                                let root = ty_inf.substitute_in_type(root);
-                                Some((*root.data().as_variable()?, name.0))
-                            },
-                        ),
-                    )
-                })?;
+            let constraints = match solver.reduce_public_requirements(
+                constraints,
+                &input_tys,
+                leaves,
+                &mut ty_inf,
+                solver_arena,
+            ) {
+                Ok(constraints) => constraints,
+                Err(error) => {
+                    return Err(error.with_private_requirement_names(type_names(&mut ty_inf)));
+                }
+            };
+            // What an exportable impl writes is published as written.
+            if exportable
+                && let Some(private) = constraints
+                    .requirements
+                    .iter()
+                    .find(|requirement| !solver.requirement_is_public(requirement))
+            {
+                return Err(internal_compilation_error!(
+                    PrivateRequirementInPublicContract {
+                        requirement: private.clone(),
+                        type_names: type_names(&mut ty_inf).into_iter().collect(),
+                        span: private.use_site(),
+                    }
+                ));
+            }
             trait_output.evidence_plan = constraints.evidence;
             for id in &local_fns {
                 for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
@@ -3920,6 +4162,7 @@ where
         function_kinds,
         group_declarations,
         group_instance,
+        complete_clauses,
         ..
     } = &declarations;
     let GroupBodies {
@@ -4011,6 +4254,10 @@ where
                 bottom
             })
             .collect();
+        let written_leaves = complete_clauses
+            .iter()
+            .map(|complete| complete.as_ref().map(|complete| complete.leaves.clone()))
+            .collect::<Vec<_>>();
         let (signatures, own_requirements) = baseline_requirements(
             output,
             others,
@@ -4018,6 +4265,7 @@ where
             local_fns,
             units,
             function_explicit_root_tys,
+            &written_leaves,
             *exported,
             &mut pending_functions,
             &associated_lambdas,
@@ -4053,6 +4301,7 @@ where
             reference_effects: Vec::new(),
             answered_applications: ty_inf.answered_applications(),
             alike: FxHashMap::default(),
+            written_leaves,
         })
     } else {
         None
@@ -4109,6 +4358,19 @@ where
         }
         break function_leading_effects;
     };
+    if settlement.is_some() {
+        reduce_published_requirements(
+            output,
+            solver_arena,
+            others,
+            ast_functions,
+            true,
+            &declarations,
+            &mut pending_functions,
+            &associated_lambdas,
+            &mut ty_inf,
+        )?;
+    }
 
     // Fifth pass, normalize the type schemes, substitute the types in the functions.
     let (function_ty_origins, function_effect_substs, function_effect_origins) = number_schemes(
@@ -4721,20 +4983,81 @@ where
         }));
     }
 
+    if settlement.is_none() {
+        reduce_published_requirements(
+            output,
+            solver_arena,
+            others,
+            ast_functions,
+            false,
+            declarations,
+            pending_functions,
+            associated_lambdas,
+            ty_inf,
+        )?;
+    }
+
+    Ok(Some(round_errors))
+}
+
+/// Publishes the requirements of the functions of a group in their reduced form, the body
+/// recording how it builds the evidence of the others: for a function with a complete clause,
+/// those that it leaves to its callers, and for the other functions of an exported group, the
+/// public ones. A group that `settled` has done the latter already: only the functions with a
+/// complete clause remain, after its last round.
+#[allow(clippy::too_many_arguments)]
+fn reduce_published_requirements<'a, F, I>(
+    output: &mut Module,
+    solver_arena: &mut NodeArena,
+    others: &Modules,
+    ast_functions: &F,
+    settled: bool,
+    declarations: &GroupDeclarations,
+    pending_functions: &mut PendingModuleFunctions,
+    associated_lambdas: &FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
+    ty_inf: &mut UnifiedTypeInference,
+) -> Result<(), InternalCompilationError>
+where
+    I: Iterator<Item = EmitFunctionInput<'a>>,
+    F: Fn() -> I,
+{
+    let GroupDeclarations {
+        local_fns,
+        function_explicit_root_tys,
+        complete_clauses,
+        ..
+    } = declarations;
     // Every member of an exported recursive group needs the public leaves of its
     // requirements: a private member cannot recover them backwards from a dictionary for the
     // unreduced private requirement. A group that settles has them already.
     let exports_group = group_is_exported(ast_functions());
     let mut published_requirements_changed = false;
-    for ((input, id), explicit_roots) in ast_functions()
+    for (((input, id), explicit_roots), complete) in ast_functions()
         .zip(local_fns)
         .zip(function_explicit_root_tys)
+        .zip(complete_clauses)
     {
-        // A group that settles has the public form of its requirements already.
-        if !exports_group || input.trait_default.is_some() || settlement.is_some() {
+        // A group that settles has the public form of its requirements already, but for its
+        // functions with a complete clause.
+        if input.trait_default.is_some() || (settled && complete.is_none()) {
             continue;
         }
-        let scheme = output.functions[id.as_index()].definition.ty_scheme.clone();
+        // A complete clause leaves to the callers what it writes, whether the function is
+        // exported or not.
+        let leaves = match complete {
+            Some(complete) => ReductionLeaves::Written(&complete.leaves),
+            None if exports_group => ReductionLeaves::Public,
+            None => continue,
+        };
+        let mut scheme = output.functions[id.as_index()].definition.ty_scheme.clone();
+        // The implied requirements that the function uses are requirements of the function.
+        if let Some(complete) = complete {
+            for constraint in complete.used_implied(*id, ty_inf) {
+                if !scheme.constraints.contains(&constraint) {
+                    scheme.constraints.push(constraint);
+                }
+            }
+        }
         let rigid = scheme
             .ty
             .args
@@ -4742,9 +5065,11 @@ where
             .map(|arg| arg.ty)
             .chain(explicit_roots.iter().copied())
             .collect::<Vec<_>>();
-        let Some(constraints) = public_requirements(
+        let Some(constraints) = reduced_requirements(
             &scheme.constraints,
             &rigid,
+            leaves,
+            input.is_exported(),
             input.function,
             explicit_roots,
             *id,
@@ -4813,8 +5138,7 @@ where
             }
         }
     }
-
-    Ok(Some(round_errors))
+    Ok(())
 }
 
 /// Numbers the variables of the published schemes of the functions of a group, in their bodies

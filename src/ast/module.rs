@@ -48,6 +48,17 @@ impl DModuleFunctionArg {
     }
 }
 
+/// Whether the written requirements of a function, an impl or a subscript are all those that its
+/// callers supply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhereClauseKind {
+    /// No clause, or a clause that ends with `..`: what the body needs besides is inferred.
+    Partial,
+    /// A written list, or `none`: the definer solves every requirement that the list does not
+    /// state or imply.
+    Complete,
+}
+
 #[derive(Debug, Clone, new)]
 #[allow(clippy::too_many_arguments)]
 pub struct ModuleFunction<P: Phase> {
@@ -58,6 +69,7 @@ pub struct ModuleFunction<P: Phase> {
     pub args_span: Location,
     pub ret_ty: Option<TypeSpan<P>>,
     pub where_clause: Vec<P::WhereClause>,
+    pub where_kind: WhereClauseKind,
     pub attributes: Vec<Attribute>,
     pub body: ExprId<P>,
     pub span: Location,
@@ -117,6 +129,7 @@ pub struct SubscriptDefinition<P: Phase> {
     pub args_span: Location,
     pub ret_ty: Option<TypeSpan<P>>,
     pub where_clause: Vec<P::WhereClause>,
+    pub where_kind: WhereClauseKind,
     pub members: Vec<SubscriptMember<P>>,
     pub span: Location,
     pub doc: Option<String>,
@@ -369,6 +382,7 @@ pub struct TraitImpl<P: Phase> {
     /// When `None`, they are fully inferred from the function signatures.
     pub for_trait: Option<TraitImplFor<P>>,
     pub where_clause: Vec<P::WhereClause>,
+    pub where_kind: WhereClauseKind,
     pub associated_consts: Vec<TraitAssociatedConstImpl>,
     pub functions: Vec<ModuleFunction<P>>,
     pub function_sccs: P::FunctionSccs,
@@ -568,6 +582,32 @@ fn fmt_trait_method(
     }
 }
 
+/// Writes the requirement clause of a function, an impl or a subscript, if it has one.
+fn fmt_requirement_clause<C: for<'a> FormatWith<ModuleEnv<'a>>>(
+    f: &mut fmt::Formatter<'_>,
+    env: &ModuleEnv<'_>,
+    where_clause: &[C],
+    kind: WhereClauseKind,
+) -> fmt::Result {
+    match (where_clause.is_empty(), kind) {
+        (true, WhereClauseKind::Partial) => Ok(()),
+        (true, WhereClauseKind::Complete) => write!(f, " where none"),
+        (false, kind) => {
+            write!(f, " where ")?;
+            write_with_separator_and_format_fn(
+                where_clause,
+                ", ",
+                |constraint, f| constraint.fmt_with(f, env),
+                f,
+            )?;
+            if kind == WhereClauseKind::Partial {
+                write!(f, ", ..")?;
+            }
+            Ok(())
+        }
+    }
+}
+
 fn fmt_module_function<P: Phase>(
     f: &mut fmt::Formatter<'_>,
     env: &ModuleEnv<'_>,
@@ -582,6 +622,7 @@ fn fmt_module_function<P: Phase>(
         args,
         ret_ty,
         where_clause,
+        where_kind,
         body,
         doc,
         ..
@@ -615,15 +656,7 @@ fn fmt_module_function<P: Phase>(
     if let Some((ret_ty, _)) = ret_ty {
         write!(f, " → {}", ret_ty.format_with(env))?;
     }
-    if !where_clause.is_empty() {
-        write!(f, " where ")?;
-        write_with_separator_and_format_fn(
-            where_clause,
-            ", ",
-            |constraint, f| constraint.fmt_with(f, env),
-            f,
-        )?;
-    }
+    fmt_requirement_clause(f, env, where_clause, *where_kind)?;
     writeln!(f)?;
     arena[*body].format_ind(f, env, arena, body_indent)
 }
@@ -643,6 +676,7 @@ fn fmt_subscript_definition<P: Phase>(
         args,
         ret_ty,
         where_clause,
+        where_kind,
         members,
         doc,
         ..
@@ -679,15 +713,7 @@ fn fmt_subscript_definition<P: Phase>(
     if let Some((ret_ty, _)) = ret_ty {
         write!(f, " -> {}", ret_ty.format_with(env))?;
     }
-    if !where_clause.is_empty() {
-        write!(f, " where ")?;
-        write_with_separator_and_format_fn(
-            where_clause,
-            ", ",
-            |constraint, f| constraint.fmt_with(f, env),
-            f,
-        )?;
-    }
+    fmt_requirement_clause(f, env, where_clause, *where_kind)?;
     writeln!(f, " {{")?;
     for member in members {
         let member_name = match (member.mode.ref_member, member.mode.mut_member) {
@@ -793,6 +819,7 @@ impl<'a> FormatWith<ModuleEnv<'_>> for ModuleDisplay<'a, Parsed> {
                 trait_name,
                 for_trait,
                 where_clause,
+                where_kind,
                 functions,
                 ..
             } in module.impls.iter()
@@ -806,14 +833,8 @@ impl<'a> FormatWith<ModuleEnv<'_>> for ModuleDisplay<'a, Parsed> {
                 } else {
                     write!(f, " ")?;
                 }
-                if !where_clause.is_empty() {
-                    write!(f, " where ")?;
-                    write_with_separator_and_format_fn(
-                        where_clause,
-                        ", ",
-                        |constraint, f| constraint.fmt_with(f, env),
-                        f,
-                    )?;
+                if !where_clause.is_empty() || *where_kind == WhereClauseKind::Complete {
+                    fmt_requirement_clause(f, env, where_clause, *where_kind)?;
                     write!(f, " ")?;
                 }
                 writeln!(f, "{{")?;
