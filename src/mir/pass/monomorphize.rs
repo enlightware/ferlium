@@ -3205,7 +3205,7 @@ mod tests {
         let module_id = compile(
             &mut session,
             "fn f(a: [[int]]) -> int { a[0][1] }\n\
-             fn g() -> [int] { [0, 1, 2] |> map(|x| x + 1) }",
+             fn g() -> [int] { [0, 1, 2] |> iter() |> map(|x| x + 1) |> collect() }",
         );
         let module = session.expect_fresh_module(module_id);
         let thunk_id = (0..module.function_count())

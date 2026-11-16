@@ -313,7 +313,7 @@ fn constant_array_pipeline_reifies_to_one_build_array() {
 fn final_effect_rows_share_one_closed_iterator_artifact_family() {
     let raw = emit(
         "effect_instantiation_sharing",
-        "fn main() -> [int] { [1, 2] |> concat([3, 4]) |> map(|x| x*x) }",
+        "fn main() -> [int] { [1, 2] |> concat([3, 4]) |> iter() |> map(|x| x*x) |> collect() }",
         MirOptimization::Disabled,
     );
     let headers = raw
@@ -413,7 +413,7 @@ fn provisional_effect_queries_do_not_materialize_trait_artifacts() {
 fn open_output_effects_keep_generated_dictionaries_open() {
     let raw = emit(
         "open_output_effects",
-        "fn g(a: [int], f) { a |> filter(f) }\ng([1, 2], |x| idiv(x, 0) > 0)",
+        "fn g(a: [int], f) -> [int] { a |> iter() |> filter(f) |> collect() }\ng([1, 2], |x| idiv(x, 0) > 0)",
         MirOptimization::Disabled,
     );
     let filter_iterator_families = raw

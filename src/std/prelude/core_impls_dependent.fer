@@ -11,38 +11,29 @@ where
 	}
 }
 
-// Partial: callers still supply the evidence of the adaptor and of `FromIterator`, which the
-// optimizer does not yet fold when built here from constant evidence.
 impl<A, B ! MapperEffect> Map for <Self = [A], Mapped = B |-> Item = A, Output = [B] ! MapperEffect = MapperEffect, MapEffect = (fallible, MapperEffect)>
 where
 	A: Value,
-	B: Value,
-	..
+	B: Value
 {
 	fn map(value: [A], mapper: (A) -> B ! MapperEffect) -> [B] {
 		from_iter(MapIterator { iterator: ArrayIterator { array: value, index: 0 }, mapper })
 	}
 }
 
-// Partial: callers still supply the evidence of the adaptor and of `FromIterator`, which the
-// optimizer does not yet fold when built here from constant evidence.
 impl<A ! PredicateEffect> Filter for <Self = [A] |-> Item = A, Output = [A] ! PredicateEffect = PredicateEffect, FilterEffect = (fallible, PredicateEffect)>
 where
-	A: Value,
-	..
+	A: Value
 {
 	fn filter(value: [A], predicate: (A) -> bool ! PredicateEffect) -> [A] {
 		from_iter(FilterIterator { iterator: ArrayIterator { array: value, index: 0 }, filter: predicate })
 	}
 }
 
-// Partial: callers still supply the evidence of the adaptor and of `FromIterator`, which the
-// optimizer does not yet fold when built here from constant evidence.
 impl<A, B ! MapperEffect> FilterMap for <Self = [A], Mapped = B |-> Item = A, Output = [B] ! MapperEffect = MapperEffect, FilterMapEffect = (fallible, MapperEffect)>
 where
 	A: Value,
-	B: Value,
-	..
+	B: Value
 {
 	fn filter_map(value: [A], mapper: (A) -> Option<B> ! MapperEffect) -> [B] {
 		from_iter(FilterMapIterator { iterator: ArrayIterator { array: value, index: 0 }, filter_map: mapper })
