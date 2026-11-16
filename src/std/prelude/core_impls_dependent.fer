@@ -300,8 +300,7 @@ where
 /// Returns a sorted copy of `value` using `compare`.
 pub fn sorted_by<S, A>(value: S, compare: (A, A) -> Ordering ! fallible) -> S
 where
-	SortBy<Self = S |-> Item = A>,
-	S: Value
+	SortBy<Self = S |-> Item = A>
 {
 	let mut result = value;
 	sort_by(result, compare);
@@ -312,8 +311,7 @@ where
 pub fn sorted<S, A>(value: S) -> S
 where
 	SortBy<Self = S |-> Item = A>,
-	A: Ord,
-	S: Value
+	A: Ord
 {
 	sorted_by(value, |left, right| cmp(left, right))
 }

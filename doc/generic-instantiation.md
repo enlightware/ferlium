@@ -72,7 +72,7 @@ generic function calling another generic function records its own quantifiers ra
 types:
 
 ```
-fn twice_it<T>(x: T) -> T where T: Num, T: Value { x + x }
+fn twice_it<T>(x: T) -> T where T: Num { x + x }
 
 fn concrete(n: int) -> int { twice_it(n) }        // records [int]
 fn forwarding<U>(y: U) -> U where .. { twice_it(y) }  // records [U]

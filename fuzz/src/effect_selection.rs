@@ -121,7 +121,7 @@ impl Serialize for H<Pure> {
             }
             Self::FixedNested => {
                 "struct H<T>(T)
-impl<A> Serialize for H<(A, Failing)> where A: Value {
+impl<A> Serialize for H<(A, Failing)> where nothing {
 	fn serialize(x: H<(A, Failing)>) -> DataValue { serialize(1) }
 }
 "
@@ -155,10 +155,10 @@ trait Source<Self |-> Item> { fn source(x: Self) -> Item; }
 impl<! A> Source for <Self = Cb<! A> |-> Item = Cb<! A>> {
 	fn source(x: Cb<! A>) -> Cb<! A> { x }
 }
-impl<T> Serialize for H<T> where T: Value, T: Source<Item = Cb<! fallible>> {
+impl<T> Serialize for H<T> where T: Source<Item = Cb<! fallible>> {
 	fn serialize(x: H<T>) -> DataValue { serialize(1) }
 }
-impl<T> Serialize for H<T> where T: Value, T: Source<Item = Cb<! read>> {
+impl<T> Serialize for H<T> where T: Source<Item = Cb<! read>> {
 	fn serialize(x: H<T>) -> DataValue { serialize(2) }
 }
 "
@@ -318,7 +318,7 @@ impl SelectionProgram {
     fn serializer_impl(&self) -> &'static str {
         match self.serializer {
             Serializer::NoCall => {
-                "impl<T> Serialize for W<T> where T: Value {
+                "impl<T> Serialize for W<T> where nothing {
 	fn serialize(x: W<T>) -> DataValue { serialize(1) }
 }
 "
@@ -401,7 +401,7 @@ impl<T ! F> RunPair for <Self = Pair<T, T> |-> ! E = F> where T: Run<! E = F> {
 }
 "
             .to_string(),
-            "impl<T> Serialize for Pair<T, T> where T: Value {
+            "impl<T> Serialize for Pair<T, T> where nothing {
 	fn serialize(x: Pair<T, T>) -> DataValue { serialize(3) }
 }
 "
