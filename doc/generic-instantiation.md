@@ -146,7 +146,9 @@ than being closed at the implementation's least effects.
 
 Reuse follows the same full application. A dictionary generated from a blanket implementation
 serves only the application it denotes: it is cached under its alpha-canonicalized full application,
-indexed both under the request and under the outputs it has. Declared concrete implementations are
+indexed both under the request and under the outputs it has. When the implementation's declared
+outputs mention only its input variables, it is also indexed under its inputs alone, so a request
+with unnamed or open outputs reuses it if its outputs relate to the requested ones. Declared concrete implementations are
 found by their input types; one is selected only if its output effects relate to the requested ones
 by polarity, so an implementation for pure callbacks does not serve a fallible one, and a caller's
 own effect variables are not specialized to fit it. Inference-only output queries populate neither
