@@ -71,7 +71,7 @@ ModuleTraitImpl: Module = {
 }
 
 TraitDefinition: TraitDefinition = {
-    <doc:DOC_COMMENT*> <visibility:Visibility> <l:@L> "trait" <name:Sp<UIdentifier>> <header:TraitDefinitionHeader> <parent_constraints:ParentConstraintList?> <where_clause:WhereClause?> "{" <items:TraitItem*> "}" <r:@R> => {
+    <doc:DOC_COMMENT*> <attributes:(Attribute)*> <visibility:Visibility> <l:@L> "trait" <name:Sp<UIdentifier>> <header:TraitDefinitionHeader> <parent_constraints:ParentConstraintList?> <where_clause:WhereClause?> "{" <items:TraitItem*> "}" <r:@R> => {
         let mut associated_consts = Vec::new();
         let mut methods = Vec::new();
         for item in items {
@@ -81,6 +81,7 @@ TraitDefinition: TraitDefinition = {
             }
         }
         TraitDefinition {
+            attributes,
             visibility,
             name,
             input_type_names: header.0,

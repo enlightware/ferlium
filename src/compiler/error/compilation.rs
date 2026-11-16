@@ -606,6 +606,7 @@ impl InvalidEnumDefaultAttributeKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttributeTarget {
     Function { name: Ustr },
+    Trait { name: Ustr },
     TypeDef { name: Ustr },
     EnumVariant { type_name: Ustr, variant_name: Ustr },
 }
@@ -614,6 +615,7 @@ impl AttributeTarget {
     fn message(&self) -> String {
         match self {
             Self::Function { name } => format!("function `{name}`"),
+            Self::Trait { name } => format!("trait `{name}`"),
             Self::TypeDef { name } => format!("type definition `{name}`"),
             Self::EnumVariant {
                 type_name,
@@ -1380,6 +1382,11 @@ pub enum CompilationErrorImpl<S: Scope> {
         blocked: Vec<(Location, Vec<Location>)>,
     },
     TraitImplNativeOnly {
+        trait_ref: S::TraitName,
+        impl_span: Location,
+    },
+    /// An impl of a sealed trait outside the trait's module.
+    TraitImplSealed {
         trait_ref: S::TraitName,
         impl_span: Location,
     },
@@ -2411,6 +2418,14 @@ impl FormatWith<SourceTable> for CompilationError {
                     fmt_span(impl_span)
                 )
             }
+            TraitImplSealed {
+                trait_ref,
+                impl_span,
+            } => write!(
+                f,
+                "Trait `{trait_ref}` is sealed: only its module can implement it (at {})",
+                fmt_span(impl_span)
+            ),
             OverlappingTraitImpls {
                 trait_ref,
                 input_tys,
@@ -3267,6 +3282,13 @@ impl CompilationError {
                 trait_ref,
                 impl_span,
             } => compilation_error!(TraitImplNativeOnly {
+                trait_ref: env.trait_name(trait_ref).to_string(),
+                impl_span,
+            }),
+            TraitImplSealed {
+                trait_ref,
+                impl_span,
+            } => compilation_error!(TraitImplSealed {
                 trait_ref: env.trait_name(trait_ref).to_string(),
                 impl_span,
             }),

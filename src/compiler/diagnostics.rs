@@ -357,6 +357,10 @@ pub(crate) fn diagnostics_from_error(
             impl_span: instantiation_span,
             ..
         }
+        | TraitImplSealed {
+            impl_span: instantiation_span,
+            ..
+        }
         | InvalidTraitAssociatedConstImpl {
             span: instantiation_span,
             ..

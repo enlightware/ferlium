@@ -137,11 +137,20 @@ pub(crate) fn check_trait_impl(
 ) -> Result<(), InternalCompilationError> {
     let env = ModuleEnv::new(current, others);
     let trait_def = env.trait_def(trait_id);
-    if trait_def.impl_policy == TraitImplPolicy::NativeOnly {
-        return Err(internal_compilation_error!(TraitImplNativeOnly {
-            trait_ref: trait_id,
-            impl_span: span,
-        }));
+    match trait_def.impl_policy {
+        TraitImplPolicy::NativeOnly => {
+            return Err(internal_compilation_error!(TraitImplNativeOnly {
+                trait_ref: trait_id,
+                impl_span: span,
+            }));
+        }
+        TraitImplPolicy::Sealed if trait_id.module != current.module_id() => {
+            return Err(internal_compilation_error!(TraitImplSealed {
+                trait_ref: trait_id,
+                impl_span: span,
+            }));
+        }
+        TraitImplPolicy::Sealed | TraitImplPolicy::UserImplementable => {}
     }
 
     if let Some(&input_ty) = input_tys
@@ -628,7 +637,9 @@ fn constraints_may_be_satisfiable(
 
 /// Whether other modules may add impls satisfying this constraint: by the orphan rule, a module
 /// may implement a user-implementable trait for its own named type, which a type-variable input
-/// head may become. Prerequisites of candidate impls go through the same check.
+/// head may become. Prerequisites of candidate impls go through the same check. A sealed trait
+/// counts as open too: sealing restricts where its impls are written, but does not let the
+/// compiler assume that it knows them all.
 fn is_open_world(current: &Module, others: &Modules, constraint: &PubTypeConstraint) -> bool {
     let PubTypeConstraint::HaveTrait {
         trait_id,
@@ -641,7 +652,7 @@ fn is_open_world(current: &Module, others: &Modules, constraint: &PubTypeConstra
     ModuleEnv::new(current, others)
         .trait_def(*trait_id)
         .impl_policy
-        == TraitImplPolicy::UserImplementable
+        != TraitImplPolicy::NativeOnly
         && input_tys
             .iter()
             .any(|ty| matches!(*ty.data(), TypeKind::Variable(_)))

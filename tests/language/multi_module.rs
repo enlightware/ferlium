@@ -2020,6 +2020,46 @@ fn an_impl_is_private_only_through_its_owning_input() {
     }
 }
 
+const SEALED_MODULE: &str = "#[sealed]\npub trait Shape<Self> { fn area(x: Self) -> int ! fallible; }\npub struct Square(int)\nimpl Shape for Square { fn area(x: Square) -> int { x.0 * x.0 } }\nimpl<T> Shape for [T] where T: Shape { fn area(x: [T]) -> int { area(x[0]) } }";
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_sealed_trait_is_used_but_not_implemented_by_other_modules() {
+    let mut session = TestSession::new();
+    compile_module(&mut session, "base", SEALED_MODULE);
+    compile_module(
+        &mut session,
+        "user",
+        "pub fn total<T>(x: T) -> int where T: base::Shape { base::Shape::area(x) * 2 }",
+    );
+    assert_val_eq!(
+        session.run("user::total([base::Square(3)]) + base::Shape::area(base::Square(2))"),
+        int(22)
+    );
+    for code in [
+        "use base::Shape;\npub struct Circle(int)\nimpl Shape for Circle { fn area(x: Circle) -> int { 3 * x.0 * x.0 } }",
+        "use base::Shape;\npub struct Wrap<T>(T)\nimpl<T> Shape for Wrap<T> { fn area(x: Wrap<T>) -> int { 0 } }",
+    ] {
+        // Only sealing rejects them.
+        let mut session = TestSession::new();
+        compile_module(
+            &mut session,
+            "base",
+            &SEALED_MODULE.replace("#[sealed]\n", ""),
+        );
+        compile_module(&mut session, "user", code);
+        let mut session = TestSession::new();
+        compile_module(&mut session, "base", SEALED_MODULE);
+        assert!(
+            module_fails_with(&mut session, "user", code, |e| matches!(
+                e,
+                CompilationErrorImpl::TraitImplSealed { .. }
+            )),
+            "{code}"
+        );
+    }
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn a_public_contract_names_only_public_items() {

@@ -166,6 +166,7 @@ pub enum TraitDefinitionItem {
 
 #[derive(Debug, Clone)]
 pub struct TraitDefinition {
+    pub attributes: Vec<Attribute>,
     pub visibility: Visibility,
     pub name: UstrSpan,
     pub input_type_names: Vec<UstrSpan>,

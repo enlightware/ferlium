@@ -5,8 +5,10 @@ use std::collections::BTreeSet;
 
 use super::{expr::desugar, *};
 use crate::{
-    ast::FunctionAstIndex,
-    compiler::error::{InvalidRecursiveTypeKind, InvalidTraitDefinitionKind},
+    ast::{Attribute, FunctionAstIndex},
+    compiler::error::{
+        AttributeTarget, InvalidAttributeKind, InvalidRecursiveTypeKind, InvalidTraitDefinitionKind,
+    },
     desugar::types::{
         ModuleImplementationNames, RecursiveAliasRef, RecursiveTypeBuilder,
         desugar_type_constraints_with_next_effect_var, extend_generic_eff_params,
@@ -18,8 +20,8 @@ use crate::{
         effects::EffectVar,
         never::reject_reserved_name,
         r#trait::{
-            Trait, TraitAssociatedConst, TraitImplPolicy, TraitMethodIndex, TraitMethodSpans,
-            TraitSpans, TraitValidationError,
+            SEALED_ATTRIBUTE, Trait, TraitAssociatedConst, TraitImplPolicy, TraitMethodIndex,
+            TraitMethodSpans, TraitSpans, TraitValidationError,
         },
     },
 };
@@ -1220,12 +1222,42 @@ fn module_implementation_sccs(
         .collect()
 }
 
+/// Who may implement a trait, as its attributes say.
+fn trait_impl_policy(
+    attributes: &[Attribute],
+    trait_name: Ustr,
+) -> Result<TraitImplPolicy, InternalCompilationError> {
+    let mut policy = TraitImplPolicy::UserImplementable;
+    for attribute in attributes {
+        if attribute.path.0 != SEALED_ATTRIBUTE {
+            continue;
+        }
+        let invalid = |kind| {
+            internal_compilation_error!(InvalidAttribute {
+                attribute_name: attribute.path.0,
+                target: AttributeTarget::Trait { name: trait_name },
+                kind,
+                span: attribute.span,
+            })
+        };
+        if !attribute.items.is_empty() {
+            return Err(invalid(InvalidAttributeKind::HasArguments));
+        }
+        if policy == TraitImplPolicy::Sealed {
+            return Err(invalid(InvalidAttributeKind::Duplicate));
+        }
+        policy = TraitImplPolicy::Sealed;
+    }
+    Ok(policy)
+}
+
 impl ast::TraitDefinition {
     pub fn desugar(
         self,
         env: &ModuleEnv<'_>,
         modules_used: &mut FxHashSet<ModuleId>,
     ) -> Result<Trait, InternalCompilationError> {
+        let impl_policy = trait_impl_policy(&self.attributes, self.name.0)?;
         let mut items = self
             .methods
             .iter()
@@ -1332,7 +1364,7 @@ impl ast::TraitDefinition {
             methods,
             associated_consts,
             derivers: vec![],
-            impl_policy: TraitImplPolicy::UserImplementable,
+            impl_policy,
             spans: Some(spans),
         })
         .map_err(|error| match error {

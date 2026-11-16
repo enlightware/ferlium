@@ -135,14 +135,22 @@ pub struct TraitDefaultMethod {
     pub function: FunctionId,
 }
 
-/// A trait, equivalent to a multi-parameter type class in Haskell, with output types.
+/// The attribute that restricts the impls of a trait to its module.
+pub const SEALED_ATTRIBUTE: &str = "sealed";
+
+/// Who may implement a trait.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraitImplPolicy {
+    /// Any module may implement the trait, within the orphan rule.
     UserImplementable,
+    /// Only the module of the trait may implement it, as `#[sealed]` asks.
+    Sealed,
+    /// Only trusted native code may implement the trait.
     NativeOnly,
 }
 
+/// A trait, equivalent to a multi-parameter type class in Haskell, with output types.
 #[derive(Debug, Clone)]
 pub struct Trait {
     /// Name of the trait, for debugging purposes.
@@ -791,6 +799,9 @@ impl FormatWith<ModuleEnv<'_>> for Trait {
             for line in doc.split("\n") {
                 writeln!(f, "/// {line}")?;
             }
+        }
+        if self.impl_policy == TraitImplPolicy::Sealed {
+            writeln!(f, "#[{SEALED_ATTRIBUTE}]")?;
         }
         write!(f, "trait {} <", self.name)?;
         let input_ty_count = self.input_type_count();

@@ -335,3 +335,33 @@ fn trusted_source_can_use_unsafe_features() {
         }
     "# });
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn sealed_attribute_takes_no_arguments_and_appears_once() {
+    for (source, expected) in [
+        (
+            "#[sealed(strict)]\npub trait T<Self> { fn t(x: Self) -> int; }",
+            InvalidAttributeKind::HasArguments,
+        ),
+        (
+            "#[sealed]\n#[sealed]\npub trait T<Self> { fn t(x: Self) -> int; }",
+            InvalidAttributeKind::Duplicate,
+        ),
+    ] {
+        let mut session = TestSession::new();
+        match session.fail_compilation(source).into_inner() {
+            CompilationErrorImpl::InvalidAttribute {
+                attribute_name,
+                target,
+                kind,
+                ..
+            } => {
+                assert_eq!(attribute_name, ustr("sealed"));
+                assert_eq!(target, AttributeTarget::Trait { name: ustr("T") });
+                assert_eq!(kind, expected);
+            }
+            other => panic!("expected invalid attribute error, got {other:?}"),
+        }
+    }
+}

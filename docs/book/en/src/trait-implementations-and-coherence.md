@@ -288,6 +288,30 @@ impl SizedSeq for int {
 
 The orphan rule gives each trait application a single module that may implement it, so modules that do not know each other never provide competing impls.
 
+## Sealed traits
+
+A trait marked `#[sealed]` can only be implemented in its own module.
+Other modules can still use it, but cannot implement it, even for their own types:
+
+```ferlium
+#[sealed]
+pub trait Polygon<Self> {
+    fn sides(polygon: Self) -> int;
+}
+
+pub struct Square;
+
+impl Polygon for Square {
+    fn sides(square: Square) -> int {
+        4
+    }
+}
+
+sides(Square)
+```
+
+This keeps the implementations of a trait under the control of its module.
+
 ## Effects do not choose an implementation
 
 Effects never select an implementation.
