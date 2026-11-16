@@ -967,47 +967,6 @@ fn private_trait_method_is_hidden_across_modules() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn impl_for_private_type_is_not_visible_across_modules() {
-    let mut session = TestSession::new();
-
-    compile_module(
-        &mut session,
-        "base",
-        indoc! { r#"
-            pub trait ToInt<Self> {
-                fn to_int(value: Self) -> int;
-            }
-
-            struct Hidden;
-
-            pub fn make_hidden() -> Hidden {
-                Hidden
-            }
-
-            impl ToInt for Hidden {
-                fn to_int(value: Hidden) -> int {
-                    1
-                }
-            }
-        "# },
-    );
-    assert!(
-        session
-            .try_compile_module(
-                "user",
-                indoc! { r#"
-                    pub fn result() -> int {
-                        base::ToInt::to_int(base::make_hidden())
-                    }
-                "# },
-            )
-            .is_err(),
-        "impls involving private types should not be visible across modules"
-    );
-}
-
-#[test]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn public_impl_can_use_private_helper_impls_from_defining_module() {
     let mut session = TestSession::new();
 
@@ -2063,22 +2022,49 @@ fn an_impl_is_private_only_through_its_owning_input() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn a_public_trait_has_only_public_parents() {
+fn a_public_contract_names_only_public_items() {
+    // Private names inside private items, or behind a private representation.
     let mut session = TestSession::new();
     compile_module(
         &mut session,
         "a",
-        "pub trait P<Self> { fn p(x: Self) -> int; }\npub trait Q<Self>: P<Self> { fn q(x: Self) -> int; }\ntrait H<Self> { fn h(x: Self) -> int; }\ntrait R<Self>: H<Self> { fn r(x: Self) -> int; }",
+        "struct P;\ntrait H<Self> { fn h(x: Self) -> int; }\nfn f(x: P) -> P { x }\ntype A = P;\nstruct S { a: P }\ntrait R<Self>: H<Self> { fn r(x: Self) -> P; }\n#[private_repr]\npub struct Opaque { a: P }\npub fn make() -> Opaque { Opaque { a: P } }\npub trait Base<Self> { fn o(x: Self) -> int; }\npub trait Q<Self>: Base<Self> { fn q(x: Self) -> Opaque; }",
     );
-    for code in [
-        "trait P<Self> { fn p(x: Self) -> int; }\npub trait Q<Self>: P<Self> { fn q(x: Self) -> int; }",
-        "struct Hidden;\npub trait G<Self |-> O> { fn g(x: Self) -> O; }\npub trait Q<Self>: G<Self |-> O = Hidden> { fn q(x: Self) -> int; }",
+    for (code, item, private) in [
+        ("struct P;\npub fn f(x: P) -> int { 0 }", "f", "P"),
+        // An inferred type is part of the contract as a written one is.
+        ("struct P;\nfn g() { P }\npub fn f() { g() }", "f", "P"),
+        ("struct P;\npub struct S { a: [P] }", "S", "P"),
+        ("struct P;\npub enum E { A(P), B }", "E", "P"),
+        ("struct P;\npub type A = (int, P);", "A", "P"),
+        (
+            "trait H<Self> { fn h(x: Self) -> int; }\npub trait Q<Self>: H<Self> { fn q(x: Self) -> int; }",
+            "Q",
+            "H",
+        ),
+        (
+            "struct P;\npub trait G<Self |-> O> { fn g(x: Self) -> O; }\npub trait Q<Self>: G<Self |-> O = P> { fn q(x: Self) -> int; }",
+            "Q",
+            "P",
+        ),
+        (
+            "trait H<Self> { fn h(x: Self) -> int; }\npub trait Q<Self |-> I> where I: H { fn q(x: Self) -> I; }",
+            "Q",
+            "H",
+        ),
+        (
+            "struct P;\npub trait Q<Self> { fn q(x: Self) -> P; }",
+            "Q",
+            "P",
+        ),
+        ("struct P;\npub trait Q<Self> { const C: P; }", "Q", "P"),
     ] {
         let mut session = TestSession::new();
         assert!(
             module_fails_with(&mut session, "a", code, |e| matches!(
                 e,
-                CompilationErrorImpl::PublicTraitHasPrivateParent { .. }
+                CompilationErrorImpl::PrivateNameInPublicContract { item: i, private: p, .. }
+                    if i == item && p == private
             )),
             "{code}"
         );
@@ -2104,19 +2090,10 @@ fn a_private_impl_conflicting_with_a_dependency_is_rejected_in_its_module() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn evidence_built_in_a_private_scope_is_not_reused_outside() {
-    // `a`'s `Use` impl solves `Conv<X, T>` in `a`'s private scope; outside, `a`'s private impl
-    // is invisible, whether the private scope solved that application before or not.
-    let a = "use c::{Conv, Use};\nstruct X;\npub struct P<T>(T)\npub fn make_x() { X }\nimpl<T> Conv for <A = X, B = T> { fn conv(a, b) { 1 } }\nimpl<T> Use for P<T> where Conv<X, T> { fn use_(x) { conv(X, x.0) } }";
-    for program in [
-        "c::Conv::conv(a::make_x(), 0)",
-        "let i = c::Use::use_(a::P(0));\nlet o = c::Conv::conv(a::make_x(), 0);\no * 10 + i",
-    ] {
-        let mut session = TestSession::new();
-        compile_module(&mut session, "c", CONV_MODULE);
-        compile_module(&mut session, "a", a);
-        assert!(session.try_compile(program).is_err(), "{program}");
-    }
+fn a_public_impl_solves_its_private_requirement_in_its_scope() {
+    // `a`'s `Use` impl solves `Conv<X, T>` in `a`'s private scope. `X` cannot leave `a`, so no
+    // other module can ask for that application.
+    let a = "use c::{Conv, Use};\nstruct X;\npub struct P<T>(T)\nimpl<T> Conv for <A = X, B = T> { fn conv(a, b) { 1 } }\nimpl<T> Use for P<T> where Conv<X, T> { fn use_(x) { conv(X, x.0) } }";
     let mut session = TestSession::new();
     compile_module(&mut session, "c", CONV_MODULE);
     compile_module(&mut session, "a", a);
@@ -2125,42 +2102,25 @@ fn evidence_built_in_a_private_scope_is_not_reused_outside() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn a_consumer_requirement_does_not_inherit_a_providers_private_scope() {
-    // `a`'s public `Use` impl needs `a`'s private `Conv` impl, solved in `a`'s scope; the
-    // consumer's own request for the same application is solved in the consumer's scope, where
-    // that impl is invisible, whatever the order of the calls.
+fn a_public_impl_solves_its_private_requirement_with_outputs_in_its_scope() {
+    // `a`'s public `Use` impl needs `a`'s private `Conv` impl, solved in `a`'s scope, which
+    // determines the output of `Use`.
     let c = "pub trait Conv<A, B |-> Out> { fn conv(a: A, b: B) -> Out; }\npub trait Use<Self |-> Out> { fn use_(x: Self) -> Out; }";
-    let a = "use c::{Conv, Use};\nstruct X;\npub struct P<T>(T)\npub fn make_x() { X }\nimpl<T> Conv for <A = X, B = T |-> Out = int> { fn conv(a: X, b: T) -> int { 1 } }\nimpl<T, O> Use for <Self = P<T> |-> Out = O> where Conv<A = X, B = T |-> Out = O> { fn use_(x: P<T>) -> O { conv(X, x.0) } }";
-    let session = || {
-        let mut session = TestSession::new();
-        compile_module(&mut session, "c", c);
-        compile_module(&mut session, "a", a);
-        session
-    };
-    assert_val_eq!(session().run("c::Use::use_(a::P(0))"), int(1));
-    for program in [
-        "c::Conv::conv(a::make_x(), 0)",
-        "let i = c::Use::use_(a::P(0));\nlet o = c::Conv::conv(a::make_x(), 0);\ni * 10 + o",
-        "let o = c::Conv::conv(a::make_x(), 0);\nlet i = c::Use::use_(a::P(0));\ni * 10 + o",
-        "fn f() -> int { let i = c::Use::use_(a::P(0)); let o = c::Conv::conv(a::make_x(), 0); i * 10 + o }\nf()",
-    ] {
-        assert!(session().try_compile(program).is_err(), "{program}");
-    }
+    let a = "use c::{Conv, Use};\nstruct X;\npub struct P<T>(T)\nimpl<T> Conv for <A = X, B = T |-> Out = int> { fn conv(a: X, b: T) -> int { 1 } }\nimpl<T, O> Use for <Self = P<T> |-> Out = O> where Conv<A = X, B = T |-> Out = O> { fn use_(x: P<T>) -> O { conv(X, x.0) } }";
+    let mut session = TestSession::new();
+    compile_module(&mut session, "c", c);
+    compile_module(&mut session, "a", a);
+    assert_val_eq!(session.run("c::Use::use_(a::P(0))"), int(1));
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn a_derivation_made_elsewhere_does_not_override_a_private_impl_in_its_scope() {
-    // Outside `a`, `X<int>` is inspected by derivation; in `a`'s scope, by `a`'s private impl.
-    let a = "struct X<T>(T)\npub struct P<T>(T)\npub fn make_x() { X(0) }\nimpl<T> Inspect for X<T> { fn inspect(x: X<T>) -> string { \"custom\" } }\npub trait Use<Self> { fn use_(x: Self) -> string ! fallible; }\nimpl<T> Use for P<T> where X<T>: Inspect { fn use_(x: P<T>) -> string { inspect(X(x.0)) } }";
-    for program in [
-        "let o = inspect(a::make_x());\nlet i = a::Use::use_(a::P(0));\nf\"{o}/{i}\"",
-        "let i = a::Use::use_(a::P(0));\nlet o = inspect(a::make_x());\nf\"{o}/{i}\"",
-    ] {
-        let mut session = TestSession::new();
-        compile_module(&mut session, "a", a);
-        assert_val_eq!(session.run(program), string("X (0)/custom"), "{program}");
-    }
+fn a_private_impl_overrides_derivation_in_its_scope() {
+    // In `a`'s scope, `X<int>` is inspected by `a`'s private impl, not by derivation.
+    let a = "struct X<T>(T)\npub struct P<T>(T)\nimpl<T> Inspect for X<T> { fn inspect(x: X<T>) -> string { \"custom\" } }\npub trait Use<Self> { fn use_(x: Self) -> string ! fallible; }\nimpl<T> Use for P<T> where X<T>: Inspect { fn use_(x: P<T>) -> string { inspect(X(x.0)) } }";
+    let mut session = TestSession::new();
+    compile_module(&mut session, "a", a);
+    assert_val_eq!(session.run("a::Use::use_(a::P(0))"), string("custom"));
 }
 
 #[test]
@@ -2186,7 +2146,6 @@ fn public_impls_build_private_evidence_from_the_consumers_evidence() {
             impl<T> Inspect for X<T> where T: Run<! E = ()> {{
                 fn inspect(x: X<T>) -> string {{ "custom" }}
             }}
-            pub fn make_x() {{ X(Cb(|| idiv(4, 2))) }}
             trait Hidden<Self> {{ fn hidden(x: Self) -> string ! fallible; }}
             pub struct P<T>(T)
             pub trait Use<Self> {{ fn use_(x: Self) -> string ! fallible; }}
@@ -2194,17 +2153,9 @@ fn public_impls_build_private_evidence_from_the_consumers_evidence() {
         "#,
             declarations.join("\n")
         );
-        for program in [
-            "let o = inspect(a::make_x()); let i = a::Use::use_(a::P(a::make_x())); f\"{o}/{i}\"",
-            "let i = a::Use::use_(a::P(a::make_x())); let o = inspect(a::make_x()); f\"{o}/{i}\"",
-        ] {
-            let mut session = TestSession::new();
-            compile_module(&mut session, "a", &provider);
-            assert_val_eq!(
-                session.run(program),
-                string("X (Cb (<function>))/X (Cb (<function>))")
-            );
-        }
+        let mut session = TestSession::new();
+        compile_module(&mut session, "a", &provider);
+        assert_val_eq!(session.run("a::Use::use_(a::P(2))"), string("2"));
     }
 }
 
@@ -3220,6 +3171,8 @@ fn generated_recursive_value_constructs_custom_members_from_self() {
         for public in [false, true] {
             for reverse in [false, true] {
                 let visibility = if public { "#[private_repr] pub" } else { "" };
+                // A private type cannot leave its module, so neither can its constructor.
+                let make_visibility = if public { "pub" } else { "" };
                 let ty = format!("{visibility} enum List<T> {{ Nil, Cons(T, Cell<List<T>>) }}");
                 let items = if reverse {
                     format!("{ty}\n{custom}")
@@ -3235,7 +3188,7 @@ fn generated_recursive_value_constructs_custom_members_from_self() {
                         r#"
                 struct Cell<T>({field})
                 {items}
-                pub fn make<T>(x: T) -> List<T> where T: Value {{
+                {make_visibility} fn make<T>(x: T) -> List<T> where T: Value {{
                     {construction}
                 }}
                 pub fn f<T>(x: T) -> string where T: Value {{

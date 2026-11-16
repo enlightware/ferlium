@@ -180,6 +180,44 @@ impl GenericParamsOwner {
     }
 }
 
+/// A kind of public item, whose contract names only public traits and types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicItemKind {
+    Function,
+    Subscript,
+    TypeDef,
+    TypeAlias,
+    Trait,
+}
+
+impl PublicItemKind {
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::Function => "function",
+            Self::Subscript => "subscript",
+            Self::TypeDef => "type",
+            Self::TypeAlias => "type alias",
+            Self::Trait => "trait",
+        }
+    }
+}
+
+/// A kind of private name that the contract of a public item may not name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivateNameKind {
+    TypeDef,
+    Trait,
+}
+
+impl PrivateNameKind {
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::TypeDef => "type",
+            Self::Trait => "trait",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvalidGenericParamsKind {
     DuplicateParam { name: Ustr },
@@ -342,8 +380,8 @@ pub(crate) fn effect_arguments_message(
 /// How to satisfy the orphan rule.
 pub(crate) const ORPHAN_RULE_HINT: &str = "an implementation of a trait of another module needs an input whose outermost type is defined in this module, with no bare type parameter in the inputs before it; wrap a generic input in a type of this module, or declare the trait's parameters in another order";
 
-/// Why the parents of a public trait must be public.
-pub(crate) const PRIVATE_PARENT_HINT: &str = "the parents of a public trait are part of its contract with other modules, so they must be public";
+/// Why a public contract cannot name a private trait or type.
+pub(crate) const PRIVATE_NAME_HINT: &str = "the contract of a public item may only name public traits and types; make it public, and mark a type `#[private_repr]` to keep its representation private";
 
 /// When an implementation is private.
 pub(crate) const PRIVATE_IMPL_HINT: &str = "an implementation is private only when its first input defined in this module, with no bare type parameter before it, is a private type; otherwise it is public, and its inputs and outputs must be public";
@@ -1163,8 +1201,12 @@ pub enum CompilationErrorImpl<S: Scope> {
         span: Location,
     },
     /// A parent of a public trait names a private trait or type.
-    PublicTraitHasPrivateParent {
-        trait_name: Ustr,
+    /// The contract of a public item names a private trait or type.
+    PrivateNameInPublicContract {
+        item_kind: PublicItemKind,
+        item: Ustr,
+        private_kind: PrivateNameKind,
+        private: Ustr,
         span: Location,
     },
     InvalidTupleIndex {
@@ -1947,9 +1989,17 @@ impl FormatWith<SourceTable> for CompilationError {
                 "Cannot publish private requirement `{requirement}` at {}. Its evidence must be constructible for every input type from public requirements",
                 fmt_span(span),
             ),
-            PublicTraitHasPrivateParent { trait_name, span } => write!(
+            PrivateNameInPublicContract {
+                item_kind,
+                item,
+                private_kind,
+                private,
+                span,
+            } => write!(
                 f,
-                "Public trait `{trait_name}` has a parent naming a private trait or type in {}: {PRIVATE_PARENT_HINT}",
+                "Public {} `{item}` names private {} `{private}` in {}: {PRIVATE_NAME_HINT}",
+                item_kind.description(),
+                private_kind.description(),
                 fmt_span(span),
             ),
             InvalidTupleIndex {
@@ -2902,9 +2952,19 @@ impl CompilationError {
                     span,
                 })
             }
-            PublicTraitHasPrivateParent { trait_name, span } => {
-                compilation_error!(PublicTraitHasPrivateParent { trait_name, span })
-            }
+            PrivateNameInPublicContract {
+                item_kind,
+                item,
+                private_kind,
+                private,
+                span,
+            } => compilation_error!(PrivateNameInPublicContract {
+                item_kind,
+                item,
+                private_kind,
+                private,
+                span,
+            }),
             InvalidTupleIndex {
                 index,
                 index_span,

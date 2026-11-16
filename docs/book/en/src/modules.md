@@ -50,8 +50,27 @@ pub trait HasArea<Self> {
 The `pub` modifier can be used on functions, type aliases, structs, enums, and traits.
 Trait implementations do not have their own visibility modifier.
 An implementation of a public trait is public, unless its owning input, its first input defined in its module, is a private type: then only that module can use it.
-A public implementation cannot mention private types in its inputs or outputs.
-Likewise, the parents of a public trait must be public traits, and cannot mention private types.
+A public definition can only mention public types and traits in its interface.
+It cannot mention private types.
+Likewise, the parents of a public trait must be public traits.
+
+Marking a public struct or enum `#[private_repr]` hides its fields or variants from other modules.
+They can still name the type and pass its values around, but cannot build or inspect them, and its fields or variants may then mention private types:
+
+```ferlium
+#[private_repr]
+pub struct Counter {
+    count: int,
+}
+
+pub fn counter_new() -> Counter {
+    Counter { count: 0 }
+}
+
+pub fn counter_next(counter: Counter) -> Counter {
+    Counter { count: counter.count + 1 }
+}
+```
 
 Public functions and implementations can use private helpers, types, and traits internally.
 However, the requirements they place on callers must mention only public types and traits.

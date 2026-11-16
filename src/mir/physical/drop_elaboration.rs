@@ -865,7 +865,7 @@ mod tests {
         session.set_mir_optimization(MirOptimization::Disabled);
         let module = session
             .compile(
-                "enum Chain { End, Next(Chain) } pub fn dispose(x: &mut Chain) {}",
+                "pub enum Chain { End, Next(Chain) } pub fn dispose(x: &mut Chain) {}",
                 "replace_paths",
                 Path::single_str("replace_paths"),
             )
@@ -1063,7 +1063,7 @@ mod tests {
         session.set_mir_optimization(MirOptimization::Disabled);
         let module = session
             .compile(
-                "enum Chain { End, Next(Chain) } pub fn dispose(x: &mut Chain) {}",
+                "pub enum Chain { End, Next(Chain) } pub fn dispose(x: &mut Chain) {}",
                 "shell_flags",
                 Path::single_str("shell_flags"),
             )
@@ -1173,7 +1173,7 @@ mod tests {
         session.set_mir_optimization(MirOptimization::Disabled);
         let module = session
             .compile(
-                "enum Chain { End, Next(Chain) } pub fn dispose(x: &mut Chain) {}",
+                "pub enum Chain { End, Next(Chain) } pub fn dispose(x: &mut Chain) {}",
                 "unprojected_payload",
                 Path::single_str("unprojected_payload"),
             )

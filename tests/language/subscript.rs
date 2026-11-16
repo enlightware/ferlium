@@ -1174,7 +1174,7 @@ fn resolved_projection_subscripts_lower_to_static_apply() {
 
     let mut session = experimental_session();
     let module = session.compile_and_get_module(indoc! { r#"
-        struct Pixel {
+        pub struct Pixel {
             coords: [int],
         }
 
@@ -1195,7 +1195,7 @@ fn resolved_projection_subscripts_lower_to_static_apply() {
         }
 
         #[private_repr]
-        struct Secret {
+        pub struct Secret {
             raw: int,
         }
 
@@ -1245,7 +1245,7 @@ fn subscript_member_function_names_are_generated() {
     let mut session = experimental_session();
     let module_id = session
         .compile(indoc! { r#"
-            struct Pixel {
+            pub struct Pixel {
                 coords: [int],
             }
 
@@ -1256,7 +1256,7 @@ fn subscript_member_function_names_are_generated() {
             }
 
             #[private_repr]
-            struct Secret {
+            pub struct Secret {
                 raw: int,
             }
 

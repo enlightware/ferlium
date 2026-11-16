@@ -19,6 +19,7 @@ where
 }
 
 /// A set storing unique, unordered elements of type `V`.
+#[private_repr]
 pub struct HashSet<V>
 where
 	V: Value
@@ -219,6 +220,7 @@ where
 }
 
 /// A map storing unique, unordered key-value pairs of types `K` and `V`.
+#[private_repr]
 pub struct HashMap<K, V>
 where
 	K: Value,

@@ -73,7 +73,8 @@ use crate::{
         Module, ModuleEnv, ModuleFunction, ModuleId, Path as ModulePath,
         PendingGeneratedStructuralProjectionSubscripts, PendingModuleFunction, ProjectionKey,
         SubscriptMemberFunctionKind, TraitImpl, UModuleFunction, Visibility, YieldProvenance,
-        build_capturing_dictionary_value, build_dictionary_value, dictionary_capture_plan, id::Id,
+        build_capturing_dictionary_value, build_dictionary_value, check_public_signatures,
+        dictionary_capture_plan, id::Id,
     },
     std::{
         STD_MODULE_ID,
@@ -1202,6 +1203,22 @@ fn emit_module_contents(
             emission.emit_scc(&mut ctx, scc_index, warnings)?;
         }
     }
+    let public_functions = source
+        .functions
+        .iter()
+        .enumerate()
+        .filter(|(index, function)| {
+            function.visibility.is_public()
+                && !trait_defaults.contains_key(&FunctionAstIndex::new(*index))
+        })
+        .map(|(_, function)| function.name);
+    let public_subscripts = source
+        .subscripts
+        .iter()
+        .zip(&subscript_ids)
+        .filter(|(subscript, _)| subscript.visibility.is_public())
+        .map(|(subscript, id)| (subscript.name, *id));
+    check_public_signatures(ctx.output, others, public_functions, public_subscripts)?;
 
     Ok(())
 }

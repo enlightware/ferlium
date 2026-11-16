@@ -15,9 +15,12 @@ pub mod id;
 pub mod module_env;
 pub mod path;
 mod pending_impls;
+mod public_contract;
 pub mod trait_impl;
 mod type_alias_name;
 pub mod uses;
+
+pub(crate) use public_contract::{check_public_declarations, check_public_signatures};
 
 use std::{fmt, hash::Hash, mem, ops, rc::Rc};
 
@@ -37,7 +40,7 @@ use ustr::{Ustr, ustr};
 use crate::{
     FxHashMap, FxHashSet, Location, ModuleRegistry, Modules,
     ast::UstrSpan,
-    compiler::error::{ImportKind, ImportSite, InternalCompilationError},
+    compiler::error::{ImportKind, ImportSite, InternalCompilationError, PrivateNameKind},
     containers::B,
     define_id_type,
     format::{FormatWith, write_identifier},
@@ -68,6 +71,7 @@ use crate::{
         },
         type_like::TypeLike,
         type_scheme::{PubTypeConstraint, TypeScheme, extra_parameters_from_constraints},
+        type_visitor::TypeInnerVisitor,
     },
 };
 
@@ -2307,26 +2311,59 @@ impl Module {
         self.is_type_visible_by(ty, others, Module::is_type_def_public)
     }
 
-    /// Whether a requirement on a trait names only public traits and types.
-    pub(crate) fn is_trait_requirement_public(
+    /// The first private type that `item` names, in visiting order.
+    pub(crate) fn first_private_type(
         &self,
-        constraint: &PubTypeConstraint,
+        item: &impl TypeLike,
         others: &Modules,
-    ) -> bool {
-        let PubTypeConstraint::HaveTrait {
-            trait_id,
-            input_tys,
-            output_tys,
-            ..
-        } = constraint
-        else {
-            unreachable!("only requirements on traits are checked")
+    ) -> Option<(PrivateNameKind, Ustr)> {
+        struct Find<'a> {
+            module: &'a Module,
+            others: &'a Modules,
+            found: Option<(PrivateNameKind, Ustr)>,
+        }
+        impl TypeInnerVisitor for Find<'_> {
+            fn visit_ty_kind_start(&mut self, ty: &TypeKind) {
+                if self.found.is_none()
+                    && let TypeKind::Named(named) = ty
+                    && !self.module.is_type_def_ref_visible_by(
+                        named.def,
+                        self.others,
+                        Module::is_type_def_public,
+                    )
+                {
+                    self.found = self
+                        .module
+                        .module_for(named.def.module, self.others)
+                        .and_then(|module| module.try_type_def_name(named.def))
+                        .map(|name| (PrivateNameKind::TypeDef, name));
+                }
+            }
+        }
+        let mut find = Find {
+            module: self,
+            others,
+            found: None,
         };
-        self.is_trait_public(*trait_id, others)
-            && input_tys
-                .iter()
-                .chain(output_tys)
-                .all(|ty| self.is_type_public(*ty, others))
+        item.visit(&mut find);
+        find.found
+    }
+
+    /// The first private trait or type that `requirement` names: its trait, then its types.
+    pub(crate) fn first_private_name_in_requirement(
+        &self,
+        requirement: &PubTypeConstraint,
+        others: &Modules,
+    ) -> Option<(PrivateNameKind, Ustr)> {
+        if let PubTypeConstraint::HaveTrait { trait_id, .. } = requirement
+            && !self.is_trait_public(*trait_id, others)
+        {
+            return self
+                .module_for(trait_id.module, others)
+                .and_then(|module| module.try_trait_name(*trait_id))
+                .map(|name| (PrivateNameKind::Trait, name));
+        }
+        self.first_private_type(requirement, others)
     }
 
     fn is_type_def_public(&self, id: TypeDefId) -> bool {

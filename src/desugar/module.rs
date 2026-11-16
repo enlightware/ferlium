@@ -13,7 +13,7 @@ use crate::{
         extend_generic_ty_params,
     },
     hir::function::CallableDefinition,
-    module::{TraitId, Visibility, id::Id},
+    module::{TraitId, Visibility, check_public_declarations, id::Id},
     types::{
         effects::EffectVar,
         never::reject_reserved_name,
@@ -944,6 +944,10 @@ impl PModule {
         let resolver = ModulesResolver::new(others);
         resolve_imports(&uses, &local_names, &resolver, &mut output.uses)?;
 
+        let alias_spans = type_aliases
+            .iter()
+            .map(|alias| (alias.name.0, alias.name.1))
+            .collect::<FxHashMap<_, _>>();
         let type_graph = build_named_type_graph(type_aliases, type_defs)?;
         let mut modules_used = type_graph.desugar(output, others, capabilities)?;
         let mut env = ModuleEnv::new(output, others).with_capabilities(capabilities);
@@ -991,19 +995,7 @@ impl PModule {
                     Some((TraitMethodIndex::from_index(index), function))
                 })
                 .collect::<Vec<_>>();
-            let trait_name = trait_def.name.0;
             let desugared = trait_def.desugar(&env, &mut modules_used)?;
-            if visibility.is_public()
-                && let Some(parent) = desugared
-                    .parent_constraints
-                    .iter()
-                    .find(|parent| !output.is_trait_requirement_public(parent, others))
-            {
-                return Err(internal_compilation_error!(PublicTraitHasPrivateParent {
-                    trait_name,
-                    span: parent.use_site(),
-                }));
-            }
             let id = output.add_trait_with_visibility(desugared, visibility);
             let trait_id = TraitId::new(output.module_id(), id);
             for (index, function) in default_functions {
@@ -1012,6 +1004,8 @@ impl PModule {
             }
             env = ModuleEnv::new(output, others).with_capabilities(capabilities);
         }
+
+        check_public_declarations(output, others, &alias_spans)?;
 
         // Desugar functions
         let fn_map = functions
