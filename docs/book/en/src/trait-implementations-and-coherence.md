@@ -93,8 +93,7 @@ struct Wrapper<T>(T)
 
 impl<T> SizedSeq for Wrapper<T>
 where
-    T: SizedSeq,
-    T: Value
+    T: SizedSeq
 {
     fn len(wrapper: Wrapper<T>) {
         len(wrapper.0)

@@ -1,8 +1,5 @@
 /// Computes the hash of a value.
-pub fn value_hash<V>(value: V) -> hash
-where
-	V: Value
-{
+pub fn value_hash<V>(value: V) -> hash where none {
 	let mut state = hasher_new();
 	hash(value, state);
 	hasher_finish(state)
@@ -40,18 +37,12 @@ where
 	index: int,
 }
 
-pub fn hash_set_new<V>() -> HashSet<V>
-where
-	V: Value
-{
+pub fn hash_set_new<V>() -> HashSet<V> where none {
 	HashSet { buckets: [], len: 0 }
 }
 
 /// Inserts `value` into `collection`, returning `true` if the value was not already present.
-pub fn set_insert<V>(collection: &mut HashSet<V>, value: V) -> bool
-where
-	V: Value
-{
+pub fn set_insert<V>(collection: &mut HashSet<V>, value: V) -> bool where none {
 	let key_getter = |slot| slot.value;
 	let slot_hash = value_hash(value);
 	if hash_collection_find_index_with_hash(collection, slot_hash, value, key_getter) != None {
@@ -66,18 +57,12 @@ where
 }
 
 /// Returns `true` if `value` is present in `collection`, otherwise `false`.
-pub fn set_contains<V>(collection: HashSet<V>, value: V) -> bool
-where
-	V: Value
-{
+pub fn set_contains<V>(collection: HashSet<V>, value: V) -> bool where none {
 	let key_getter = |slot| slot.value;
 	hash_collection_find_index_with_hash(collection, value_hash(value), value, key_getter) != None
 }
 
-impl<V> Iterator for <Self = HashSetIterator<V> |-> Item = V>
-where
-	V: Value
-{
+impl<V> Iterator for <Self = HashSetIterator<V> |-> Item = V> where none {
 	fn next(it: &mut HashSetIterator<V>) -> Option<V> {
 		let capacity = len(it.buckets);
 		loop {
@@ -95,10 +80,7 @@ where
 	}
 }
 
-impl<V> Seq for <Self = HashSet<V> |-> Item = V, Iter = HashSetIterator<V>>
-where
-	V: Value
-{
+impl<V> Seq for <Self = HashSet<V> |-> Item = V, Iter = HashSetIterator<V>> where none {
 	fn iter(collection: HashSet<V>) -> HashSetIterator<V> {
 		HashSetIterator {
 			buckets: collection.buckets,
@@ -107,28 +89,19 @@ where
 	}
 }
 
-impl<V> SizedSeq for <Self = HashSet<V>>
-where
-	V: Value
-{
+impl<V> SizedSeq for <Self = HashSet<V>> where none {
 	fn len(collection: HashSet<V>) -> int {
 		collection.len
 	}
 }
 
-impl<V> Empty for <Self = HashSet<V>>
-where
-	V: Value
-{
+impl<V> Empty for <Self = HashSet<V>> where none {
 	fn empty() -> HashSet<V> {
 		hash_set_new()
 	}
 }
 
-impl<V> Default for <Self = HashSet<V>>
-where
-	V: Value
-{
+impl<V> Default for <Self = HashSet<V>> where none {
 	fn default() -> HashSet<V> {
 		hash_set_new()
 	}
@@ -136,8 +109,6 @@ where
 
 impl<V, I ! IterEffect> FromIterator for <Self = HashSet<V>, Iter = I |-> Item = V ! IterEffect = IterEffect, FromIterEffect = (fallible, IterEffect)>
 where
-	V: Value,
-	I: Value,
 	I: Iterator<Item = V ! NextEffect = IterEffect>
 {
 	fn from_iter(iterator: I) -> HashSet<V> {
@@ -187,8 +158,7 @@ where
 
 impl<V> Inspect for HashSet<V>
 where
-	V: Inspect,
-	V: Value
+	V: Inspect
 {
 	fn inspect(value: HashSet<V>) -> string {
 		hash_collection_inspect(value)
@@ -210,9 +180,7 @@ where
 impl<K, V> Inspect for HashMapEntry<K, V>
 where
 	K: Inspect,
-	K: Value,
-	V: Inspect,
-	V: Value
+	V: Inspect
 {
 	fn inspect(value: HashMapEntry<K, V>) -> string {
 		let mut rendered = inspect(value.key);
@@ -246,20 +214,12 @@ where
 	index: int,
 }
 
-pub fn hash_map_new<K, V>() -> HashMap<K, V>
-where
-	K: Value,
-	V: Value
-{
+pub fn hash_map_new<K, V>() -> HashMap<K, V> where none {
 	HashMap { buckets: [], len: 0 }
 }
 
 /// Inserts `value` into `collection` with the given `key`, returning the previous value if the key was already present.
-pub fn map_insert<K, V>(collection: &mut HashMap<K, V>, key: K, value: V) -> Option<V>
-where
-	K: Value,
-	V: Value
-{
+pub fn map_insert<K, V>(collection: &mut HashMap<K, V>, key: K, value: V) -> Option<V> where none {
 	let key_getter = |entry| entry.key;
 	let key_hash = value_hash(key);
 	let existing_index = hash_collection_find_index_with_hash(collection, key_hash, key, key_getter);
@@ -287,11 +247,7 @@ where
 }
 
 /// Gets the value associated with `key` in `collection`, or `None` if the key is not present.
-pub fn map_get<K, V>(collection: HashMap<K, V>, key: K) -> Option<V>
-where
-	K: Value,
-	V: Value
-{
+pub fn map_get<K, V>(collection: HashMap<K, V>, key: K) -> Option<V> where none {
 	let key_getter = |entry| entry.key;
 	let key_hash = value_hash(key);
 	match hash_collection_find_index_with_hash(collection, key_hash, key, key_getter) {
@@ -304,11 +260,7 @@ where
 }
 
 /// Returns `true` if `key` is present in `collection`, otherwise `false`.
-pub fn map_contains_key<K, V>(collection: HashMap<K, V>, key: K) -> bool
-where
-	K: Value,
-	V: Value
-{
+pub fn map_contains_key<K, V>(collection: HashMap<K, V>, key: K) -> bool where none {
 	match map_get(collection, key) {
 		Some(value) => {
 			let present = value;
@@ -319,30 +271,18 @@ where
 }
 
 /// Returns `true` if `collection` contains an entry with the given `key` and `value`, otherwise `false`.
-pub fn map_contains_key_value<K, V>(collection: HashMap<K, V>, key: K, value: V) -> bool
-where
-	K: Value,
-	V: Value
-{
+pub fn map_contains_key_value<K, V>(collection: HashMap<K, V>, key: K, value: V) -> bool where none {
 	match map_get(collection, key) {
 		Some(existing) => existing == value,
 		None => false,
 	}
 }
 
-fn hash_map_contains_entry<K, V>(collection: HashMap<K, V>, entry: (K, V)) -> bool
-where
-	K: Value,
-	V: Value
-{
+fn hash_map_contains_entry<K, V>(collection: HashMap<K, V>, entry: (K, V)) -> bool where none {
 	map_contains_key_value(collection, entry.0, entry.1)
 }
 
-impl<K, V> Iterator for <Self = HashMapIterator<K, V> |-> Item = (K, V)>
-where
-	K: Value,
-	V: Value
-{
+impl<K, V> Iterator for <Self = HashMapIterator<K, V> |-> Item = (K, V)> where none {
 	fn next(it: &mut HashMapIterator<K, V>) -> Option<(K, V)> {
 		let capacity = len(it.buckets);
 		loop {
@@ -360,11 +300,7 @@ where
 	}
 }
 
-impl<K, V> Seq for <Self = HashMap<K, V> |-> Item = (K, V), Iter = HashMapIterator<K, V>>
-where
-	K: Value,
-	V: Value
-{
+impl<K, V> Seq for <Self = HashMap<K, V> |-> Item = (K, V), Iter = HashMapIterator<K, V>> where none {
 	fn iter(collection: HashMap<K, V>) -> HashMapIterator<K, V> {
 		HashMapIterator {
 			buckets: collection.buckets,
@@ -373,31 +309,19 @@ where
 	}
 }
 
-impl<K, V> SizedSeq for <Self = HashMap<K, V>>
-where
-	K: Value,
-	V: Value
-{
+impl<K, V> SizedSeq for <Self = HashMap<K, V>> where none {
 	fn len(collection: HashMap<K, V>) -> int {
 		collection.len
 	}
 }
 
-impl<K, V> Empty for <Self = HashMap<K, V>>
-where
-	K: Value,
-	V: Value
-{
+impl<K, V> Empty for <Self = HashMap<K, V>> where none {
 	fn empty() -> HashMap<K, V> {
 		hash_map_new()
 	}
 }
 
-impl<K, V> Default for <Self = HashMap<K, V>>
-where
-	K: Value,
-	V: Value
-{
+impl<K, V> Default for <Self = HashMap<K, V>> where none {
 	fn default() -> HashMap<K, V> {
 		hash_map_new()
 	}
@@ -405,9 +329,6 @@ where
 
 impl<K, V, I ! IterEffect> FromIterator for <Self = HashMap<K, V>, Iter = I |-> Item = (K, V) ! IterEffect = IterEffect, FromIterEffect = (fallible, IterEffect)>
 where
-	K: Value,
-	V: Value,
-	I: Value,
 	I: Iterator<Item = (K, V) ! NextEffect = IterEffect>
 {
 	fn from_iter(iterator: I) -> HashMap<K, V> {
@@ -459,9 +380,7 @@ where
 impl<K, V> Inspect for HashMap<K, V>
 where
 	K: Inspect,
-	K: Value,
 	V: Inspect,
-	V: Value,
 	(K, V): Inspect
 {
 	fn inspect(value: HashMap<K, V>) -> string {

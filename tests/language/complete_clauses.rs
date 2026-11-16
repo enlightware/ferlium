@@ -173,29 +173,115 @@ fn where_none_publishes_only_structural_requirements() {
         signature(&mut TestSession::new(), src, "field").contains("where T: { a: int"),
         "the field requirement is published"
     );
-    // Copying needs `Value`, which `none` refuses.
-    TestSession::new()
-        .fail_compilation("fn copy<T>(x: T) -> T where none { x }")
-        .expect_undeclared_requirement("T: Value", false);
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn a_requirement_on_an_unnamed_type_asks_for_a_name() {
-    // The type of the field has no name, so its `Value` cannot be written.
+    // The type of the field has no name, so its `Num` cannot be written.
     TestSession::new()
-        .fail_compilation("fn field<T>(x: T) where none { x.a }")
-        .expect_undeclared_requirement("B: Value", true);
+        .fail_compilation("fn field<T>(x: T) where none { x.a + x.a }")
+        .expect_undeclared_requirement("B: Num", true);
     // A generic ascribing a value of the body names it.
     assert_val_eq!(
         TestSession::new().run(indoc! { r#"
-            fn field<T, B>(x: T) -> int where B: Value {
+            fn field<T, B>(x: T) -> B where B: Num {
                 let y: B = x.a;
-                1
+                y + y
             }
-            field({ a: true })
+            field({ a: 2 })
         "# }),
-        int(1)
+        int(4)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn the_value_of_a_type_variable_is_implicit_and_published_if_used() {
+    let src = indoc! { r#"
+        fn id<T>(x: T) -> T where none { x }
+        fn len_of<A>(a: [A]) -> int where none { len(a) }
+        fn field<T>(x: T) where none { x.a }
+        fn ascribed<T, B>(x: T) -> int where none { let y: B = x.a; 1 }
+        fn count<T>(n: int, x: T) -> int where none {
+            if n == 0 {
+                0
+            } else {
+                count(n - 1, x)
+            }
+        }
+        fn kept<T>(x: T) -> int where T: Value { 0 }
+    "# };
+    assert_val_eq!(
+        TestSession::new().run(&format!(
+            "{src}(id(1), len_of([1, 2]), field({{ a: 3 }}), ascribed({{ a: true }}), count(2, 1), kept(1))"
+        )),
+        expected_tuple([int(1), int(2), int(3), int(1), int(0), int(0)])
+    );
+    for (name, published) in [
+        ("id", "fn id<T>(x: T) -> T where T: Value"),
+        ("len_of", "fn len_of<A>(a: [A]) -> int"),
+        ("count", "fn count<T>(n: int, x: T) -> int"),
+        // A written `Value` is published even if unused.
+        ("kept", "fn kept<T>(x: T) -> int where T: Value"),
+    ] {
+        assert_eq!(
+            signature(&mut TestSession::new(), src, name).trim_end(),
+            published
+        );
+    }
+    for name in ["field", "ascribed"] {
+        assert!(
+            signature(&mut TestSession::new(), src, name).contains("B: Value"),
+            "{name} publishes the `Value` of the field's type"
+        );
+    }
+    // A `Value` that a recursive sibling uses is published by its caller too.
+    let src = indoc! { r#"
+        fn even<T>(n: int, x: T) -> [T] where none {
+            if n == 0 {
+                []
+            } else {
+                odd(n - 1, x)
+            }
+        }
+        fn odd<T>(n: int, x: T) -> [T] where none {
+            if n == 0 {
+                [x]
+            } else {
+                even(n - 1, x)
+            }
+        }
+    "# };
+    assert_val_eq!(
+        TestSession::new().run(&format!("{src}even(3, 7)[0]")),
+        int(7)
+    );
+    for name in ["even", "odd"] {
+        assert_eq!(
+            signature(&mut TestSession::new(), src, name).trim_end(),
+            format!("fn {name}<T>(n: int, x: T) -> [T] where T: Value")
+        );
+    }
+    // A variable that reaches neither the signature nor a requirement stays ambiguous.
+    TestSession::new()
+        .fail_compilation("fn f<T>(x: T) -> bool where none { let a = []; a == a }")
+        .expect_unbound_ty_var();
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_inferred_output_has_an_implicit_value() {
+    let src = format!(
+        "{CONTAINER}fn f<T>(x: T) -> string where T: Source<Item = _> {{ to_string(source(x)) }}\n"
+    );
+    assert_val_eq!(
+        TestSession::new().run(&format!("{src}f(S(5))")),
+        string("5")
+    );
+    assert_eq!(
+        signature(&mut TestSession::new(), &src, "f"),
+        "fn f<T, B>(x: T) -> string where T: Source <Item = B>, B: Value"
     );
 }
 

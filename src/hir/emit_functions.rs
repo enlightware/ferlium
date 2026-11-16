@@ -996,6 +996,8 @@ struct Settlement {
     /// callers: its contract has only these, and those on the structure of its types. It solves
     /// the others itself, when it is published.
     written_leaves: Vec<Option<Vec<PubTypeConstraint>>>,
+    /// The trait `Value`, which a complete clause leaves to the callers of type variables.
+    value_trait: TraitId,
 }
 
 impl Settlement {
@@ -1281,6 +1283,7 @@ impl Settlement {
                 &self.requirements[index],
                 &self.requirement_ranks[index],
                 self.written_leaves[index].as_deref(),
+                self.value_trait,
                 written_effects,
                 ty_inf,
             );
@@ -1556,6 +1559,7 @@ fn round_contract(
     requirements: &[PubTypeConstraint],
     requirement_ranks: &[usize],
     written_leaves: Option<&[PubTypeConstraint]>,
+    value_trait: TraitId,
     written_effects: &[EffectVar],
     ty_inf: &mut UnifiedTypeInference,
 ) -> (GroupContract, Vec<EffectVar>) {
@@ -1563,7 +1567,8 @@ fn round_contract(
         .iter()
         .zip(requirement_ranks)
         .filter(|(requirement, _)| {
-            written_leaves.is_none_or(|leaves| is_written_leaf(requirement, leaves, ty_inf))
+            written_leaves
+                .is_none_or(|leaves| is_written_leaf(requirement, leaves, value_trait, ty_inf))
         })
         .map(|(requirement, rank)| (requirement.clone(), *rank))
         .unzip();
@@ -4302,6 +4307,7 @@ where
             answered_applications: ty_inf.answered_applications(),
             alike: FxHashMap::default(),
             written_leaves,
+            value_trait: ModuleEnv::new(output, others).expect_std_trait_id(VALUE_TRAIT_NAME),
         })
     } else {
         None

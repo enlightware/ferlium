@@ -2,39 +2,26 @@
 
 impl<F, T> Cast for <From = [F], To = [T]>
 where
-	Cast<From = F, To = T>,
-	F: Value,
-	T: Value
+	Cast<From = F, To = T>
 {
 	fn cast(array: [F]) -> [T] {
 		map(array, (|element| cast(element): ((F) -> T ! fallible)))
 	}
 }
 
-impl<A, B ! MapperEffect> Map for <Self = [A], Mapped = B |-> Item = A, Output = [B] ! MapperEffect = MapperEffect, MapEffect = (fallible, MapperEffect)>
-where
-	A: Value,
-	B: Value
-{
+impl<A, B ! MapperEffect> Map for <Self = [A], Mapped = B |-> Item = A, Output = [B] ! MapperEffect = MapperEffect, MapEffect = (fallible, MapperEffect)> where none {
 	fn map(value: [A], mapper: (A) -> B ! MapperEffect) -> [B] {
 		from_iter(MapIterator { iterator: ArrayIterator { array: value, index: 0 }, mapper })
 	}
 }
 
-impl<A ! PredicateEffect> Filter for <Self = [A] |-> Item = A, Output = [A] ! PredicateEffect = PredicateEffect, FilterEffect = (fallible, PredicateEffect)>
-where
-	A: Value
-{
+impl<A ! PredicateEffect> Filter for <Self = [A] |-> Item = A, Output = [A] ! PredicateEffect = PredicateEffect, FilterEffect = (fallible, PredicateEffect)> where none {
 	fn filter(value: [A], predicate: (A) -> bool ! PredicateEffect) -> [A] {
 		from_iter(FilterIterator { iterator: ArrayIterator { array: value, index: 0 }, filter: predicate })
 	}
 }
 
-impl<A, B ! MapperEffect> FilterMap for <Self = [A], Mapped = B |-> Item = A, Output = [B] ! MapperEffect = MapperEffect, FilterMapEffect = (fallible, MapperEffect)>
-where
-	A: Value,
-	B: Value
-{
+impl<A, B ! MapperEffect> FilterMap for <Self = [A], Mapped = B |-> Item = A, Output = [B] ! MapperEffect = MapperEffect, FilterMapEffect = (fallible, MapperEffect)> where none {
 	fn filter_map(value: [A], mapper: (A) -> Option<B> ! MapperEffect) -> [B] {
 		from_iter(FilterMapIterator { iterator: ArrayIterator { array: value, index: 0 }, filter_map: mapper })
 	}
@@ -98,10 +85,7 @@ pub struct ArraySplitElementIterator<A>
 	finished: bool,
 }
 
-impl Iterator for <Self = ArraySplitElementIterator<A> |-> Item = [A] ! NextEffect = fallible>
-where
-	A: Value
-{
+impl Iterator for <Self = ArraySplitElementIterator<A> |-> Item = [A] ! NextEffect = fallible> where none {
 	fn next(it: &mut ArraySplitElementIterator<A>) -> Option<[A]> {
 		if it.finished {
 			return None;
@@ -136,10 +120,7 @@ pub struct ArraySplitIterator<A>
 	finished: bool,
 }
 
-impl Iterator for <Self = ArraySplitIterator<A> |-> Item = [A] ! NextEffect = fallible>
-where
-	A: Value
-{
+impl Iterator for <Self = ArraySplitIterator<A> |-> Item = [A] ! NextEffect = fallible> where none {
 	fn next(it: &mut ArraySplitIterator<A>) -> Option<[A]> {
 		if it.finished {
 			return None;
@@ -183,10 +164,7 @@ impl Split for <Self = string, Separator = string |-> Part = string, Iter = stri
 	}
 }
 
-impl<A> Split for <Self = [A], Separator = A |-> Part = [A], Iter = ArraySplitElementIterator<A>, Output = [[A]] ! SplitIterEffect = fallible>
-where
-	A: Value
-{
+impl<A> Split for <Self = [A], Separator = A |-> Part = [A], Iter = ArraySplitElementIterator<A>, Output = [[A]] ! SplitIterEffect = fallible> where none {
 	fn split_iterator(value: [A], separator: A) {
 		ArraySplitElementIterator {
 			array: value,
@@ -197,10 +175,7 @@ where
 	}
 }
 
-impl<A> Split for <Self = [A], Separator = [A] |-> Part = [A], Iter = ArraySplitIterator<A>, Output = [[A]] ! SplitIterEffect = fallible>
-where
-	A: Value
-{
+impl<A> Split for <Self = [A], Separator = [A] |-> Part = [A], Iter = ArraySplitIterator<A>, Output = [[A]] ! SplitIterEffect = fallible> where none {
 	fn split_iterator(value: [A], separator: [A]) {
 		if is_empty(separator) {
 			invalid_argument("separator must not be empty")
@@ -252,8 +227,7 @@ impl<A> Reverse for <Self = [A]> {
 /// Returns a reversed copy of `value`.
 pub fn reversed<S>(value: S) -> S
 where
-	Reverse<Self = S>,
-	S: Value
+	Reverse<Self = S>
 {
 	let mut result = value;
 	reverse(result);

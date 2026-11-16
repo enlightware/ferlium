@@ -133,7 +133,7 @@ A trailing `..` makes the clause partial: what it does not list is inferred and 
 The clauses of structs, enums and traits have no body to infer from, and are complete already.
 
 The definition solves its other requirements by the reduction of [public requirements](#public-requirements), with the written requirements as leaves instead of the public names.
-A requirement whose trait and input types match a written one is left to the callers.
+A requirement whose trait and input types match a written one is left to the callers, as is `Value` of a type variable, which need not be written.
 Any other is reduced through the impls visible where the item is defined, and one that reaches no leaf is an error at its use.
 A written requirement without generics is checked at the definition and is not published.
 So the same body under a partial clause and under a complete one listing what inference would publish runs the same impls.

@@ -69,15 +69,14 @@ It lists the trait requirements that callers must meet.
 ```ferlium
 fn keep_ord<T>(value: T) -> T
 where
-    T: Ord,
-    T: Value
+    T: Ord
 {
     value
 }
 ```
 
 A written clause is complete: callers supply exactly what it lists, and the function solves every other requirement of its body itself, or is rejected.
-Returning `value` copies it, which needs `Value`, so the clause lists it.
+Returning `value` copies it, which needs `Value`; `Value` of a generic need not be listed: callers supply it when the body uses it.
 A requirement also allows those it implies: with `T: Real`, the body may use `+`, as `Real` requires `Num`.
 Requirements on the fields of a type, such as reading `x.a`, are not listed: they remain inferred.
 
@@ -93,7 +92,7 @@ where
 }
 ```
 
-`where none` states that callers supply nothing.
+`where none` lists nothing: callers supply only the `Value` of generics and the requirements on the fields of types that the body uses.
 In a requirement, `_` stands for an output to infer, as in `S: Seq<Item = _, Iter = I>`.
 The same rules apply to the `where` clauses of `impl` blocks and subscripts.
 

@@ -176,8 +176,7 @@ impl Deserialize for <Self = string> {
 
 impl<A> Serialize for [A]
 where
-	A: Serialize,
-	A: Value
+	A: Serialize
 {
 	fn serialize(a: [A]) {
 		let mut result = array_with_capacity(array_len(a));
@@ -205,8 +204,7 @@ impl Deserialize {
 
 impl<V> Serialize for HashSet<V>
 where
-	V: Serialize,
-	V: Value
+	V: Serialize
 {
 	fn serialize(collection: HashSet<V>) {
 		let mut result = [];
@@ -219,8 +217,7 @@ where
 
 impl<V> Deserialize for HashSet<V>
 where
-	V: Deserialize,
-	V: Value
+	V: Deserialize
 {
 	fn deserialize(data) -> HashSet<V> {
 		let values = match data {
@@ -239,9 +236,7 @@ where
 impl<K, V> Serialize for HashMap<K, V>
 where
 	K: Serialize,
-	K: Value,
-	V: Serialize,
-	V: Value
+	V: Serialize
 {
 	fn serialize(collection: HashMap<K, V>) {
 		let mut result = [];
@@ -255,9 +250,7 @@ where
 impl<K, V> Deserialize for HashMap<K, V>
 where
 	K: Deserialize,
-	K: Value,
-	V: Deserialize,
-	V: Value
+	V: Deserialize
 {
 	fn deserialize(data) -> HashMap<K, V> {
 		let mut result = hash_map_new();

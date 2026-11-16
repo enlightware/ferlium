@@ -445,6 +445,7 @@ enum UniformSelection {
 pub(crate) fn is_written_leaf(
     constraint: &PubTypeConstraint,
     written: &[PubTypeConstraint],
+    value_trait: TraitId,
     inference: &mut UnifiedTypeInference,
 ) -> bool {
     match constraint {
@@ -456,6 +457,10 @@ pub(crate) fn is_written_leaf(
             // Effects select no implementation, so they do not tell requirements apart.
             let erased = |tys: &[Type]| instantiate_types(tys, &mut EffectErasingMapper);
             let inputs = erased(&inference.substitute_in_types(input_tys));
+            // `Value` of a type variable is implicit: it need not be written.
+            if *trait_id == value_trait && inputs[0].data().is_variable() {
+                return true;
+            }
             written.iter().any(|written| {
                 matches!(inference.substitute_in_constraint(written),
                     PubTypeConstraint::HaveTrait { trait_id: id, input_tys, .. }
@@ -936,7 +941,12 @@ impl TraitSolver<'_> {
     ) -> bool {
         match leaves {
             ReductionLeaves::Public => self.requirement_is_public(constraint),
-            ReductionLeaves::Written(written) => is_written_leaf(constraint, written, inference),
+            ReductionLeaves::Written(written) => is_written_leaf(
+                constraint,
+                written,
+                self.std_trait_id(VALUE_TRAIT_NAME),
+                inference,
+            ),
         }
     }
 
