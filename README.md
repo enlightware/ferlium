@@ -55,14 +55,14 @@ The same `CompilerSession` API is what powers the [Playground](https://enlightwa
 
 ## Why Ferlium
 
-* **Type inference with generics.** Ferlium infers generic function signatures across a whole module, so `fn add(a, b) { a + b }` needs no annotations. Its inference is [Hindley–Milner-style with constrained types](https://www.researchgate.net/profile/Martin-Sulzmann/publication/220346751_Type_Inference_with_Constrained_Types/links/5ab00c0b0f7e9b4897c1d25b/Type-Inference-with-Constrained-Types.pdf); partial annotations can use `_`.
+* **Type inference with generics.** Ferlium infers generic function signatures across a whole module, so `fn add(a, b) { a + b }` needs no annotations. Its inference is [Hindley–Milner-style with constrained types](https://www.researchgate.net/profile/Martin-Sulzmann/publication/220346751_Type_Inference_with_Constrained_Types/links/5ab00c0b0f7e9b4897c1d25b/Type-Inference-with-Constrained-Types.pdf); gradual annotations are available.
 * **Mutable value semantics.** [Values can be safely mutated with the help of a small borrow checker](https://www.jot.fm/issues/issue_2022_02/article2.pdf), without a garbage collector or explicit lifetime annotations.
-* **Algebraic data types.** Records, tuples and tagged unions can be open to additional fields or variants through row polymorphism, or closed. Independently, each can remain structural or gain nominal identity through a Rust-style newtype.
-* **Traits and modules.** Traits (type classes) support multiple parameters and associated types, while `module::name` and `use module::*;` organize code.
+* **Algebraic data types.** Records, tuples and tagged unions can be closed or open to additional fields or variants through row polymorphism. Independently, each can remain structural or gain nominal identity through a Rust-style newtype.
+* **Traits and modules.** Traits (type classes) support multiple parameters and associated types, while modules with privacy organize code.
 * **Functional core.** First-class and anonymous functions with closures, pattern matching for destructuring data, and `|>` pipelining for chained transformations.
-* **Subscripts and custom projections.** Array indexing and custom projections use subscripts to read or update places; scoped subscripts can run code around an access with `yield`.
+* **Subscripts and custom projections.** Array indexing and custom projections use subscripts to read or update places; scoped subscripts can run ramp and slide code around an access.
 * **Compile-time effect tracking.** Ferlium infers `read`, `write`, and `fallible` effects and shows them in signatures and diagnostics, so you can see which functions touch host state or may fail before running them.
-* **Optimizing compiler with WebAssembly output.** Ferlium [optimizes its intermediate representation](doc/mir-optimization.md) before generating WebAssembly for browser and Node hosts.
+* **Optimizing compiler with WebAssembly output.** Ferlium [optimizes its intermediate representation](doc/mir-optimization.md) before generating WebAssembly for browser and Node hosts, removing most of the data copies introduced by the mutable value semantics.
 
 ## Getting started
 
