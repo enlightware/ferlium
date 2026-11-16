@@ -2229,6 +2229,57 @@ fn private_requirements_fail_at_the_public_impl_definition() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_unique_private_impl_still_checks_its_prerequisites() {
+    let mut session = TestSession::new();
+    assert!(module_fails_with(
+        &mut session,
+        "a",
+        r#"
+        trait Missing<Self> {}
+        trait Hidden<Self> { fn hidden(x: Self) -> int; }
+        impl<T> Hidden for [T] where T: Missing, .. {
+            fn hidden(x: [T]) -> int { 0 }
+        }
+        pub fn f<T>(x: T) -> int { hidden([x]) }
+        "#,
+        |e| matches!(
+            e,
+            CompilationErrorImpl::PrivateRequirementInPublicContract { .. }
+        )
+    ));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_long_private_requirement_chain_retains_its_public_leaf() {
+    // Longer than the speculative improvement depth limit, but within reduction's
+    // work limit. Each uniquely matching head passes evidence to the next one.
+    let mut source = "trait Hidden<Self> { fn hidden(x: Self) -> string ! fallible; }\n".to_owned();
+    for index in 0..40 {
+        source.push_str(&format!("struct Layer{index}<T>(T)\n"));
+        if index < 39 {
+            let next = index + 1;
+            source.push_str(&format!(
+                "impl<T> Hidden for Layer{index}<T> where Layer{next}<T>: Hidden, .. {{
+                    fn hidden(x: Layer{index}<T>) -> string {{ hidden(Layer{next}(x.0)) }}
+                }}\n"
+            ));
+        } else {
+            source.push_str(&format!(
+                "impl<T> Hidden for Layer{index}<T> where T: Inspect, .. {{
+                    fn hidden(x: Layer{index}<T>) -> string {{ inspect(x.0) }}
+                }}\n"
+            ));
+        }
+    }
+    source.push_str("pub fn f<T>(x: T) -> string { hidden(Layer0(x)) }");
+    let mut session = TestSession::new();
+    compile_module(&mut session, "a", &source);
+    assert_val_eq!(session.run("a::f(7)"), string("7"));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn a_possible_specialization_prevents_private_derivation() {
     let mut session = TestSession::new();
     assert!(

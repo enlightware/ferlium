@@ -1058,17 +1058,12 @@ impl TraitSolver<'_> {
             .unique()
             .collect::<Vec<_>>();
         let mut selected = None;
-        for candidate in self.reduction_candidates(*trait_id, &inputs) {
+        let candidates = self.reduction_candidates(*trait_id, &inputs);
+        // A deriver is another possible source of evidence if the source impl's
+        // prerequisites fail, so retain applicability probing in that case.
+        let unique_head = candidates.len() == 1 && self.trait_def(*trait_id).derivers.is_empty();
+        for candidate in candidates {
             let snapshot = inference.snapshot();
-            let mut probe = TraitSolverProbe::from_solver(self);
-            let structural_candidate = TraitImprovementCandidate::Blanket {
-                input_tys: candidate.inputs.clone(),
-                output_tys: candidate.outputs.clone(),
-                output_effs: candidate.effects.clone(),
-                ty_var_count: candidate.type_count,
-                eff_var_count: candidate.effect_count,
-                constraints: candidate.constraints.clone(),
-            };
             // Only the head must fit without specializing an enclosing input. A public
             // prerequisite such as `[T]: Read` remains a condition on callers, even if its
             // currently visible impls would narrow T. Private prerequisites are reduced below
@@ -1096,7 +1091,24 @@ impl TraitSolver<'_> {
                 // inputs, including fresh outputs supplied by a public prerequisite.
                 && inference.declared_generics_intact(&head_rigid);
             inference.rollback_to(snapshot);
+            // A unique, uniformly matching head needs no speculative prerequisite
+            // search: reduction checks its obligations below, in the same work
+            // budget as the parent. Re-probing them here repeats a whole nested
+            // improvement search at every step of a growing private requirement.
+            if unique_head && uniform {
+                selected = Some(candidate);
+                break;
+            }
             let snapshot = inference.snapshot();
+            let mut probe = TraitSolverProbe::from_solver(self);
+            let structural_candidate = TraitImprovementCandidate::Blanket {
+                input_tys: candidate.inputs.clone(),
+                output_tys: candidate.outputs.clone(),
+                output_effs: candidate.effects.clone(),
+                ty_var_count: candidate.type_count,
+                eff_var_count: candidate.effect_count,
+                constraints: candidate.constraints.clone(),
+            };
             let possible = Self::improvement_candidate_applies_by_structure(
                 &mut probe,
                 inference,
