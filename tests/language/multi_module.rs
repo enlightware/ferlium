@@ -2063,6 +2063,30 @@ fn an_impl_is_private_only_through_its_owning_input() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_public_trait_has_only_public_parents() {
+    let mut session = TestSession::new();
+    compile_module(
+        &mut session,
+        "a",
+        "pub trait P<Self> { fn p(x: Self) -> int; }\npub trait Q<Self>: P<Self> { fn q(x: Self) -> int; }\ntrait H<Self> { fn h(x: Self) -> int; }\ntrait R<Self>: H<Self> { fn r(x: Self) -> int; }",
+    );
+    for code in [
+        "trait P<Self> { fn p(x: Self) -> int; }\npub trait Q<Self>: P<Self> { fn q(x: Self) -> int; }",
+        "struct Hidden;\npub trait G<Self |-> O> { fn g(x: Self) -> O; }\npub trait Q<Self>: G<Self |-> O = Hidden> { fn q(x: Self) -> int; }",
+    ] {
+        let mut session = TestSession::new();
+        assert!(
+            module_fails_with(&mut session, "a", code, |e| matches!(
+                e,
+                CompilationErrorImpl::PublicTraitHasPrivateParent { .. }
+            )),
+            "{code}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn a_private_impl_conflicting_with_a_dependency_is_rejected_in_its_module() {
     let mut session = TestSession::new();
     compile_module(

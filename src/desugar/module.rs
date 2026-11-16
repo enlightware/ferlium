@@ -991,8 +991,20 @@ impl PModule {
                     Some((TraitMethodIndex::from_index(index), function))
                 })
                 .collect::<Vec<_>>();
-            let id = output
-                .add_trait_with_visibility(trait_def.desugar(&env, &mut modules_used)?, visibility);
+            let trait_name = trait_def.name.0;
+            let desugared = trait_def.desugar(&env, &mut modules_used)?;
+            if visibility.is_public()
+                && let Some(parent) = desugared
+                    .parent_constraints
+                    .iter()
+                    .find(|parent| !output.is_trait_requirement_public(parent, others))
+            {
+                return Err(internal_compilation_error!(PublicTraitHasPrivateParent {
+                    trait_name,
+                    span: parent.use_site(),
+                }));
+            }
+            let id = output.add_trait_with_visibility(desugared, visibility);
             let trait_id = TraitId::new(output.module_id(), id);
             for (index, function) in default_functions {
                 defaults.insert(FunctionAstIndex::new(functions.len()), (trait_id, index));

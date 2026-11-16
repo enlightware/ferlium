@@ -51,6 +51,7 @@ The `pub` modifier can be used on functions, type aliases, structs, enums, and t
 Trait implementations do not have their own visibility modifier.
 An implementation of a public trait is public, unless its owning input, its first input defined in its module, is a private type: then only that module can use it.
 A public implementation cannot mention private types in its inputs or outputs.
+Likewise, the parents of a public trait must be public traits, and cannot mention private types.
 
 Public functions and implementations can use private helpers, types, and traits internally.
 However, the requirements they place on callers must mention only public types and traits.

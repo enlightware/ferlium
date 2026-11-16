@@ -11,8 +11,9 @@ use crate::{
     compiler::error::{
         CompilationErrorImpl, ImportKind, InfiniteTypeKind, InvalidRecordFieldContext,
         MutabilityMustBeContext, MutabilityMustBeWhat, ORPHAN_RULE_HINT, PRIVATE_IMPL_HINT,
-        WhatIsNotAProductType, WhichProductTypeIsNot, effect_arguments_message,
-        format_output_effect_mismatches, impl_effect_restriction_message, overlap_effects_hint,
+        PRIVATE_PARENT_HINT, WhatIsNotAProductType, WhichProductTypeIsNot,
+        effect_arguments_message, format_output_effect_mismatches, impl_effect_restriction_message,
+        overlap_effects_hint,
     },
     parser::location::SourceTable,
     types::effects::NamedEffectRow,
@@ -401,6 +402,10 @@ pub(super) fn compilation_error_to_data(
         PrivateRequirementInPublicContract { requirement, span, .. } => vec![error_data_from_location(
             span,
             format!("Cannot publish private requirement `{requirement}`. Its evidence must be constructible for every input type from public requirements"),
+        )],
+        PublicTraitHasPrivateParent { trait_name, span } => vec![error_data_from_location(
+            span,
+            format!("Public trait `{trait_name}` has a parent naming a private trait or type: {PRIVATE_PARENT_HINT}"),
         )],
         UnresolvedConstraints { constraints, span } => vec![error_data_from_location(
             span,

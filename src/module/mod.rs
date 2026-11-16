@@ -2307,6 +2307,28 @@ impl Module {
         self.is_type_visible_by(ty, others, Module::is_type_def_public)
     }
 
+    /// Whether a requirement on a trait names only public traits and types.
+    pub(crate) fn is_trait_requirement_public(
+        &self,
+        constraint: &PubTypeConstraint,
+        others: &Modules,
+    ) -> bool {
+        let PubTypeConstraint::HaveTrait {
+            trait_id,
+            input_tys,
+            output_tys,
+            ..
+        } = constraint
+        else {
+            unreachable!("only requirements on traits are checked")
+        };
+        self.is_trait_public(*trait_id, others)
+            && input_tys
+                .iter()
+                .chain(output_tys)
+                .all(|ty| self.is_type_public(*ty, others))
+    }
+
     fn is_type_def_public(&self, id: TypeDefId) -> bool {
         self.try_type_def_name(id)
             .is_some_and(|name| self.is_symbol_public(name))

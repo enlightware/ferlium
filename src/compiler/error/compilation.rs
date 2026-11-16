@@ -342,6 +342,9 @@ pub(crate) fn effect_arguments_message(
 /// How to satisfy the orphan rule.
 pub(crate) const ORPHAN_RULE_HINT: &str = "an implementation of a trait of another module needs an input whose outermost type is defined in this module, with no bare type parameter in the inputs before it; wrap a generic input in a type of this module, or declare the trait's parameters in another order";
 
+/// Why the parents of a public trait must be public.
+pub(crate) const PRIVATE_PARENT_HINT: &str = "the parents of a public trait are part of its contract with other modules, so they must be public";
+
 /// When an implementation is private.
 pub(crate) const PRIVATE_IMPL_HINT: &str = "an implementation is private only when its first input defined in this module, with no bare type parameter before it, is a private type; otherwise it is public, and its inputs and outputs must be public";
 
@@ -1159,6 +1162,11 @@ pub enum CompilationErrorImpl<S: Scope> {
         type_names: FxHashMap<TypeVar, Ustr>,
         span: Location,
     },
+    /// A parent of a public trait names a private trait or type.
+    PublicTraitHasPrivateParent {
+        trait_name: Ustr,
+        span: Location,
+    },
     InvalidTupleIndex {
         index: usize,
         index_span: Location,
@@ -1937,6 +1945,11 @@ impl FormatWith<SourceTable> for CompilationError {
             } => write!(
                 f,
                 "Cannot publish private requirement `{requirement}` at {}. Its evidence must be constructible for every input type from public requirements",
+                fmt_span(span),
+            ),
+            PublicTraitHasPrivateParent { trait_name, span } => write!(
+                f,
+                "Public trait `{trait_name}` has a parent naming a private trait or type in {}: {PRIVATE_PARENT_HINT}",
                 fmt_span(span),
             ),
             InvalidTupleIndex {
@@ -2888,6 +2901,9 @@ impl CompilationError {
                     type_names,
                     span,
                 })
+            }
+            PublicTraitHasPrivateParent { trait_name, span } => {
+                compilation_error!(PublicTraitHasPrivateParent { trait_name, span })
             }
             InvalidTupleIndex {
                 index,
