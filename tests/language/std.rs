@@ -2851,7 +2851,7 @@ fn value_hashing() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn hash_set() {
+fn hash_set_insert_and_lookup() {
     let mut session = TestSession::new();
 
     assert_val_eq!(
@@ -2871,6 +2871,12 @@ fn hash_set() {
             bool(false)
         )
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_set_equality_and_hash_ignore_insertion_order() {
+    let mut session = TestSession::new();
 
     assert_val_eq!(
         session.run(
@@ -2890,6 +2896,12 @@ fn hash_set() {
         ),
         tuple!(bool(true), bool(true))
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_set_collect_and_map() {
+    let mut session = TestSession::new();
 
     assert_val_eq!(
         session.run(
@@ -2899,6 +2911,12 @@ fn hash_set() {
         ),
         int_a![1, 4, 9]
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_set_grows_and_preserves_elements() {
+    let mut session = TestSession::new();
 
     assert_val_eq!(
         session.run(
@@ -2908,6 +2926,12 @@ fn hash_set() {
         ),
         tuple!(int(40), int(0), int(17), int(39), bool(false))
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_set_deduplicates_set_elements() {
+    let mut session = TestSession::new();
 
     assert_val_eq!(
         session.run(
@@ -2929,6 +2953,12 @@ fn hash_set() {
             bool(true)
         )
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_set_deduplicates_map_elements() {
+    let mut session = TestSession::new();
 
     assert_val_eq!(
         session.run(
@@ -2954,7 +2984,7 @@ fn hash_set() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn hash_map() {
+fn hash_map_insert_replace_and_lookup() {
     let mut session = TestSession::new();
 
     assert_val_eq!(
@@ -2975,6 +3005,12 @@ fn hash_map() {
             bool(false)
         )
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_map_equality_and_hash_ignore_insertion_order() {
+    let mut session = TestSession::new();
 
     assert_val_eq!(
         session.run(
@@ -2994,6 +3030,12 @@ fn hash_map() {
         ),
         tuple!(bool(true), bool(true))
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_map_collect_and_map() {
+    let mut session = TestSession::new();
 
     assert_val_eq!(
         session.run(
@@ -3003,6 +3045,12 @@ fn hash_map() {
         ),
         tuple!(int(3), some(int(1)), some(int(2)), some(int(3)), none())
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_map_collect_replaces_duplicate_keys() {
+    let mut session = TestSession::new();
 
     assert_val_eq!(
         session.run(
@@ -3011,6 +3059,12 @@ fn hash_map() {
         ),
         tuple!(int(2), some(string("uno")), some(string("two")), none())
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_map_grows_and_preserves_entries() {
+    let mut session = TestSession::new();
 
     assert_val_eq!(
         session.run(
@@ -3019,6 +3073,12 @@ fn hash_map() {
         ),
         tuple!(int(40), some(int(0)), some(int(289)), some(int(1521)), none())
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_map_looks_up_set_keys() {
+    let mut session = TestSession::new();
 
     assert_val_eq!(
         session.run(
@@ -3037,6 +3097,12 @@ fn hash_map() {
             bool(false)
         )
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_map_looks_up_map_keys() {
+    let mut session = TestSession::new();
 
     assert_val_eq!(
         session.run(
@@ -3465,30 +3531,91 @@ fn map_of(values: [int]) -> map<int, int> {
 }
 "#;
 
+// Keep each independent program schedulable by nextest while exercising every backend.
+fn run_hash_collection(term: impl AsRef<str>) -> Value {
+    TestSession::new().run(&format!("{HASH_COLLECTION_BUILDERS}\n{}", term.as_ref()))
+}
+
 const ASCENDING: &str = "[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]";
 const DESCENDING: &str = "[20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]";
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn hash_collection_equality_ignores_insertion_order() {
-    let run = |term: String| TestSession::new().run(&format!("{HASH_COLLECTION_BUILDERS}\n{term}"));
-    for ctor in ["set_of", "map_of"] {
-        assert_val_eq!(
-            run(format!("{ctor}({ASCENDING}) == {ctor}({DESCENDING})")),
-            bool(true)
-        );
-        assert_val_eq!(
-            run(format!("{ctor}({ASCENDING}) != {ctor}({DESCENDING})")),
-            bool(false)
-        );
-        assert_val_eq!(
-            run(format!("{ctor}([1, 2]) == {ctor}([1, 3])")),
-            bool(false)
-        );
-        assert_val_eq!(run(format!("{ctor}([1, 2]) == {ctor}([1])")), bool(false));
-    }
+fn hash_set_equality_ignores_insertion_order() {
     assert_val_eq!(
-        run("let mut a = map_of([1]); map_insert(a, 1, 11); a == map_of([1])".into()),
+        run_hash_collection(format!("set_of({ASCENDING}) == set_of({DESCENDING})")),
+        bool(true)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_set_inequality_ignores_insertion_order() {
+    assert_val_eq!(
+        run_hash_collection(format!("set_of({ASCENDING}) != set_of({DESCENDING})")),
+        bool(false)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_set_equality_rejects_different_elements() {
+    assert_val_eq!(
+        run_hash_collection("set_of([1, 2]) == set_of([1, 3])"),
+        bool(false)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_set_equality_rejects_different_lengths() {
+    assert_val_eq!(
+        run_hash_collection("set_of([1, 2]) == set_of([1])"),
+        bool(false)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_map_equality_ignores_insertion_order() {
+    assert_val_eq!(
+        run_hash_collection(format!("map_of({ASCENDING}) == map_of({DESCENDING})")),
+        bool(true)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_map_inequality_ignores_insertion_order() {
+    assert_val_eq!(
+        run_hash_collection(format!("map_of({ASCENDING}) != map_of({DESCENDING})")),
+        bool(false)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_map_equality_rejects_different_keys() {
+    assert_val_eq!(
+        run_hash_collection("map_of([1, 2]) == map_of([1, 3])"),
+        bool(false)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_map_equality_rejects_different_lengths() {
+    assert_val_eq!(
+        run_hash_collection("map_of([1, 2]) == map_of([1])"),
+        bool(false)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_map_equality_rejects_different_values() {
+    assert_val_eq!(
+        run_hash_collection("let mut a = map_of([1]); map_insert(a, 1, 11); a == map_of([1])"),
         bool(false)
     );
 }
@@ -3504,47 +3631,73 @@ fn hash_collections_render_their_elements() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn hash_collection_hash_ignores_insertion_order() {
-    let run = |term: String| TestSession::new().run(&format!("{HASH_COLLECTION_BUILDERS}\n{term}"));
-    for ctor in ["set_of", "map_of"] {
-        // Equal collections are one key of a set.
-        assert_val_eq!(
-            run(format!(
-                "let mut sets: set<_> = empty();
-                set_insert(sets, {ctor}({ASCENDING}));
-                set_insert(sets, {ctor}({DESCENDING}));
-                len(sets)"
-            )),
-            int(1)
-        );
-    }
+fn hash_set_hash_ignores_insertion_order() {
+    // Equal collections are one key of a set.
+    assert_val_eq!(
+        run_hash_collection(format!(
+            "let mut sets: set<_> = empty();
+             set_insert(sets, set_of({ASCENDING}));
+             set_insert(sets, set_of({DESCENDING}));
+             len(sets)"
+        )),
+        int(1)
+    );
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn hash_collections_are_values_after_clone_and_nesting() {
-    let run = |term: String| TestSession::new().run(&format!("{HASH_COLLECTION_BUILDERS}\n{term}"));
-    // A copy does not see later insertions.
+fn hash_map_hash_ignores_insertion_order() {
+    // Equal collections are one key of a set.
     assert_val_eq!(
-        run("let mut a = set_of([1]); let b = a; set_insert(a, 2); (len(a), len(b))".into()),
+        run_hash_collection(format!(
+            "let mut sets: set<_> = empty();
+             set_insert(sets, map_of({ASCENDING}));
+             set_insert(sets, map_of({DESCENDING}));
+             len(sets)"
+        )),
+        int(1)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_set_clone_preserves_value_semantics() {
+    assert_val_eq!(
+        run_hash_collection(
+            "let mut a = set_of([1]); let b = a; set_insert(a, 2); (len(a), len(b))"
+        ),
         expected_tuple([int(2), int(1)])
     );
-    // Generic and derived values use the same comparison.
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_set_generic_equality_ignores_insertion_order() {
     assert_val_eq!(
-        run(format!(
+        run_hash_collection(format!(
             "fn same<T>(a: T, b: T) -> bool where nothing {{ a == b }}
-            same(set_of({ASCENDING}), set_of({DESCENDING}))"
+             same(set_of({ASCENDING}), set_of({DESCENDING}))"
         )),
         bool(true)
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_set_tuple_equality_ignores_insertion_order() {
     assert_val_eq!(
-        run(format!(
+        run_hash_collection(format!(
             "(1, set_of({ASCENDING})) == (1, set_of({DESCENDING}))"
         )),
         bool(true)
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_map_array_equality_ignores_insertion_order() {
     assert_val_eq!(
-        run(format!("[map_of({ASCENDING})] == [map_of({DESCENDING})]")),
+        run_hash_collection(format!("[map_of({ASCENDING})] == [map_of({DESCENDING})]")),
         bool(true)
     );
 }
