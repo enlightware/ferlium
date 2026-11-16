@@ -39,6 +39,8 @@ use crate::{
         r#type::{FnType, Type, TypeKind, TypeVar, fmt_fn_type_with_arg_names},
         type_inference::substitution::InstSubst,
         type_like::TypeLike,
+        type_mapper::SimpleInstantiationMapper,
+        type_matching::{erase_type_effects, match_erased_type},
         type_scheme::PubTypeConstraint,
         type_scheme_display::format_constraints_consolidated,
     },
@@ -457,6 +459,8 @@ impl ImplGenericNames {
 pub struct TraitImpl {
     /// The trait implemented by this dictionary.
     pub trait_id: TraitId,
+    /// The input types of the trait, in the implementation's own type variables.
+    pub input_tys: Vec<Type>,
     /// The output types of the trait.
     pub output_tys: Vec<Type>,
     /// The output effects of the trait.
@@ -484,6 +488,76 @@ pub struct TraitImpl {
 }
 
 impl TraitImpl {
+    /// The implementation's type parameters, in the order static evidence lists their arguments:
+    /// the type variables of its dictionary type, on which its run-time behaviour can depend.
+    pub(crate) fn ty_params(&self) -> Vec<TypeVar> {
+        let mut params = self.dictionary_ty.inner_ty_vars();
+        params.sort_unstable();
+        params
+    }
+
+    /// The arguments of [`Self::ty_params`] at an application of the trait, with effects erased.
+    /// A parameter the application does not determine stays itself.
+    pub(crate) fn ty_args(&self, input_tys: &[Type], output_tys: &[Type]) -> Box<[Type]> {
+        let pairs = self
+            .input_tys
+            .iter()
+            .zip(input_tys)
+            .chain(self.output_tys.iter().zip(output_tys));
+        self.match_ty_args(pairs)
+    }
+
+    /// The arguments of [`Self::ty_params`] for the dictionary type `ty` at an application.
+    pub(crate) fn ty_args_of_dictionary_ty(&self, ty: Type) -> Box<[Type]> {
+        self.match_ty_args([(&self.dictionary_ty, &ty)])
+    }
+
+    /// The arguments of [`Self::ty_params`] that leave them as they are, as for the dictionary at
+    /// the implementation's own type.
+    pub(crate) fn declared_ty_args(&self) -> Box<[Type]> {
+        self.ty_params().into_iter().map(Type::variable).collect()
+    }
+
+    /// `ty`, written in the implementation's type variables, at the application `ty_args` gives.
+    pub(crate) fn instantiate(&self, ty: Type, ty_args: &[Type]) -> Type {
+        let subst: InstSubst = (
+            self.ty_params()
+                .into_iter()
+                .zip(ty_args.iter().copied())
+                .collect(),
+            Default::default(),
+        );
+        ty.map(&mut SimpleInstantiationMapper::new(&subst))
+    }
+
+    fn match_ty_args<'t>(
+        &self,
+        pairs: impl IntoIterator<Item = (&'t Type, &'t Type)>,
+    ) -> Box<[Type]> {
+        let params = self.ty_params();
+        if params.is_empty() {
+            return Box::new([]);
+        }
+        let mut bindings = FxHashMap::default();
+        for (pattern, ty) in pairs {
+            // A pair that does not match binds what it can; the rest stay parameters.
+            match_erased_type(
+                erase_type_effects(*pattern),
+                erase_type_effects(*ty),
+                &mut bindings,
+            );
+        }
+        params
+            .into_iter()
+            .map(|param| {
+                bindings
+                    .get(&param)
+                    .copied()
+                    .unwrap_or_else(|| Type::variable(param))
+            })
+            .collect()
+    }
+
     /// Whether captures determine every runtime type in this dictionary. Otherwise a generic
     /// construction also needs its use-site type and cannot become untyped static evidence.
     pub(crate) fn captures_determine_type(&self, env: ModuleEnv<'_>) -> bool {
@@ -872,6 +946,7 @@ impl TraitImpls {
             dictionary_with_default_entries(&methods, &associated_const_getters, &self_entries);
         let imp = TraitImpl::new(
             trait_id,
+            input_tys.to_vec(),
             output_tys,
             output_effs,
             methods,
@@ -958,6 +1033,7 @@ impl TraitImpls {
         let dictionary_value = build_dictionary_value(&methods, &associated_const_getters);
         let imp = TraitImpl::new(
             trait_id,
+            input_tys.to_vec(),
             output_tys,
             output_effs,
             methods,
@@ -1137,6 +1213,7 @@ impl TraitImpls {
             dictionary_with_default_entries(&methods, &associated_const_getters, &self_entries);
         let imp = TraitImpl::new(
             trait_id,
+            sub_key.input_tys.to_vec(),
             output_tys,
             output_effs,
             methods,

@@ -100,6 +100,7 @@ fn impl_storage_fixture() -> (Module, ConcreteTraitImplKey) {
     let imp = TraitImpl::new(
         trait_id,
         vec![Type::unit()],
+        vec![Type::unit()],
         vec![],
         vec![],
         TraitDictionary::new(&[], &[]),

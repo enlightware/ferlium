@@ -153,6 +153,7 @@ fn callees_within(function: &Function, module: &Module) -> Vec<LocalFunctionId> 
                             if let StaticEvidence::Dictionary {
                                 definition,
                                 captures,
+                                ..
                             } = evidence
                             {
                                 record_dictionary(&mut callees, *definition, module);

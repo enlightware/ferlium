@@ -42,12 +42,13 @@ use std::{
     rc::Rc,
 };
 
+use itertools::Itertools;
 use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use ustr::{Ustr, ustr};
 
 use super::{
     OptimizationStats, budget, cost,
-    dataflow::{self, Analysis, Const, State},
+    dataflow::{self, Analysis, Const, State, static_evidence_operand},
     local_cells::{Access, LocalCells, Write},
     scalar_arguments,
     site::{OperationIndex, OperationSite},
@@ -59,7 +60,7 @@ use crate::{
     compiler::Specialization,
     compiler::error::CompilerLimit,
     format::FormatWith,
-    hir::function::ArgConvention,
+    hir::{dictionary::DictionaryReq, function::ArgConvention},
     mir::{
         self, Function, Instantiation, Operation, OperationKind, ParameterId, ParameterKind,
         ResultTransport, ValueId,
@@ -77,10 +78,11 @@ use crate::{
     },
     std::value::{dynamic_product_member_layouts, type_has_static_layout},
     types::{
-        effects::{EffType, Effect, PrimitiveEffect},
+        effects::{EffType, Effect, EffectVar, PrimitiveEffect},
         r#type::{CallImplType, FnType, Type, TypeKind, TypeVar},
         type_like::TypeLike,
         type_mapper::{BitmapInstantiationMapper, TypeMapper},
+        type_matching::{erase_type_effects, match_erased_type},
         type_properties::concrete_type_is_trivial_copy,
         type_scheme::TypeScheme,
     },
@@ -1609,13 +1611,11 @@ fn witnessed_type(witness: &mir::Value, env: ModuleEnv<'_>) -> Option<Type> {
     key.input_tys().first().copied().filter(Type::is_constant)
 }
 
-fn static_evidence_operand(value: &mir::Value) -> Option<StaticEvidence> {
-    match value {
-        mir::Value::Dictionary(definition) => Some(StaticEvidence::bare_dictionary(*definition)),
-        mir::Value::Subscript(definition) => Some(StaticEvidence::bare_subscript(*definition)),
-        mir::Value::Evidence(evidence) => Some((**evidence).clone()),
-        _ => None,
-    }
+fn is_static_evidence_operand(value: &mir::Value) -> bool {
+    matches!(
+        value,
+        mir::Value::Dictionary(_) | mir::Value::Subscript(_) | mir::Value::Evidence(_)
+    )
 }
 
 /// Turns an `invoke` whose operation substitution made source-infallible back into an ordinary
@@ -1850,6 +1850,13 @@ fn bind_dictionaries(edit: &mut FunctionEdit, dictionaries: &[StaticEvidence]) {
 /// Exhaustive by construction: the `match` names every kind, so an operation that gains a type
 /// field fails to compile here rather than silently keeping the generic one.
 fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapper) {
+    // Static dictionary evidence records its type at its application, which can name the body's
+    // type variables.
+    for operand in operation.operands.iter_mut() {
+        if let mir::Value::Evidence(evidence) = operand {
+            evidence.map_types(mapper);
+        }
+    }
     match &mut operation.kind {
         OperationKind::Alloca { ty }
         | OperationKind::BlackBox { ty }
@@ -1983,7 +1990,7 @@ pub(crate) fn specialize_call_sites(
         calls().any(|operation| matches!(operation.operands[0], mir::Value::Register(_)));
     let analysis = needs_callbacks.then(|| dataflow::analyze(func, env));
     let closures = if needs_callbacks || calls_through_cells {
-        known_closures(func, session, specializations)
+        known_closures(func, session, specializations, env)
     } else {
         FxHashMap::default()
     };
@@ -2274,6 +2281,187 @@ fn lifecycle_instantiation(
     })
 }
 
+/// The instantiation of a call without a recorded one, such as the entry of a static dictionary that
+/// devirtualization named, determined by the types of its static dictionary evidence and of its
+/// visible arguments and result.
+///
+/// Effects are erased on both sides: they never distinguish dictionaries, and a callee quantified
+/// over effects is not instantiated here.
+fn evidence_instantiation(
+    operation: &Operation,
+    scheme: &TypeScheme<FnType>,
+    env: ModuleEnv<'_>,
+) -> Option<Instantiation> {
+    let OperationKind::Call { ty, .. } = &operation.kind else {
+        return None;
+    };
+    let evidence = &operation.operands[operation.dispatch_evidence()?];
+    // Visible types alone cannot prove hidden-evidence variables.
+    if !evidence.iter().any(|operand| {
+        matches!(operand, mir::Value::Evidence(evidence)
+            if matches!(**evidence, StaticEvidence::Dictionary { .. }))
+    }) || scheme.ty.args.len() != ty.fn_ty.args.len()
+    {
+        return None;
+    }
+    let mut bindings = FxHashMap::default();
+    let mut bind = |pattern: Type, ty: Type| {
+        let ty = erase_type_effects(ty);
+        ty.is_constant() && match_erased_type(erase_type_effects(pattern), ty, &mut bindings)
+    };
+    // The visible types first: they are at hand, and fail fast in generic code.
+    for (pattern, arg) in scheme.ty.args.iter().zip(&ty.fn_ty.args) {
+        if !bind(pattern.ty, arg.ty) {
+            return None;
+        }
+    }
+    if !bind(scheme.ty.ret, ty.fn_ty.ret) {
+        return None;
+    }
+    let requirements = scheme.extra_parameters(env).requirements;
+    if requirements.len() != evidence.len() {
+        return None;
+    }
+    for (requirement, operand) in requirements.iter().zip(evidence) {
+        let (
+            mir::Value::Evidence(evidence),
+            DictionaryReq::TraitImpl {
+                input_tys,
+                output_tys,
+                ..
+            },
+        ) = (operand, requirement)
+        else {
+            continue;
+        };
+        let StaticEvidence::Dictionary {
+            definition,
+            ty_args,
+            ..
+        } = &**evidence
+        else {
+            continue;
+        };
+        let imp = env
+            .module_by_id(definition.module_id)?
+            .get_impl_data(definition.impl_id)?;
+        // The requirement's application is the implementation's at its type arguments.
+        let pairs = input_tys
+            .iter()
+            .zip(&imp.input_tys)
+            .chain(output_tys.iter().zip(&imp.output_tys));
+        for (pattern, ty) in pairs {
+            if !bind(*pattern, imp.instantiate(*ty, ty_args)) {
+                return None;
+            }
+        }
+    }
+    // Effects come from the call's own types, which erasure left alone.
+    let mut effects = FxHashMap::default();
+    let mut visited = FxHashSet::default();
+    let function = |fn_ty: &FnType| Type::function_type(fn_ty.clone());
+    bind_effect_variables(
+        function(&scheme.ty),
+        function(&ty.fn_ty),
+        &mut effects,
+        &mut visited,
+    )
+    .then_some(())?;
+    Some(Instantiation {
+        ty_args: scheme
+            .ty_quantifiers
+            .iter()
+            .map(|quantifier| bindings.get(quantifier).copied())
+            .collect::<Option<_>>()?,
+        eff_args: scheme
+            .eff_quantifiers
+            .iter()
+            .sorted()
+            .map(|quantifier| effects.get(quantifier).cloned())
+            .collect::<Option<_>>()?,
+    })
+}
+
+/// Binds the effect variables that stand alone in `pattern`, as a function's effects or a named
+/// type's effect argument, to the effects at the same place in `ty`. Fails on contradicting
+/// bindings; other effects, and types that do not match, bind nothing.
+fn bind_effect_variables(
+    pattern: Type,
+    ty: Type,
+    bindings: &mut FxHashMap<EffectVar, EffType>,
+    visited: &mut FxHashSet<(Type, Type)>,
+) -> bool {
+    if pattern == ty || !visited.insert((pattern, ty)) {
+        return true;
+    }
+    let mut bind = |pattern: &EffType, effects: &EffType| match pattern.to_single_variable() {
+        Some(variable) => bindings.entry(variable).or_insert_with(|| effects.clone()) == effects,
+        None => true,
+    };
+    let pairs: Vec<(Type, Type)> = match (&*pattern.data(), &*ty.data()) {
+        (TypeKind::Function(pattern), TypeKind::Function(function)) => {
+            if pattern.args.len() != function.args.len() {
+                return true;
+            }
+            if !bind(&pattern.effects, &function.effects) {
+                return false;
+            }
+            pattern
+                .args
+                .iter()
+                .zip(&function.args)
+                .map(|(pattern, arg)| (pattern.ty, arg.ty))
+                .chain([(pattern.ret, function.ret)])
+                .collect()
+        }
+        (TypeKind::Named(pattern), TypeKind::Named(named))
+            if pattern.def == named.def && pattern.params.len() == named.params.len() =>
+        {
+            if !pattern
+                .effect_params
+                .iter()
+                .zip(&named.effect_params)
+                .all(|(pattern, effects)| bind(pattern, effects))
+            {
+                return false;
+            }
+            pattern
+                .params
+                .iter()
+                .copied()
+                .zip(named.params.iter().copied())
+                .collect()
+        }
+        (TypeKind::Tuple(patterns), TypeKind::Tuple(tys)) if patterns.len() == tys.len() => {
+            patterns.iter().copied().zip(tys.iter().copied()).collect()
+        }
+        (TypeKind::Record(patterns), TypeKind::Record(tys))
+        | (TypeKind::Variant(patterns), TypeKind::Variant(tys))
+            if patterns.len() == tys.len() =>
+        {
+            patterns
+                .iter()
+                .zip(tys)
+                .map(|(pattern, ty)| (pattern.1, ty.1))
+                .collect()
+        }
+        (TypeKind::Native(pattern), TypeKind::Native(native))
+            if pattern.arguments.len() == native.arguments.len() =>
+        {
+            pattern
+                .arguments
+                .iter()
+                .copied()
+                .zip(native.arguments.iter().copied())
+                .collect()
+        }
+        _ => return true,
+    };
+    pairs
+        .into_iter()
+        .all(|(pattern, ty)| bind_effect_variables(pattern, ty, bindings, visited))
+}
+
 /// Binds the type variables of `pattern` so that it becomes the concrete `ty`, if it can.
 /// Conservative: a variable under a function or subscript type is not matched.
 fn bind_type_variables(pattern: Type, ty: Type, bindings: &mut FxHashMap<TypeVar, Type>) -> bool {
@@ -2355,8 +2543,9 @@ fn candidate<'a>(
         .get_function_by_id(callee.function)?
         .definition
         .ty_scheme;
-    // Hidden-evidence variables need the complete recorded instantiation; visible types alone
-    // cannot prove them. A non-generic callee has the equivalent empty instantiation.
+    // Hidden-evidence variables need the complete recorded instantiation, or the types of static
+    // evidence; visible types alone cannot prove them. A non-generic callee has the equivalent
+    // empty instantiation.
     let instantiation = match recorded_instantiation(operation) {
         Some(instantiation) => Cow::Borrowed(instantiation),
         None if scheme.ty_quantifiers.is_empty() && scheme.eff_quantifiers.is_empty() => {
@@ -2365,7 +2554,13 @@ fn candidate<'a>(
                 eff_args: Vec::new(),
             })
         }
-        None => Cow::Owned(lifecycle_instantiation(operation, scheme)?),
+        None => Cow::Owned(lifecycle_instantiation(operation, scheme).or_else(|| {
+            evidence_instantiation(
+                operation,
+                scheme,
+                ModuleEnv::new(module, session.raw_modules()),
+            )
+        })?),
     };
     if instantiation.ty_args.iter().any(Type::is_variable) {
         return None;
@@ -2373,7 +2568,7 @@ fn candidate<'a>(
     let dictionaries = &operation.operands[operation.dispatch_evidence()?];
     if dictionaries
         .iter()
-        .any(|operand| static_evidence_operand(operand).is_none())
+        .any(|operand| !is_static_evidence_operand(operand))
     {
         return None;
     }
@@ -2393,6 +2588,7 @@ fn known_closures(
     func: &Function,
     session: &CompilerSession,
     specializations: &Specializations,
+    env: ModuleEnv<'_>,
 ) -> FxHashMap<ValueId, Rc<KnownClosure>> {
     let mut built = FxHashMap::default();
     for block in func.blocks() {
@@ -2431,7 +2627,7 @@ fn known_closures(
         let Some(build) = stored.and_then(|value| built.get(&value)) else {
             continue;
         };
-        if let Some(closure) = known_closure(func, build, &callees, &mut roles) {
+        if let Some(closure) = known_closure(func, build, &callees, &mut roles, env) {
             closures.insert(cell.id, Rc::new(closure));
         }
     }
@@ -2444,6 +2640,7 @@ fn known_closure(
     build: &Operation,
     callees: &SemanticCallees<'_>,
     roles: &mut Option<ValueRoles>,
+    env: ModuleEnv<'_>,
 ) -> Option<KnownClosure> {
     let OperationKind::BuildClosure {
         function,
@@ -2457,7 +2654,7 @@ fn known_closure(
     let hidden = *num_hidden_dicts as usize;
     let evidence = build.operands[..hidden]
         .iter()
-        .map(static_evidence_operand)
+        .map(|operand| static_evidence_operand(operand, env))
         .collect::<Option<Box<[_]>>>()?;
     let values = &build.operands[hidden..build.operands.len() - usize::from(*has_env_dict)];
     // The lambda takes its captures after its evidence, each as its own `let` parameter.
@@ -2600,7 +2797,7 @@ fn specialization_for(
         instantiation: instantiation.clone().into_owned(),
         dictionaries: dictionaries
             .iter()
-            .map(static_evidence_operand)
+            .map(|operand| static_evidence_operand(operand, env))
             .collect::<Option<Vec<_>>>()?,
         callbacks,
     };
@@ -2626,10 +2823,13 @@ fn specialization_for(
         let callees = SemanticCallees::new(session, Some(specializations));
         let body = callees.body(callee)?;
         // A concrete thunk that inlining admits gets its evidence bound by inlining; copying it
-        // first would only duplicate that work.
+        // first would only duplicate that work. A generic one whose instantiation only its
+        // evidence determines is not inlined, as it records none.
         if !callback
             && call_ty.is_some()
             && recorded_instantiation.is_none()
+            && instantiation.ty_args.is_empty()
+            && instantiation.eff_args.is_empty()
             && !cost::hot_cost_exceeds(body, budget::INLINE_CALLEE_COST)
         {
             return None;
@@ -3171,7 +3371,7 @@ mod tests {
                 let evidence_end = operation.call_evidence_end();
                 let dictionaries = operation.operands[1..evidence_end]
                     .iter()
-                    .map(static_evidence_operand)
+                    .map(|operand| static_evidence_operand(operand, session.module_env()))
                     .collect::<Option<Vec<_>>>()
                     .unwrap_or_default();
                 let scheme = session
@@ -3552,7 +3752,7 @@ fn use_it(x: int) { with_zero(x) }",
                 .as_deref()
                 .is_none_or(|metadata| metadata.instantiation.is_none())
                 && call.call_visible_start() > 1
-                && static_evidence_operand(&call.operands[1]).is_some(),
+                && is_static_evidence_operand(&call.operands[1]),
             "the call must pass static evidence without an instantiation, or this test proves \
              nothing"
         );
@@ -4319,9 +4519,10 @@ fn use_it(x: int) { with_zero(x) }",
                     }
 
                     let visible_start = operation.call_visible_start();
+                    let env = ModuleEnv::new(module, session.raw_modules());
                     let Some(dictionaries) = operation.operands[1..visible_start]
                         .iter()
-                        .map(static_evidence_operand)
+                        .map(|operand| static_evidence_operand(operand, env))
                         .collect::<Option<Vec<_>>>()
                     else {
                         continue; // the caller forwards evidence of its own

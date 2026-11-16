@@ -17,7 +17,11 @@ use crate::{
     module::{
         FunctionId, LocalFunctionId, ModuleId, SubscriptId, TraitDictionaryId, TraitId, id::Id,
     },
-    types::{r#trait::TraitDictionaryEntryIndex, r#type::CallResultConvention},
+    types::{
+        r#trait::TraitDictionaryEntryIndex,
+        r#type::{CallResultConvention, Type},
+        type_like::TypeLike,
+    },
 };
 
 use super::{
@@ -56,6 +60,9 @@ pub(crate) enum Descriptor {
 pub(crate) enum InternedStaticEvidence {
     Dictionary {
         definition: TraitDictionaryId,
+        /// The arguments of its implementation's type parameters, as
+        /// [`StaticEvidence::Dictionary`] records them.
+        ty_args: Box<[Type]>,
         captures: Box<[ProgramEvidenceId]>,
     },
     Subscript {
@@ -148,7 +155,16 @@ impl ResolvedPhysicalProgram<'_> {
 
     /// Resolve a symbolic compile-time evidence operand to its program-wide interned identity.
     pub(crate) fn evidence_id(&self, value: &Value) -> Option<ProgramEvidenceId> {
-        evidence_value_id(&self.evidence_ids, value)
+        evidence_value_id(self, value)
+    }
+
+    /// The type arguments of the evidence a [`Value::Dictionary`] stands for: its impl's own
+    /// parameters, as [`TraitImpl::declared_ty_args`](crate::module::TraitImpl::declared_ty_args)
+    /// lists them.
+    fn declared_dictionary_ty_args(&self, definition: TraitDictionaryId) -> Option<Box<[Type]>> {
+        let mut params = self.dictionary(definition)?.ty().inner_ty_vars();
+        params.sort_unstable();
+        Some(params.into_iter().map(Type::variable).collect())
     }
 }
 
@@ -415,7 +431,7 @@ pub(crate) fn resolve_physical_program<'a>(
     let mut interner = EvidenceInterner::default();
     for module in program.modules() {
         for function in module.entries.iter().flatten() {
-            intern_function_evidence(function, &mut interner);
+            intern_function_evidence(function, &program, &mut interner);
         }
     }
     let (static_evidence, evidence_ids) = interner.finish();
@@ -693,6 +709,7 @@ fn verify_static_evidence(
         StaticEvidence::Dictionary {
             definition,
             captures,
+            ..
         } => {
             verify_dictionary_capture_count(program, owner, *definition, captures.len())?;
             Ok(())
@@ -799,11 +816,16 @@ struct EvidenceInterner {
 }
 
 impl EvidenceInterner {
-    fn value(&mut self, value: &Value) -> Option<ProgramEvidenceId> {
+    fn value(
+        &mut self,
+        value: &Value,
+        program: &ResolvedPhysicalProgram,
+    ) -> Option<ProgramEvidenceId> {
         match value {
             Value::Dictionary(definition) => {
                 Some(self.intern(InternedStaticEvidence::Dictionary {
                     definition: *definition,
+                    ty_args: program.declared_dictionary_ty_args(*definition)?,
                     captures: Box::new([]),
                 }))
             }
@@ -820,9 +842,11 @@ impl EvidenceInterner {
         let value = match evidence {
             StaticEvidence::Dictionary {
                 definition,
+                ty_args,
                 captures,
             } => InternedStaticEvidence::Dictionary {
                 definition: *definition,
+                ty_args: ty_args.clone(),
                 captures: captures
                     .iter()
                     .map(|capture| self.static_evidence(capture))
@@ -866,12 +890,14 @@ impl EvidenceInterner {
 }
 
 fn evidence_value_id(
-    ids: &FxHashMap<InternedStaticEvidence, ProgramEvidenceId>,
+    program: &ResolvedPhysicalProgram,
     value: &Value,
 ) -> Option<ProgramEvidenceId> {
+    let ids = &program.evidence_ids;
     let interned = match value {
         Value::Dictionary(definition) => InternedStaticEvidence::Dictionary {
             definition: *definition,
+            ty_args: program.declared_dictionary_ty_args(*definition)?,
             captures: Box::new([]),
         },
         Value::Subscript(definition) => InternedStaticEvidence::Subscript {
@@ -891,9 +917,11 @@ fn interned_static_evidence(
     Some(match evidence {
         StaticEvidence::Dictionary {
             definition,
+            ty_args,
             captures,
         } => InternedStaticEvidence::Dictionary {
             definition: *definition,
+            ty_args: ty_args.clone(),
             captures: captures
                 .iter()
                 .map(|capture| {
@@ -921,16 +949,20 @@ fn interned_static_evidence(
     })
 }
 
-fn intern_function_evidence(function: &Function, interner: &mut EvidenceInterner) {
+fn intern_function_evidence(
+    function: &Function,
+    program: &ResolvedPhysicalProgram,
+    interner: &mut EvidenceInterner,
+) {
     for block in function.blocks() {
         let block = function.block(block);
         for operation in block.operations() {
             for operand in &operation.operands {
-                interner.value(operand);
+                interner.value(operand, program);
             }
         }
         for operand in block.terminator().operands() {
-            interner.value(operand);
+            interner.value(operand, program);
         }
     }
 }
@@ -1000,10 +1032,11 @@ mod tests {
 
     #[test]
     fn equivalent_static_evidence_trees_share_one_program_identity() {
-        let evidence = StaticEvidence::Dictionary {
-            definition: TraitDictionaryId::new(ModuleId::from_index(3), LocalImplId::from_index(5)),
-            captures: vec![StaticEvidence::VariantPayloadStorage(true)].into_boxed_slice(),
-        };
+        let evidence = StaticEvidence::dictionary(
+            TraitDictionaryId::new(ModuleId::from_index(3), LocalImplId::from_index(5)),
+            &[],
+            vec![StaticEvidence::VariantPayloadStorage(true)].into_boxed_slice(),
+        );
         let mut interner = EvidenceInterner::default();
         let first = interner.static_evidence(&evidence);
         let second = interner.static_evidence(&evidence);

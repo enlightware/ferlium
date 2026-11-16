@@ -3321,6 +3321,7 @@ pub(crate) fn static_evidence_value(evidence: &StaticEvidence) -> HiddenEvidence
         StaticEvidence::Dictionary {
             definition,
             captures,
+            ..
         } => HiddenEvidenceArgValue::TraitDictionary(ClosedTraitDictionary {
             definition: *definition,
             captures: captures.iter().map(static_evidence_value).collect(),

@@ -110,9 +110,10 @@ pub fn store_local_to<P: HirPhase>(value: NodeId<P>, id: LocalDeclId) -> NodeKin
     K::StoreLocal(hir::StoreLocal { value, id })
 }
 
-pub fn get_dictionary(dictionary: TraitImplId) -> NodeKind {
+pub fn get_dictionary(dictionary: TraitImplId, ty_args: Box<[Type]>) -> NodeKind {
     K::GetDictionary(hir::GetDictionary {
         dictionary,
+        ty_args,
         captures: Vec::new(),
     })
 }

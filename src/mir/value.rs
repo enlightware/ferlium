@@ -17,7 +17,10 @@ use crate::{
     hir::value::LiteralValue,
     module::{FunctionId, ModuleEnv, QualifiedNameEnv, SubscriptId, TraitDictionaryId, id::Id},
     std::math::Float,
-    types::r#type::Type,
+    types::{
+        r#type::Type, type_like::TypeLike, type_mapper::TypeMapper,
+        type_matching::erase_type_effects,
+    },
 };
 
 /// A value in the MIR form of Ferlium.
@@ -27,7 +30,8 @@ pub enum Value {
     Constant(ConstantId),
 
     /// A symbolic trait dictionary, identified by the canonical handle of the impl that satisfies
-    /// it. The MIR interpreters dispatch through the id. A physical module carries relocatable
+    /// it, without captures and at the impl's own type (see [`StaticEvidence::declared_dictionary`]).
+    /// The MIR interpreters dispatch through the id. A physical module carries relocatable
     /// metadata for its definitions and imports, from which whole-program assembly selects the
     /// target representation. A *forwarded* dictionary received as an extra parameter is instead
     /// represented by its `Parameter`.
@@ -79,8 +83,18 @@ impl fmt::Display for Value {
 /// Hashable compile-time form of closed hidden evidence.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum StaticEvidence {
+    /// A dictionary closed over static captures.
+    ///
+    /// `ty_args` are the arguments of its implementation's type parameters
+    /// ([`TraitImpl::ty_params`](crate::module::TraitImpl::ty_params)), with effects erased since
+    /// effects never distinguish dictionaries. They are part of the identity because captures need
+    /// not determine every parameter of a generic impl, as in `Iterator<MapIterator<I, A, B>>`
+    /// whose captures only mention `I`. In a generic body, they may mention the body's type
+    /// variables, which substitution rewrites like any other type. Build it with
+    /// [`StaticEvidence::dictionary`].
     Dictionary {
         definition: TraitDictionaryId,
+        ty_args: B<[Type]>,
         captures: B<[StaticEvidence]>,
     },
     Subscript {
@@ -91,10 +105,51 @@ pub enum StaticEvidence {
 }
 
 impl StaticEvidence {
-    pub fn bare_dictionary(definition: TraitDictionaryId) -> Self {
+    pub fn dictionary(
+        definition: TraitDictionaryId,
+        ty_args: &[Type],
+        captures: B<[StaticEvidence]>,
+    ) -> Self {
         Self::Dictionary {
             definition,
+            ty_args: ty_args.iter().copied().map(erase_type_effects).collect(),
+            captures,
+        }
+    }
+
+    /// The evidence a [`Value::Dictionary`] stands for: the capture-free dictionary of
+    /// `definition` at its impl's own type.
+    pub fn declared_dictionary(definition: TraitDictionaryId, env: ModuleEnv<'_>) -> Option<Self> {
+        let ty_args = env
+            .module_by_id(definition.module_id)?
+            .get_impl_data(definition.impl_id)?
+            .declared_ty_args();
+        Some(Self::Dictionary {
+            definition,
+            ty_args,
             captures: Box::new([]),
+        })
+    }
+
+    /// Rewrites the types this evidence carries, as substitution does for a body's operations.
+    pub fn map_types(&mut self, mapper: &mut impl TypeMapper) {
+        match self {
+            Self::Dictionary {
+                ty_args, captures, ..
+            } => {
+                for ty in ty_args.iter_mut() {
+                    *ty = erase_type_effects(Type::map(ty, mapper));
+                }
+                captures
+                    .iter_mut()
+                    .for_each(|capture| capture.map_types(mapper));
+            }
+            Self::Subscript { captures, .. } => {
+                captures
+                    .iter_mut()
+                    .for_each(|capture| capture.map_types(mapper));
+            }
+            Self::VariantPayloadStorage(_) => {}
         }
     }
 
@@ -112,6 +167,7 @@ impl fmt::Display for StaticEvidence {
             Self::Dictionary {
                 definition,
                 captures,
+                ..
             } => write!(
                 f,
                 "dict(m{}:i{}; {} captures)",
@@ -332,6 +388,7 @@ fn format_static_evidence(
         StaticEvidence::Dictionary {
             definition,
             captures,
+            ..
         } => {
             write!(f, "dict(")?;
             format_dictionary_definition(f, *definition, env)?;

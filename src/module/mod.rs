@@ -2116,6 +2116,7 @@ impl Module {
         );
         let mut imp = TraitImpl::new(
             trait_id,
+            emit_output.input_tys.to_vec(),
             emit_output.output_tys,
             emit_output.output_effs,
             emit_output.functions,

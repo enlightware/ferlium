@@ -784,6 +784,30 @@ fn generic_lifecycle_methods_are_specialized_at_the_dispatched_type() {
     );
 }
 
+/// A loop in a generic method reaches its iterator through the entries of a dictionary. Once the
+/// method is specialized, that dictionary is static, and the type arguments its evidence records
+/// give the entries their instantiation: they are specialized at the element type rather than
+/// called with its dictionary.
+#[test]
+fn devirtualized_dictionary_entries_specialize_at_their_evidence_type_arguments() {
+    let source = "fn encode(v: [(int, string)]) -> string { json_encode(v) }";
+    let optimized = emit("evidence_type_arguments", source, MirOptimization::Enabled);
+    let serialize = rendered_function_with_prefix(&optimized, "Serialize<[A]>::serialize#impl:");
+    assert!(
+        serialize
+            .lines()
+            .next()
+            .is_some_and(|header| header.contains("#spec:")),
+        "the array serializer must be specialized:\n{serialize}"
+    );
+    assert!(
+        !serialize
+            .lines()
+            .any(|line| line.contains("call ") && line.contains("dict(")),
+        "the specialized serializer must pass no dictionary to the entries it calls:\n{serialize}"
+    );
+}
+
 /// An inlined lookup builds its `Option` result, then runs its own cleanup before the caller tests
 /// the tag. Forwarding replays that cleanup on each construction path, and the drops lowering puts
 /// on failure paths before the result exists go, so the value is borrowed from the map.

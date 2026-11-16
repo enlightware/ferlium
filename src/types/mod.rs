@@ -18,6 +18,7 @@ pub(crate) mod type_constraints;
 pub(crate) mod type_inference;
 pub(crate) mod type_like;
 pub(crate) mod type_mapper;
+pub(crate) mod type_matching;
 pub(crate) mod type_scheme_display;
 pub(crate) mod type_substitution;
 pub mod type_visitor;

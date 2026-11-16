@@ -1515,6 +1515,7 @@ mod tests {
         ));
         let kind = NodeKind::GetDictionary(GetDictionary {
             dictionary: TraitImplId::new(ModuleId::new(0), LocalImplId::new(0)),
+            ty_args: Box::new([]),
             captures: vec![capture],
         });
 

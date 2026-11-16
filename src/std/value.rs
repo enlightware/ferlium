@@ -3114,6 +3114,7 @@ fn derive_function_value_impl(
     let dictionary_value = module::build_dictionary_value(&methods, &associated_const_getters);
     let imp = TraitImpl::new(
         trait_id,
+        input_types.to_vec(),
         Vec::new(),
         Vec::new(),
         methods,

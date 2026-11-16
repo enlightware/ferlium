@@ -7,6 +7,7 @@ use rustc_hash::FxHashMap;
 
 use crate::{
     containers::b,
+    emit_mir::static_dictionary_type,
     hir::value::LiteralValue,
     mir::{
         self, BlockId, Function, Operation, OperationKind,
@@ -173,7 +174,7 @@ pub(crate) fn close_static_dictionaries(func: &Function, env: ModuleEnv<'_>) -> 
     let static_operand =
         |closed: &FxHashMap<ValueId, StaticEvidence>, operand: &mir::Value| match operand {
             mir::Value::Register(id) => closed.get(id).cloned(),
-            _ => static_evidence_operand(operand),
+            _ => static_evidence_operand(operand, env),
         };
     loop {
         let found = closed.len();
@@ -187,16 +188,9 @@ pub(crate) fn close_static_dictionaries(func: &Function, env: ModuleEnv<'_>) -> 
                     _ => None,
                 })
         }) {
-            let OperationKind::BuildDictionary { definition, .. } = operation.kind else {
+            let OperationKind::BuildDictionary { definition, ty } = operation.kind else {
                 continue;
             };
-            if !env
-                .module_by_id(definition.module_id)
-                .and_then(|module| module.get_impl_data(definition.impl_id))
-                .is_some_and(|imp| imp.captures_determine_type(env))
-            {
-                continue;
-            }
             let Some(result) = operation.result_id() else {
                 continue;
             };
@@ -211,12 +205,19 @@ pub(crate) fn close_static_dictionaries(func: &Function, env: ModuleEnv<'_>) -> 
             else {
                 continue;
             };
+            let Some(imp) = env
+                .module_by_id(definition.module_id)
+                .and_then(|module| module.get_impl_data(definition.impl_id))
+            else {
+                continue;
+            };
+            let ty_args = imp.ty_args_of_dictionary_ty(ty);
+            if !static_dictionary_type(definition, &ty_args, env) {
+                continue;
+            }
             closed.insert(
                 result,
-                StaticEvidence::Dictionary {
-                    definition,
-                    captures,
-                },
+                StaticEvidence::dictionary(definition, &ty_args, captures),
             );
         }
         if closed.len() == found {
@@ -247,9 +248,10 @@ pub(crate) fn close_static_dictionaries(func: &Function, env: ModuleEnv<'_>) -> 
             if matches!(operation.operands[index], mir::Value::Function(_)) {
                 continue;
             }
-            // An open dictionary may need its use-site type even without captures, so it
-            // cannot become untyped static evidence. Its capture-free entries are nevertheless
-            // direct functions, and need no dictionary at the call site.
+            // An open dictionary, whose type depends on the body's type variables in a way its
+            // captures do not record, stays a `build_dictionary` until substitution makes it
+            // ground. Its capture-free entries are nevertheless direct functions, and need no
+            // dictionary at the call site.
             if let Some((function, captures)) = resolve_dictionary_callee(
                 &operation.operands[index],
                 &|id| definitions.get(&id).copied(),

@@ -15,7 +15,10 @@ use crate::{
         artifacts::{MirArtifacts, Specialization},
     },
     containers::DenseBitSet,
-    hir::{function::ArgConvention, value::VariantPayloadStorage},
+    hir::{
+        dictionary::StaticEvidence as HirStaticEvidence, function::ArgConvention,
+        value::VariantPayloadStorage,
+    },
     mir::{
         self, BasicBlock, DebugLocation, Function, InlineSite, InlineSites, Operation,
         OperationKind, Parameter, ParameterKind, ResultTransport,
@@ -237,11 +240,13 @@ enum SnapshotValue {
     Pattern(SnapshotLiteral),
 }
 
+/// Static evidence of either MIR or HIR, which share this shape.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Debug, Clone)]
-enum SnapshotStaticEvidence {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SnapshotStaticEvidence {
     Dictionary {
         definition: TraitDictionaryId,
+        ty_args: Vec<SnapshotTypeId>,
         captures: Vec<SnapshotStaticEvidence>,
     },
     Subscript {
@@ -759,7 +764,7 @@ impl SnapshotOperation {
             operands: operation
                 .operands
                 .iter()
-                .map(SnapshotValue::capture)
+                .map(|value| SnapshotValue::capture(value, graph))
                 .collect::<Result<_, _>>()?,
             kind: SnapshotOperationKind::capture(&operation.kind, graph)?,
         })
@@ -770,7 +775,7 @@ impl SnapshotOperation {
             self.span,
             self.operands
                 .iter()
-                .map(SnapshotValue::materialize)
+                .map(|value| value.materialize(types))
                 .collect::<Result<Vec<_>, _>>()?
                 .into_boxed_slice(),
             self.kind.materialize(types)?,
@@ -781,12 +786,17 @@ impl SnapshotOperation {
 }
 
 impl SnapshotValue {
-    fn capture(value: &mir::Value) -> Result<Self, SnapshotError> {
+    fn capture(
+        value: &mir::Value,
+        graph: &mut SnapshotTypeGraphBuilder<'_>,
+    ) -> Result<Self, SnapshotError> {
         Ok(match value {
             mir::Value::Constant(id) => Self::Constant(*id),
             mir::Value::Dictionary(id) => Self::Dictionary(*id),
             mir::Value::Subscript(id) => Self::Subscript(*id),
-            mir::Value::Evidence(evidence) => Self::Evidence(evidence.as_ref().into()),
+            mir::Value::Evidence(evidence) => {
+                Self::Evidence(SnapshotStaticEvidence::capture(evidence, graph)?)
+            }
             mir::Value::Function(id) => Self::Function(*id),
             mir::Value::Parameter(id) => Self::Parameter(*id),
             mir::Value::Register(id) => Self::Register(*id),
@@ -794,12 +804,14 @@ impl SnapshotValue {
         })
     }
 
-    fn materialize(&self) -> Result<mir::Value, SnapshotError> {
+    fn materialize(&self, types: &[Type]) -> Result<mir::Value, SnapshotError> {
         Ok(match self {
             Self::Constant(id) => mir::Value::Constant(*id),
             Self::Dictionary(id) => mir::Value::Dictionary(*id),
             Self::Subscript(id) => mir::Value::Subscript(*id),
-            Self::Evidence(evidence) => mir::Value::Evidence(Box::new(evidence.into())),
+            Self::Evidence(evidence) => {
+                mir::Value::Evidence(Box::new(evidence.materialize(types)?))
+            }
             Self::Function(id) => mir::Value::Function(*id),
             Self::Parameter(id) => mir::Value::Parameter(*id),
             Self::Register(id) => mir::Value::Register(*id),
@@ -808,59 +820,154 @@ impl SnapshotValue {
     }
 }
 
-impl From<&StaticEvidence> for SnapshotStaticEvidence {
-    fn from(value: &StaticEvidence) -> Self {
-        match value {
+impl SnapshotStaticEvidence {
+    fn capture(
+        value: &StaticEvidence,
+        graph: &mut SnapshotTypeGraphBuilder<'_>,
+    ) -> Result<Self, SnapshotError> {
+        Ok(match value {
             StaticEvidence::Dictionary {
                 definition,
+                ty_args,
                 captures,
             } => Self::Dictionary {
                 definition: *definition,
-                captures: captures.iter().map(Self::from).collect(),
+                ty_args: ty_args
+                    .iter()
+                    .map(|ty| graph.capture(*ty))
+                    .collect::<Result<_, _>>()?,
+                captures: Self::capture_all(captures, graph)?,
             },
             StaticEvidence::Subscript {
                 definition,
                 captures,
             } => Self::Subscript {
                 definition: *definition,
-                captures: captures.iter().map(Self::from).collect(),
+                captures: Self::capture_all(captures, graph)?,
             },
             StaticEvidence::VariantPayloadStorage(indirect) => {
                 Self::VariantPayloadStorage(*indirect)
             }
-        }
+        })
     }
-}
 
-impl From<&SnapshotStaticEvidence> for StaticEvidence {
-    fn from(value: &SnapshotStaticEvidence) -> Self {
-        match value {
-            SnapshotStaticEvidence::Dictionary {
+    fn capture_all(
+        values: &[StaticEvidence],
+        graph: &mut SnapshotTypeGraphBuilder<'_>,
+    ) -> Result<Vec<Self>, SnapshotError> {
+        values
+            .iter()
+            .map(|value| Self::capture(value, graph))
+            .collect()
+    }
+
+    fn materialize(&self, types: &[Type]) -> Result<StaticEvidence, SnapshotError> {
+        Ok(match self {
+            Self::Dictionary {
                 definition,
+                ty_args,
+                captures,
+            } => StaticEvidence::Dictionary {
+                definition: *definition,
+                ty_args: ty_args
+                    .iter()
+                    .map(|ty| resolve_type(types, *ty))
+                    .collect::<Result<_, _>>()?,
+                captures: Self::materialize_all(captures, types)?,
+            },
+            Self::Subscript {
+                definition,
+                captures,
+            } => StaticEvidence::Subscript {
+                definition: *definition,
+                captures: Self::materialize_all(captures, types)?,
+            },
+            Self::VariantPayloadStorage(indirect) => {
+                StaticEvidence::VariantPayloadStorage(*indirect)
+            }
+        })
+    }
+
+    fn materialize_all(
+        values: &[Self],
+        types: &[Type],
+    ) -> Result<Box<[StaticEvidence]>, SnapshotError> {
+        values
+            .iter()
+            .map(|value| value.materialize(types))
+            .collect()
+    }
+
+    pub(crate) fn capture_hir(
+        value: &HirStaticEvidence,
+        graph: &mut SnapshotTypeGraphBuilder<'_>,
+    ) -> Result<Self, SnapshotError> {
+        let capture_all = |captures: &[HirStaticEvidence], graph: &mut SnapshotTypeGraphBuilder| {
+            captures
+                .iter()
+                .map(|capture| Self::capture_hir(capture, graph))
+                .collect::<Result<Vec<_>, _>>()
+        };
+        Ok(match value {
+            HirStaticEvidence::Dictionary {
+                definition,
+                ty_args,
                 captures,
             } => Self::Dictionary {
                 definition: *definition,
-                captures: captures
+                ty_args: ty_args
                     .iter()
-                    .map(Self::from)
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
+                    .map(|ty| graph.capture(*ty))
+                    .collect::<Result<_, _>>()?,
+                captures: capture_all(captures, graph)?,
             },
-            SnapshotStaticEvidence::Subscript {
+            HirStaticEvidence::Subscript {
                 definition,
                 captures,
             } => Self::Subscript {
                 definition: *definition,
-                captures: captures
-                    .iter()
-                    .map(Self::from)
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
+                captures: capture_all(captures, graph)?,
             },
-            SnapshotStaticEvidence::VariantPayloadStorage(indirect) => {
+            HirStaticEvidence::VariantPayloadStorage(indirect) => {
                 Self::VariantPayloadStorage(*indirect)
             }
-        }
+        })
+    }
+
+    pub(crate) fn materialize_hir(
+        &self,
+        types: &[Type],
+    ) -> Result<HirStaticEvidence, SnapshotError> {
+        let materialize_all = |captures: &[Self]| {
+            captures
+                .iter()
+                .map(|capture| capture.materialize_hir(types))
+                .collect::<Result<Box<[_]>, _>>()
+        };
+        Ok(match self {
+            Self::Dictionary {
+                definition,
+                ty_args,
+                captures,
+            } => HirStaticEvidence::Dictionary {
+                definition: *definition,
+                ty_args: ty_args
+                    .iter()
+                    .map(|ty| resolve_type(types, *ty))
+                    .collect::<Result<_, _>>()?,
+                captures: materialize_all(captures)?,
+            },
+            Self::Subscript {
+                definition,
+                captures,
+            } => HirStaticEvidence::Subscript {
+                definition: *definition,
+                captures: materialize_all(captures)?,
+            },
+            Self::VariantPayloadStorage(indirect) => {
+                HirStaticEvidence::VariantPayloadStorage(*indirect)
+            }
+        })
     }
 }
 
@@ -1324,7 +1431,7 @@ impl SnapshotTerminator {
                     then_target,
                     else_target,
                 } => Stored::CondBr {
-                    condition: SnapshotValue::capture(condition)?,
+                    condition: SnapshotValue::capture(condition, graph)?,
                     then_target: *then_target,
                     else_target: *else_target,
                 },
@@ -1333,7 +1440,7 @@ impl SnapshotTerminator {
                     cases,
                     default,
                 } => Stored::SwitchVariant {
-                    tag: SnapshotValue::capture(tag)?,
+                    tag: SnapshotValue::capture(tag, graph)?,
                     cases: cases
                         .iter()
                         .map(|(name, target)| (name.to_string(), *target))
@@ -1350,11 +1457,14 @@ impl SnapshotTerminator {
                     error: *error,
                 },
                 Source::Yield { place, resume } => Stored::Yield {
-                    place: SnapshotValue::capture(place)?,
+                    place: SnapshotValue::capture(place, graph)?,
                     resume: *resume,
                 },
                 Source::Return { value } => Stored::Return {
-                    value: value.as_ref().map(SnapshotValue::capture).transpose()?,
+                    value: value
+                        .as_ref()
+                        .map(|value| SnapshotValue::capture(value, graph))
+                        .transpose()?,
                 },
                 Source::PropagateError => Stored::PropagateError,
                 Source::EffectViolation => Stored::EffectViolation,
@@ -1379,7 +1489,7 @@ impl SnapshotTerminator {
                     then_target,
                     else_target,
                 } => Runtime::CondBr {
-                    condition: condition.materialize()?,
+                    condition: condition.materialize(types)?,
                     then_target: *then_target,
                     else_target: *else_target,
                 },
@@ -1388,7 +1498,7 @@ impl SnapshotTerminator {
                     cases,
                     default,
                 } => Runtime::SwitchVariant {
-                    tag: tag.materialize()?,
+                    tag: tag.materialize(types)?,
                     cases: cases
                         .iter()
                         .map(|(name, target)| (name.as_str().into(), *target))
@@ -1405,11 +1515,14 @@ impl SnapshotTerminator {
                     error: *error,
                 },
                 Stored::Yield { place, resume } => Runtime::Yield {
-                    place: place.materialize()?,
+                    place: place.materialize(types)?,
                     resume: *resume,
                 },
                 Stored::Return { value } => Runtime::Return {
-                    value: value.as_ref().map(SnapshotValue::materialize).transpose()?,
+                    value: value
+                        .as_ref()
+                        .map(|value| value.materialize(types))
+                        .transpose()?,
                 },
                 Stored::PropagateError => Runtime::PropagateError,
                 Stored::EffectViolation => Runtime::EffectViolation,

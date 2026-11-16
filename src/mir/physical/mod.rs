@@ -3454,6 +3454,7 @@ fn verify_static_evidence(
         StaticEvidence::Dictionary {
             definition,
             captures,
+            ..
         } => {
             verify_dictionary_reference(artifacts, owner, *definition)?;
             if let Some(metadata) = artifacts.dictionary(*definition)
@@ -4819,11 +4820,16 @@ mod tests {
             entry,
             Operation::dict_entry(
                 span,
-                Value::Evidence(Box::new(StaticEvidence::Dictionary {
-                    definition: foreign,
-                    captures: vec![StaticEvidence::bare_dictionary(nested_foreign)]
-                        .into_boxed_slice(),
-                })),
+                Value::Evidence(Box::new(StaticEvidence::dictionary(
+                    foreign,
+                    &[],
+                    vec![StaticEvidence::dictionary(
+                        nested_foreign,
+                        &[],
+                        Box::new([]),
+                    )]
+                    .into_boxed_slice(),
+                ))),
                 session
                     .expect_fresh_module(STD_MODULE_ID)
                     .get_impl_data(foreign.impl_id)

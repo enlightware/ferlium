@@ -140,6 +140,14 @@ enum FrameExit {
     Yielded(Address, BlockId),
 }
 
+/// What a dictionary is built at, besides its captures.
+enum Application<'a> {
+    /// Its type at the construction site.
+    Type(Type),
+    /// The arguments of its implementation's type parameters, as static evidence records them.
+    Arguments(&'a [Type]),
+}
+
 /// Concrete type identities for checked storage, not specialized copies of MIR bodies.
 #[derive(Default)]
 struct RuntimeTypes(InstSubst);
@@ -968,7 +976,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         captures: Vec<Evidence>,
         is_static: bool,
         span: Option<Location>,
-        application_ty: Option<Type>,
+        application: Application<'_>,
     ) -> Result<Evidence, RuntimeError> {
         let metadata = self
             .program
@@ -985,8 +993,20 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         // Generic dictionaries can have parameters absent from their captures (for example
         // a blanket implementation with no prerequisites). The construction site's type also
         // instantiates the dictionary; capture types alone need not determine it.
-        if let Some(ty) = application_ty {
-            types.bind(metadata.ty(), ty, env)?;
+        match application {
+            Application::Type(ty) => types.bind(metadata.ty(), ty, env)?,
+            Application::Arguments(ty_args) if !ty_args.is_empty() => {
+                // Static evidence is built once for the whole program, so only a ground
+                // argument means the same in every frame using it.
+                let mut params = metadata.ty().inner_ty_vars();
+                params.sort_unstable();
+                for (param, arg) in params.into_iter().zip(ty_args) {
+                    if arg.is_constant() {
+                        types.bind(Type::variable(param), *arg, env)?;
+                    }
+                }
+            }
+            Application::Arguments(_) => {}
         }
         for (ty, capture) in metadata.capture_types().iter().zip(&captures) {
             types.bind(*ty, capture.ty(), env)?;
@@ -1032,13 +1052,21 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             let value = match evidence {
                 InternedStaticEvidence::Dictionary {
                     definition,
+                    ty_args,
                     captures,
                 } => {
                     let captures = captures
                         .iter()
                         .map(|id| self.static_evidence[id].clone())
                         .collect();
-                    self.build_evidence(*definition, captures, true, None, None)?
+                    let ty_args = ty_args.clone();
+                    self.build_evidence(
+                        *definition,
+                        captures,
+                        true,
+                        None,
+                        Application::Arguments(&ty_args),
+                    )?
                 }
                 InternedStaticEvidence::VariantPayloadStorage(value) => Evidence::Storage(*value),
                 InternedStaticEvidence::Subscript {
@@ -2065,7 +2093,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     captures,
                     false,
                     Some(operation.span.location),
-                    Some(self.types.resolve(*ty)),
+                    Application::Type(self.types.resolve(*ty)),
                 )?;
                 Some(Binding::Evidence(evidence))
             }

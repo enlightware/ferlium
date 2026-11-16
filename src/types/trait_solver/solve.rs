@@ -347,6 +347,7 @@ impl<'a> TraitSolver<'a> {
             } else {
                 let imp = TraitImpl {
                     trait_id,
+                    input_tys: input_tys.to_vec(),
                     output_tys: vec![output_ty],
                     output_effs: vec![],
                     methods: vec![],

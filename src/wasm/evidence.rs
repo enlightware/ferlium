@@ -126,6 +126,7 @@ impl ReachableEvidence {
             InternedStaticEvidence::Dictionary {
                 definition,
                 captures,
+                ..
             } => {
                 self.dictionary(*definition);
                 for &capture in captures {
@@ -246,6 +247,7 @@ impl Image {
                 InternedStaticEvidence::Dictionary {
                     definition,
                     captures,
+                    ..
                 } => {
                     let layout = program.dictionary(*definition).unwrap().environment();
                     let captures = captures

@@ -682,6 +682,7 @@ impl TraitSolver<'_> {
         );
         let imp = TraitImpl::new(
             *trait_id,
+            input_tys.to_vec(),
             output_tys.clone(),
             output_effs.clone(),
             entries,
@@ -863,6 +864,7 @@ impl TraitSolver<'_> {
             .get_dictionary_type_for_tys(input_tys, &[], &[]);
         let implementation = TraitImpl::new(
             *trait_id,
+            input_tys.to_vec(),
             vec![],
             vec![],
             entries,

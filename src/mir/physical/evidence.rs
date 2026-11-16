@@ -80,6 +80,7 @@ impl PhysicalEvidenceReferences {
             StaticEvidence::Dictionary {
                 definition,
                 captures,
+                ..
             } => {
                 self.dictionaries.insert(*definition);
                 captures

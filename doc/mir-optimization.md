@@ -347,6 +347,12 @@ Generic code closes a blanket impl's dictionary over its own evidence at run tim
 Once inlining has bound that evidence to constants, each round first replaces such a dictionary by
 the equivalent static evidence (nested closures to a fixpoint), so its entries devirtualize like
 any constant dictionary's.
+Static dictionary evidence records the arguments of its implementation's type parameters, with
+effects erased, because captures need not determine them all: the captures of
+`Iterator<MapIterator<I, A, B>>` mention only `I`.
+Such a dictionary closes once its arguments are ground or its captures determine them.
+A devirtualized entry that records no instantiation is specialized at the one these arguments and
+the call's own types give.
 
 Inlining can expose one last `dict_entry`/dispatch pair in the last permitted round. The
 normalization that always follows the rounds devirtualizes it, so the entry is removed without

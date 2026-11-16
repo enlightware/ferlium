@@ -119,7 +119,11 @@ fn value_dictionary_node_kind_from_methods(
     let (dictionary, ty) = ctx
         .trait_solver
         .materialize_generated_value_impl_from_methods(trait_id, input_tys, span, methods)?;
-    Ok((get_dictionary(dictionary), ty))
+    let ty_args = ctx
+        .trait_solver
+        .get_impl_data_by_id(dictionary)
+        .ty_args(input_tys, &[]);
+    Ok((get_dictionary(dictionary, ty_args), ty))
 }
 
 /// Build the compiler-provided `Value` dictionary for a concrete function type.
@@ -228,6 +232,8 @@ fn trait_dictionary_node_kind(
     )?;
     let impl_data = ctx.trait_solver.get_impl_data_by_id(dictionary);
     let ty = impl_data.dictionary_ty;
+    // Captures need not determine all parameters of a generic impl.
+    let ty_args = impl_data.ty_args(&input_tys, &output_tys);
     let capture_schema = impl_data.dictionary_value.capture_schema().to_vec();
     let capture_infos = extra_arg_kind_from_inst_data(
         &hir::FnInstData::new(capture_schema, Vec::new(), Vec::new()),
@@ -243,6 +249,7 @@ fn trait_dictionary_node_kind(
     Ok((
         NodeKind::GetDictionary(hir::GetDictionary {
             dictionary,
+            ty_args,
             captures,
         }),
         ty,
@@ -617,6 +624,7 @@ fn trait_dictionary_evidence_binding_inner(
     let definition = TraitDictionaryId::new(selected.module, selected.impl_id);
     let impl_data = ctx.trait_solver.get_impl_data_by_id(selected);
     let capture_schema = impl_data.dictionary_value.capture_schema().to_vec();
+    let ty_args = impl_data.ty_args(&input_tys, &output_tys);
     let captures = capture_schema
         .iter()
         .map(|requirement| evidence_binding_for_requirement(arena, requirement, span, ctx))
@@ -628,15 +636,11 @@ fn trait_dictionary_evidence_binding_inner(
         .map(|capture| ctx.static_evidence(*capture))
         .collect::<Option<Vec<_>>>();
     let source = if let Some(captures) = static_captures {
-        let evidence = if captures.is_empty() {
-            StaticEvidence::bare_dictionary(definition)
-        } else {
-            StaticEvidence::Dictionary {
-                definition,
-                captures: captures.into_boxed_slice(),
-            }
-        };
-        EvidenceBindingSource::Static(evidence)
+        EvidenceBindingSource::Static(StaticEvidence::dictionary(
+            definition,
+            &ty_args,
+            captures.into_boxed_slice(),
+        ))
     } else {
         EvidenceBindingSource::ConstructedDictionary {
             definition,
@@ -2053,6 +2057,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     .collect::<Result<_, _>>()?;
                 GetDictionary(hir::GetDictionary {
                     dictionary: get_dict.dictionary,
+                    ty_args: get_dict.ty_args,
                     captures,
                 })
             }
@@ -2998,6 +3003,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             }
             GetDictionary(get_dict) => GetDictionary(hir::GetDictionary {
                 dictionary: get_dict.dictionary,
+                ty_args: get_dict.ty_args.clone(),
                 captures: get_dict
                     .captures
                     .iter()

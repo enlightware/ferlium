@@ -15,11 +15,11 @@ use crate::{
     },
     types::{
         effects::{EffType, EffectVar},
-        mutability::MutType,
         trait_solver::{EvidencePlan, TraitSolver, alpha_canonicalize_dictionary_requirements},
         r#type::{SubscriptType, Type, TypeVar},
         type_like::{TypeLike, instantiate_effect_types_in_place, instantiate_types_in_place},
         type_mapper::TypeMapper,
+        type_matching::erase_type_effects,
         type_scheme::ProjectionRequirementKind,
         type_scheme_display::format_have_trait,
     },
@@ -342,11 +342,17 @@ impl FormatWith<ModuleEnv<'_>> for DictionaryReq {
 pub type DictionariesReq = Vec<DictionaryReq>;
 
 /// Compile-time evidence embedded directly in a function evidence graph.
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StaticEvidence {
+    /// A dictionary closed over static captures. `ty_args` are the arguments of its
+    /// implementation's type parameters ([`TraitImpl::ty_params`]), with effects erased: captures
+    /// need not determine all of them, and effects never distinguish dictionaries. Build it with
+    /// [`StaticEvidence::dictionary`].
+    ///
+    /// [`TraitImpl::ty_params`]: crate::module::TraitImpl::ty_params
     Dictionary {
         definition: TraitDictionaryId,
+        ty_args: Box<[Type]>,
         captures: Box<[StaticEvidence]>,
     },
     Subscript {
@@ -357,16 +363,20 @@ pub enum StaticEvidence {
 }
 
 impl StaticEvidence {
-    pub(crate) fn bare_dictionary(definition: TraitDictionaryId) -> Self {
+    pub(crate) fn dictionary(
+        definition: TraitDictionaryId,
+        ty_args: &[Type],
+        captures: Box<[StaticEvidence]>,
+    ) -> Self {
         Self::Dictionary {
             definition,
-            captures: Box::new([]),
+            ty_args: ty_args.iter().copied().map(erase_type_effects).collect(),
+            captures,
         }
     }
 }
 
 /// Origin of an immutable hidden-evidence binding.
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EvidenceBindingSource {
     Parameter(ExtraParameterId),
@@ -494,26 +504,6 @@ fn same_types_erasing_effects(left: &[Type], right: &[Type]) -> bool {
     left.iter()
         .map(|ty| erase_type_effects(*ty))
         .eq(right.iter().map(|ty| erase_type_effects(*ty)))
-}
-
-fn erase_type_effects(ty: Type) -> Type {
-    ty.map(&mut EraseEffectsMapper)
-}
-
-struct EraseEffectsMapper;
-
-impl TypeMapper for EraseEffectsMapper {
-    fn map_type(&mut self, ty: Type) -> Type {
-        ty
-    }
-
-    fn map_mut_type(&mut self, mut_ty: MutType) -> MutType {
-        mut_ty
-    }
-
-    fn map_effect_type(&mut self, _eff_ty: &EffType) -> EffType {
-        EffType::empty()
-    }
 }
 
 pub(crate) fn instantiate_dictionary_requirements<M: TypeMapper>(

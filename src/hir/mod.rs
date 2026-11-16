@@ -816,6 +816,9 @@ pub struct GetTraitDictionary {
 #[derive(Debug, Clone)]
 pub struct GetDictionary<P: HirPhase = Unelaborated> {
     pub dictionary: TraitImplId,
+    /// The arguments of the implementation's type parameters at this application
+    /// ([`crate::module::TraitImpl::ty_args`]).
+    pub ty_args: Box<[Type]>,
     pub captures: Vec<NodeId<P>>,
 }
 

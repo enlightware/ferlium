@@ -287,6 +287,7 @@ impl<'a> TraitSolver<'a> {
         let dictionary_value = build_dictionary_value(&methods, &associated_const_getters);
         let imp = TraitImpl::new(
             trait_id,
+            input_types.to_vec(),
             output_types.to_vec(),
             output_effs.to_vec(),
             methods,
@@ -720,6 +721,7 @@ impl<'a> TraitSolver<'a> {
         );
         let imp = TraitImpl::new(
             trait_id,
+            canonical_input_tys.clone(),
             Vec::new(),
             Vec::new(),
             methods,
@@ -798,7 +800,8 @@ impl<'a> TraitSolver<'a> {
     ) -> Result<(NodeKind, Type), InternalCompilationError> {
         let (impl_id, dictionary_ty) =
             self.materialize_compiler_provided_value_dictionary(arena, trait_id, input_tys, span)?;
-        Ok((get_dictionary(impl_id), dictionary_ty))
+        let ty_args = self.get_impl_data_by_id(impl_id).ty_args(input_tys, &[]);
+        Ok((get_dictionary(impl_id, ty_args), dictionary_ty))
     }
 
     /// Accept a blanket candidate for `solve_impl_actual` by materializing its dictionary, or
@@ -974,6 +977,7 @@ impl<'a> TraitSolver<'a> {
             );
             let imp = TraitImpl::new(
                 trait_id,
+                input_tys.to_vec(),
                 output_tys.clone(),
                 output_effs.clone(),
                 methods,

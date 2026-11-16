@@ -181,6 +181,7 @@ enum SnapshotNodeKind {
     },
     GetDictionary {
         dictionary: TraitImplId,
+        ty_args: Vec<SnapshotTypeId>,
         captures: Vec<SnapshotNodeId>,
     },
     LoadDictionary(EvidenceBindingId),
@@ -635,6 +636,7 @@ impl SnapshotNodeKind {
             NodeKind::GetTraitDictionary(value) => match *value {},
             NodeKind::GetDictionary(value) => Self::GetDictionary {
                 dictionary: value.dictionary,
+                ty_args: capture_types(&value.ty_args, graph)?,
                 captures: value.captures.iter().map(|node| node_id(*node)).collect(),
             },
             NodeKind::LoadDictionary(value) => Self::LoadDictionary(value.extra_parameter),
@@ -862,9 +864,11 @@ impl SnapshotNodeKind {
             })),
             Self::GetDictionary {
                 dictionary,
+                ty_args,
                 captures,
             } => NodeKind::GetDictionary(hir::GetDictionary {
                 dictionary: *dictionary,
+                ty_args: live_types(ty_args, types)?.into_boxed_slice(),
                 captures: captures
                     .iter()
                     .map(|capture| id(*capture))

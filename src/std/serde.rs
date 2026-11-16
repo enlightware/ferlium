@@ -537,6 +537,9 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                         arena,
                         hir::NodeKind::GetDictionary(hir::GetDictionary {
                             dictionary: data_value_dictionary,
+                            ty_args: solver
+                                .get_impl_data_by_id(data_value_dictionary)
+                                .ty_args(&[data_value_ty], &[]),
                             captures: Vec::new(),
                         }),
                         data_value_dictionary_ty,

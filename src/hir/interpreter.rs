@@ -1007,6 +1007,7 @@ fn materialize_static_evidence(evidence: &StaticEvidence) -> HiddenEvidenceArgVa
         StaticEvidence::Dictionary {
             definition,
             captures,
+            ..
         } => HiddenEvidenceArgValue::TraitDictionary(ClosedTraitDictionary {
             definition: *definition,
             captures: captures.iter().map(materialize_static_evidence).collect(),

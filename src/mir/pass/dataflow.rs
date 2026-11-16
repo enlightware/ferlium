@@ -1174,19 +1174,24 @@ fn transfer(
             // The entry of a *constant* dictionary is a statically known function — this is what
             // makes devirtualization fall out of inlining, once inlining has bound a callee's
             // dictionary parameter to a constant.
-            let fact = static_evidence_operand(&operation.operands[0])
-                .and_then(|evidence| dictionary_entry(&evidence, *entry_index, env))
-                .map(|(function, hidden_evidence)| {
-                    if hidden_evidence.is_empty() {
-                        Fact::Known(Const::Function(function))
-                    } else {
-                        Fact::Known(Const::ClosedFunction {
-                            function,
-                            hidden_evidence: hidden_evidence.into(),
-                        })
-                    }
-                })
-                .unwrap_or_default();
+            let fact = match &operation.operands[0] {
+                mir::Value::Dictionary(definition) => {
+                    declared_dictionary_entry(*definition, *entry_index, env)
+                }
+                mir::Value::Evidence(evidence) => dictionary_entry(evidence, *entry_index, env),
+                _ => None,
+            }
+            .map(|(function, hidden_evidence)| {
+                if hidden_evidence.is_empty() {
+                    Fact::Known(Const::Function(function))
+                } else {
+                    Fact::Known(Const::ClosedFunction {
+                        function,
+                        hidden_evidence: hidden_evidence.into(),
+                    })
+                }
+            })
+            .unwrap_or_default();
             let place = place_of(&mir::Value::Register(result))
                 .expect("the structural scan interns every dictionary entry");
             state.forget_within(place, register_places);
@@ -1243,15 +1248,39 @@ pub(super) fn dictionary_entry(
     let StaticEvidence::Dictionary {
         definition,
         captures,
+        ..
     } = dictionary
     else {
         return None;
     };
+    dictionary_entry_of(*definition, captures, || dictionary.clone(), entry, env)
+}
+
+/// Resolves one entry of a [`mir::Value::Dictionary`], whose evidence is only built when an entry
+/// captures the dictionary itself.
+fn declared_dictionary_entry(
+    definition: TraitDictionaryId,
+    entry: TraitDictionaryEntryIndex,
+    env: ModuleEnv<'_>,
+) -> Option<(FunctionId, Vec<StaticEvidence>)> {
+    let this = || {
+        StaticEvidence::declared_dictionary(definition, env)
+            .expect("the impl was found to resolve its entry")
+    };
+    dictionary_entry_of(definition, &[], this, entry, env)
+}
+
+fn dictionary_entry_of(
+    definition: TraitDictionaryId,
+    captures: &[StaticEvidence],
+    this: impl FnMut() -> StaticEvidence,
+    entry: TraitDictionaryEntryIndex,
+    env: ModuleEnv<'_>,
+) -> Option<(FunctionId, Vec<StaticEvidence>)> {
     let module = env.module_by_id(definition.module_id)?;
     let dictionary_definition = &module.get_impl_data(definition.impl_id)?.dictionary_value;
     let TraitDictionaryEntry::Function(function) = dictionary_definition.entry(entry);
-    let hidden_evidence =
-        dictionary_definition.project_entry_captures(entry, captures, || dictionary.clone())?;
+    let hidden_evidence = dictionary_definition.project_entry_captures(entry, captures, this)?;
     Some((
         FunctionId {
             module: definition.module_id,
@@ -1271,6 +1300,7 @@ fn dictionary<'a>(
             StaticEvidence::Dictionary {
                 definition,
                 captures,
+                ..
             } => Some((
                 *definition,
                 captures
@@ -1318,9 +1348,12 @@ pub(crate) fn resolve_dictionary_callee<'a>(
     Some((FunctionId::new(id.module_id, function), captures))
 }
 
-pub(super) fn static_evidence_operand(value: &mir::Value) -> Option<StaticEvidence> {
+pub(super) fn static_evidence_operand(
+    value: &mir::Value,
+    env: ModuleEnv<'_>,
+) -> Option<StaticEvidence> {
     match value {
-        mir::Value::Dictionary(definition) => Some(StaticEvidence::bare_dictionary(*definition)),
+        mir::Value::Dictionary(definition) => StaticEvidence::declared_dictionary(*definition, env),
         mir::Value::Subscript(definition) => Some(StaticEvidence::bare_subscript(*definition)),
         mir::Value::Evidence(evidence) => Some((**evidence).clone()),
         _ => None,

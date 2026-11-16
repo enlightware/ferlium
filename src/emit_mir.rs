@@ -30,8 +30,8 @@ use crate::{
     module::{
         self, EvidenceBindingId, ExtraParameterId, FunctionId, LocalDeclId, LocalFunctionId,
         Module, ModuleEnv, ModuleId, ResolvedLocalClone, ResolvedLocalDrop,
-        ResolvedTakeLocalValueMode, TraitDictionaryEntry, TraitDictionaryId, TraitId, TraitImplId,
-        id::Id,
+        ResolvedTakeLocalValueMode, TraitDictionaryEntry, TraitDictionaryId, TraitId, TraitImpl,
+        TraitImplId, id::Id,
     },
     std::{
         STD_MODULE_ID,
@@ -52,6 +52,7 @@ use crate::{
         r#type::{
             CallImplType, CallResultConvention, FnType, SubscriptResultConvention, Type, TypeKind,
         },
+        type_like::TypeLike,
         type_properties::concrete_type_is_trivial_copy,
     },
 };
@@ -82,15 +83,13 @@ fn lower_static_evidence(evidence: &StaticEvidence) -> mir::value::StaticEvidenc
     match evidence {
         StaticEvidence::Dictionary {
             definition,
+            ty_args,
             captures,
-        } => mir::value::StaticEvidence::Dictionary {
-            definition: *definition,
-            captures: captures
-                .iter()
-                .map(lower_static_evidence)
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        },
+        } => mir::value::StaticEvidence::dictionary(
+            *definition,
+            ty_args,
+            captures.iter().map(lower_static_evidence).collect(),
+        ),
         StaticEvidence::Subscript {
             definition,
             captures,
@@ -108,12 +107,38 @@ fn lower_static_evidence(evidence: &StaticEvidence) -> mir::value::StaticEvidenc
     }
 }
 
-fn static_evidence_value(evidence: mir::value::StaticEvidence) -> mir::Value {
+/// Whether a dictionary of `definition` with the type arguments `ty_args`, closed over static
+/// captures, is static evidence.
+///
+/// It is unless its type depends on the enclosing body's type variables in a way its captures do not
+/// record: the physical interpreter then needs that type at run time, so a `build_dictionary` carries
+/// it until substitution makes it ground.
+pub(crate) fn static_dictionary_type(
+    definition: TraitDictionaryId,
+    ty_args: &[Type],
+    env: ModuleEnv<'_>,
+) -> bool {
+    ty_args.iter().all(Type::is_constant)
+        || env
+            .module_by_id(definition.module_id)
+            .and_then(|module| module.get_impl_data(definition.impl_id))
+            .is_some_and(|imp| imp.captures_determine_type(env))
+}
+
+/// The operand for `evidence`, in its compact form when it has one: a capture-free dictionary at its
+/// impl's own type is a [`mir::Value::Dictionary`].
+fn static_evidence_value(evidence: mir::value::StaticEvidence, env: ModuleEnv<'_>) -> mir::Value {
     match evidence {
         mir::value::StaticEvidence::Dictionary {
             definition,
             ref captures,
-        } if captures.is_empty() => mir::Value::Dictionary(definition),
+            ..
+        } if captures.is_empty()
+            && mir::value::StaticEvidence::declared_dictionary(definition, env).as_ref()
+                == Some(&evidence) =>
+        {
+            mir::Value::Dictionary(definition)
+        }
         mir::value::StaticEvidence::Subscript {
             definition,
             ref captures,
@@ -591,15 +616,15 @@ impl<'a> Emitter<'a> {
     fn static_evidence_node(&self, node: &ENode) -> Option<mir::value::StaticEvidence> {
         use hir::NodeKind as K;
         match &node.kind {
-            K::GetDictionary(dictionary) => Some(mir::value::StaticEvidence::Dictionary {
-                definition: self.dictionary_id(dictionary.dictionary),
-                captures: dictionary
+            K::GetDictionary(dictionary) => Some(mir::value::StaticEvidence::dictionary(
+                self.dictionary_id(dictionary.dictionary),
+                &dictionary.ty_args,
+                dictionary
                     .captures
                     .iter()
                     .map(|capture| self.static_evidence_node(&self.hir_arena[*capture]))
-                    .collect::<Option<Vec<_>>>()?
-                    .into_boxed_slice(),
-            }),
+                    .collect::<Option<_>>()?,
+            )),
             K::LoadDictionary(binding) => self
                 .context
                 .static_evidence
@@ -648,6 +673,7 @@ impl<'a> Emitter<'a> {
         let mir::value::StaticEvidence::Dictionary {
             definition,
             captures,
+            ..
         } = evidence
         else {
             return None;
@@ -661,6 +687,27 @@ impl<'a> Emitter<'a> {
             FunctionId::new(definition.module_id, function),
             hidden_evidence,
         ))
+    }
+
+    /// The arguments of the type parameters of the impl `definition` at the application
+    /// `requirement` names.
+    fn ty_args(&self, definition: TraitDictionaryId, requirement: &DictionaryReq) -> Box<[Type]> {
+        let DictionaryReq::TraitImpl {
+            input_tys,
+            output_tys,
+            ..
+        } = requirement
+        else {
+            unreachable!("a constructed dictionary satisfies a trait requirement");
+        };
+        self.impl_data(definition).ty_args(input_tys, output_tys)
+    }
+
+    fn impl_data(&self, definition: TraitDictionaryId) -> &TraitImpl {
+        self.env
+            .module_by_id(definition.module_id)
+            .and_then(|module| module.get_impl_data(definition.impl_id))
+            .expect("dictionary definition must be available")
     }
 
     /// Materialize immutable function evidence once in the entry block.
@@ -678,7 +725,7 @@ impl<'a> Emitter<'a> {
                 EvidenceBindingSource::Static(evidence) => {
                     let evidence = lower_static_evidence(evidence);
                     known_static = Some(evidence.clone());
-                    static_evidence_value(evidence)
+                    static_evidence_value(evidence, self.env)
                 }
                 EvidenceBindingSource::ConstructedDictionary {
                     definition,
@@ -688,16 +735,15 @@ impl<'a> Emitter<'a> {
                         .iter()
                         .map(|capture| self.context.static_evidence.get(capture).cloned())
                         .collect::<Option<Vec<_>>>();
-                    let type_is_captured = self
-                        .env
-                        .module_by_id(definition.module_id)
-                        .and_then(|module| module.get_impl_data(definition.impl_id))
-                        .is_some_and(|imp| imp.captures_determine_type(self.env));
-                    if let Some(captures) = static_captures.filter(|_| type_is_captured) {
-                        let evidence = mir::value::StaticEvidence::Dictionary {
-                            definition: *definition,
-                            captures: captures.into_boxed_slice(),
-                        };
+                    let ty_args = self.ty_args(*definition, &binding.requirement);
+                    if let Some(captures) = static_captures
+                        .filter(|_| static_dictionary_type(*definition, &ty_args, self.env))
+                    {
+                        let evidence = mir::value::StaticEvidence::dictionary(
+                            *definition,
+                            &ty_args,
+                            captures.into_boxed_slice(),
+                        );
                         known_static = Some(evidence.clone());
                         mir::Value::Evidence(Box::new(evidence))
                     } else {
@@ -2374,19 +2420,14 @@ impl<'a> Emitter<'a> {
     /// tuple-lowering pass rebuilds the table from the impl arena.
     fn lower_dictionary(&mut self, span: Location, n: &GetDictionary<Elaborated>) -> mir::Value {
         let definition = self.dictionary_id(n.dictionary);
-        if n.captures.is_empty() {
-            return mir::Value::Dictionary(definition);
-        }
         if let Some(captures) = n
             .captures
             .iter()
             .map(|capture| self.static_evidence_node(&self.hir_arena[*capture]))
-            .collect::<Option<Vec<_>>>()
+            .collect::<Option<_>>()
         {
-            return mir::Value::Evidence(Box::new(mir::value::StaticEvidence::Dictionary {
-                definition,
-                captures: captures.into_boxed_slice(),
-            }));
+            let evidence = mir::value::StaticEvidence::dictionary(definition, &n.ty_args, captures);
+            return static_evidence_value(evidence, self.env);
         }
         let captures = n
             .captures
@@ -2396,12 +2437,8 @@ impl<'a> Emitter<'a> {
                 self.lower_extra_argument(&node)
             })
             .collect();
-        let ty = self
-            .env
-            .module_by_id(n.dictionary.module)
-            .and_then(|module| module.get_impl_data(n.dictionary.impl_id))
-            .expect("dictionary definition must be available")
-            .dictionary_ty;
+        let imp = self.impl_data(definition);
+        let ty = imp.instantiate(imp.dictionary_ty, &n.ty_args);
         self.insert(Operation::build_dictionary(span, definition, captures, ty))
             .unwrap()
     }

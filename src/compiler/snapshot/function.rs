@@ -4,6 +4,7 @@
 use super::{
     NativeCallableCatalog, SnapshotCallableDefinition, SnapshotError, SnapshotFunctionBody,
     SnapshotTypeGraphBuilder, SnapshotTypeId, hir::SnapshotDictionaryReq,
+    mir::SnapshotStaticEvidence,
 };
 use crate::{
     Location,
@@ -12,9 +13,10 @@ use crate::{
         function::ArgConvention,
     },
     module::{
-        DebugLocationRange, ELocalDecl, FunctionDebugInfo, LocalAssignmentMode, LocalDebugInfo,
-        LocalDebugOrigin, LocalFrameSlot, LocalStorage, ModuleFunction, ModuleFunctionSpans,
-        ResolvedLocalClone, ResolvedLocalDrop, id::Id,
+        DebugLocationRange, ELocalDecl, EvidenceBindingId, ExtraParameterId, FunctionDebugInfo,
+        LocalAssignmentMode, LocalDebugInfo, LocalDebugOrigin, LocalFrameSlot, LocalStorage,
+        ModuleFunction, ModuleFunctionSpans, ResolvedLocalClone, ResolvedLocalDrop, SubscriptId,
+        TraitDictionaryId, id::Id,
     },
     types::{mutability::MutType, r#type::Type},
 };
@@ -70,7 +72,73 @@ struct SnapshotFunctionDebugInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SnapshotEvidenceBinding {
     requirement: SnapshotDictionaryReq,
-    source: EvidenceBindingSource,
+    source: SnapshotEvidenceBindingSource,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SnapshotEvidenceBindingSource {
+    Parameter(ExtraParameterId),
+    Static(SnapshotStaticEvidence),
+    ConstructedDictionary {
+        definition: TraitDictionaryId,
+        captures: Vec<EvidenceBindingId>,
+    },
+    ConstructedSubscript {
+        definition: SubscriptId,
+        captures: Vec<EvidenceBindingId>,
+    },
+}
+
+impl SnapshotEvidenceBindingSource {
+    fn capture(
+        value: &EvidenceBindingSource,
+        graph: &mut SnapshotTypeGraphBuilder<'_>,
+    ) -> Result<Self, SnapshotError> {
+        Ok(match value {
+            EvidenceBindingSource::Parameter(id) => Self::Parameter(*id),
+            EvidenceBindingSource::Static(evidence) => {
+                Self::Static(SnapshotStaticEvidence::capture_hir(evidence, graph)?)
+            }
+            EvidenceBindingSource::ConstructedDictionary {
+                definition,
+                captures,
+            } => Self::ConstructedDictionary {
+                definition: *definition,
+                captures: captures.clone(),
+            },
+            EvidenceBindingSource::ConstructedSubscript {
+                definition,
+                captures,
+            } => Self::ConstructedSubscript {
+                definition: *definition,
+                captures: captures.clone(),
+            },
+        })
+    }
+
+    fn materialize(&self, types: &[Type]) -> Result<EvidenceBindingSource, SnapshotError> {
+        Ok(match self {
+            Self::Parameter(id) => EvidenceBindingSource::Parameter(*id),
+            Self::Static(evidence) => {
+                EvidenceBindingSource::Static(evidence.materialize_hir(types)?)
+            }
+            Self::ConstructedDictionary {
+                definition,
+                captures,
+            } => EvidenceBindingSource::ConstructedDictionary {
+                definition: *definition,
+                captures: captures.clone(),
+            },
+            Self::ConstructedSubscript {
+                definition,
+                captures,
+            } => EvidenceBindingSource::ConstructedSubscript {
+                definition: *definition,
+                captures: captures.clone(),
+            },
+        })
+    }
 }
 
 /// Finalized function metadata plus a reconstructible script/native/structural body reference.
@@ -212,7 +280,7 @@ impl SnapshotModuleFunction {
                 .map(|binding| {
                     Ok(SnapshotEvidenceBinding {
                         requirement: SnapshotDictionaryReq::capture(&binding.requirement, graph)?,
-                        source: binding.source.clone(),
+                        source: SnapshotEvidenceBindingSource::capture(&binding.source, graph)?,
                     })
                 })
                 .collect::<Result<_, SnapshotError>>()?,
@@ -244,7 +312,7 @@ impl SnapshotModuleFunction {
                 .map(|binding| {
                     Ok(EvidenceBinding {
                         requirement: binding.requirement.materialize(types)?,
-                        source: binding.source.clone(),
+                        source: binding.source.materialize(types)?,
                     })
                 })
                 .collect::<Result<_, SnapshotError>>()?,
