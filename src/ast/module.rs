@@ -54,7 +54,7 @@ impl DModuleFunctionArg {
 pub enum WhereClauseKind {
     /// No clause, or a clause that ends with `..`: what the body needs besides is inferred.
     Partial,
-    /// A written list, or `none`: the definer solves every requirement that the list does not
+    /// A written list, or `nothing`: the definer solves every requirement that the list does not
     /// state or imply.
     Complete,
 }
@@ -591,7 +591,7 @@ fn fmt_requirement_clause<C: for<'a> FormatWith<ModuleEnv<'a>>>(
 ) -> fmt::Result {
     match (where_clause.is_empty(), kind) {
         (true, WhereClauseKind::Partial) => Ok(()),
-        (true, WhereClauseKind::Complete) => write!(f, " where none"),
+        (true, WhereClauseKind::Complete) => write!(f, " where nothing"),
         (false, kind) => {
             write!(f, " where ")?;
             write_with_separator_and_format_fn(

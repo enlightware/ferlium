@@ -163,8 +163,8 @@ fn a_sequence_implies_the_requirements_of_its_iterator() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn where_none_publishes_only_structural_requirements() {
-    let src = "fn field<T>(x: T) -> int where none { x.a }\n";
+fn where_nothing_publishes_only_structural_requirements() {
+    let src = "fn field<T>(x: T) -> int where nothing { x.a }\n";
     assert_val_eq!(
         TestSession::new().run(&format!("{src}field({{ a: 4 }})")),
         int(4)
@@ -177,10 +177,25 @@ fn where_none_publishes_only_structural_requirements() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn nothing_is_still_a_type_name_in_a_requirement() {
+    assert_val_eq!(
+        TestSession::new().run(indoc! { r#"
+            struct nothing(int)
+            trait Show<Self> { fn show(x: Self) -> int; }
+            impl Show for nothing { fn show(x: nothing) -> int { x.0 } }
+            fn f<T>(x: T) -> int where nothing: Show { show(nothing(3)) }
+            f(1)
+        "# }),
+        int(3)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn a_requirement_on_an_unnamed_type_asks_for_a_name() {
     // The type of the field has no name, so its `Num` cannot be written.
     TestSession::new()
-        .fail_compilation("fn field<T>(x: T) where none { x.a + x.a }")
+        .fail_compilation("fn field<T>(x: T) where nothing { x.a + x.a }")
         .expect_undeclared_requirement("B: Num", true);
     // A generic ascribing a value of the body names it.
     assert_val_eq!(
@@ -199,11 +214,11 @@ fn a_requirement_on_an_unnamed_type_asks_for_a_name() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn the_value_of_a_type_variable_is_implicit_and_published_if_used() {
     let src = indoc! { r#"
-        fn id<T>(x: T) -> T where none { x }
-        fn len_of<A>(a: [A]) -> int where none { len(a) }
-        fn field<T>(x: T) where none { x.a }
-        fn ascribed<T, B>(x: T) -> int where none { let y: B = x.a; 1 }
-        fn count<T>(n: int, x: T) -> int where none {
+        fn id<T>(x: T) -> T where nothing { x }
+        fn len_of<A>(a: [A]) -> int where nothing { len(a) }
+        fn field<T>(x: T) where nothing { x.a }
+        fn ascribed<T, B>(x: T) -> int where nothing { let y: B = x.a; 1 }
+        fn count<T>(n: int, x: T) -> int where nothing {
             if n == 0 {
                 0
             } else {
@@ -238,14 +253,14 @@ fn the_value_of_a_type_variable_is_implicit_and_published_if_used() {
     }
     // A `Value` that a recursive sibling uses is published by its caller too.
     let src = indoc! { r#"
-        fn even<T>(n: int, x: T) -> [T] where none {
+        fn even<T>(n: int, x: T) -> [T] where nothing {
             if n == 0 {
                 []
             } else {
                 odd(n - 1, x)
             }
         }
-        fn odd<T>(n: int, x: T) -> [T] where none {
+        fn odd<T>(n: int, x: T) -> [T] where nothing {
             if n == 0 {
                 [x]
             } else {
@@ -265,7 +280,7 @@ fn the_value_of_a_type_variable_is_implicit_and_published_if_used() {
     }
     // A variable that reaches neither the signature nor a requirement stays ambiguous.
     TestSession::new()
-        .fail_compilation("fn f<T>(x: T) -> bool where none { let a = []; a == a }")
+        .fail_compilation("fn f<T>(x: T) -> bool where nothing { let a = []; a == a }")
         .expect_unbound_ty_var();
 }
 
@@ -386,7 +401,7 @@ fn a_complete_function_of_a_group_gives_its_siblings_its_contract() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn a_structural_requirement_of_a_complete_function_reaches_its_group() {
     let src = indoc! { r#"
-        fn f<T>(x: T, n: int) -> int where none {
+        fn f<T>(x: T, n: int) -> int where nothing {
             if n == 0 { x.a } else { g(x, n - 1) }
         }
         fn g(x, n) {

@@ -362,9 +362,9 @@ variantTypeRecord {
 }
 
 // The requirements of a function, impl or subscript: a complete list, made partial by a trailing `..`, or
-// `none` when the caller supplies no evidence.
+// `nothing` when the caller supplies no evidence.
 requirementClause {
-    kw<'where'> (whereConstraint (',' whereConstraint)* (',' '..')? | '..' | contextualKw<'none'>)
+    kw<'where'> (whereConstraint (',' whereConstraint)* (',' '..')? | '..' | contextualKw<'nothing'>)
 }
 
 whereClause {

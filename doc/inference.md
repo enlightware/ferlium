@@ -129,7 +129,7 @@ A [written clause](#written-requirements) fixes the contract instead.
 A written `where` clause of a function, subscript or implementation is complete.
 Callers supply exactly the trait requirements it lists, and the definition solves every other trait requirement of its body itself, or is an error.
 A trailing `..` makes the clause partial: what it does not list is inferred and published as without a clause.
-`where none` is the empty complete clause.
+`where nothing` is the empty complete clause.
 The clauses of structs, enums and traits have no body to infer from, and are complete already.
 
 The definition solves its other requirements by the reduction of [public requirements](#public-requirements), with the written requirements as leaves instead of the public names.

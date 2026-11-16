@@ -696,16 +696,16 @@ GenericParamList: GenericParams = {
 
 // The requirements of a function, impl or subscript. A written list is complete: the definer
 // solves every other requirement. A trailing `..` makes it partial, open to inferred
-// requirements, and `none` states that the caller supplies no evidence.
+// requirements, and `nothing` states that the caller supplies no evidence.
 RequirementClause: (Vec<TypeConstraint>, WhereClauseKind) = {
     "where" <list:RequirementList> => {
         let (constraints, partial) = list;
         (constraints, if partial { WhereClauseKind::Partial } else { WhereClauseKind::Complete })
     },
-    "where" <l:@L> <kw:Identifier> <r:@R> =>? if kw == "none" {
+    "where" <l:@L> <kw:Identifier> <r:@R> =>? if kw == "nothing" {
         Ok((vec![], WhereClauseKind::Complete))
     } else {
-        error("expected `none`, `..` or a requirement".into(), span(l, r, source_id))
+        error("expected `nothing`, `..` or a requirement".into(), span(l, r, source_id))
     },
 }
 

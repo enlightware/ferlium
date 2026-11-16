@@ -92,7 +92,7 @@ where
 }
 ```
 
-`where none` lists nothing: callers supply only the `Value` of generics and the requirements on the fields of types that the body uses.
+`where nothing` lists no requirement: callers supply only the `Value` of generics and the requirements on the fields of types that the body uses.
 In a requirement, `_` stands for an output to infer, as in `S: Seq<Item = _, Iter = I>`.
 The same rules apply to the `where` clauses of `impl` blocks and subscripts.
 
