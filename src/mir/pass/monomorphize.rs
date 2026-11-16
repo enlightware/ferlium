@@ -2252,7 +2252,8 @@ fn recorded_instantiation(operation: &Operation) -> Option<&Instantiation> {
 
 /// The instantiation of the generic `Value` method a `clone` or `drop` names, determined by the
 /// operation's type rather than recorded as a call's is: the method takes the value it clones or
-/// drops first, and its only quantifiers are its impl's, which all occur in that value's type.
+/// drops first, and its only quantifiers are its impl's, which all occur in that value's type, as
+/// types or as the effect arguments of named types.
 /// `None` when the type is not concrete or does not determine every quantifier.
 fn lifecycle_instantiation(
     operation: &Operation,
@@ -2264,11 +2265,15 @@ fn lifecycle_instantiation(
     else {
         return None;
     };
-    if !ty.is_constant() || !scheme.eff_quantifiers.is_empty() {
+    if !ty.is_constant() {
         return None;
     }
+    let receiver = scheme.ty.args.first()?.ty;
     let mut bindings = FxHashMap::default();
-    if !bind_type_variables(scheme.ty.args.first()?.ty, ty, &mut bindings) {
+    let mut effects = FxHashMap::default();
+    if !bind_type_variables(receiver, ty, &mut bindings)
+        || !bind_effect_variables(receiver, ty, &mut effects, &mut FxHashSet::default())
+    {
         return None;
     }
     Some(Instantiation {
@@ -2277,7 +2282,12 @@ fn lifecycle_instantiation(
             .iter()
             .map(|quantifier| bindings.get(quantifier).copied())
             .collect::<Option<_>>()?,
-        eff_args: Vec::new(),
+        eff_args: scheme
+            .eff_quantifiers
+            .iter()
+            .sorted()
+            .map(|quantifier| effects.get(quantifier).cloned())
+            .collect::<Option<_>>()?,
     })
 }
 
@@ -2385,7 +2395,7 @@ fn evidence_instantiation(
 /// Binds the effect variables that stand alone in `pattern`, as a function's effects or a named
 /// type's effect argument, to the effects at the same place in `ty`. Fails on contradicting
 /// bindings; other effects, and types that do not match, bind nothing.
-fn bind_effect_variables(
+pub(crate) fn bind_effect_variables(
     pattern: Type,
     ty: Type,
     bindings: &mut FxHashMap<EffectVar, EffType>,
@@ -2463,7 +2473,8 @@ fn bind_effect_variables(
 }
 
 /// Binds the type variables of `pattern` so that it becomes the concrete `ty`, if it can.
-/// Conservative: a variable under a function or subscript type is not matched.
+/// Conservative: a variable under a function or subscript type is not matched. The effect arguments
+/// of named types are left to [`bind_effect_variables`].
 fn bind_type_variables(pattern: Type, ty: Type, bindings: &mut FxHashMap<TypeVar, Type>) -> bool {
     bind_type_variables_from(pattern, ty, bindings, &mut FxHashSet::default())
 }
@@ -2513,9 +2524,7 @@ fn bind_type_variables_from(
             fields(patterns, tys, bindings, visited)
         }
         (TypeKind::Named(pattern), TypeKind::Named(named)) => {
-            pattern.def == named.def
-                && pattern.effect_params == named.effect_params
-                && all(&pattern.params, &named.params, bindings, visited)
+            pattern.def == named.def && all(&pattern.params, &named.params, bindings, visited)
         }
         _ => false,
     }

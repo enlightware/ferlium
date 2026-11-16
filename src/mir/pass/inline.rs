@@ -935,12 +935,19 @@ pub(crate) fn cleanup_template(
         .parameters()
         .iter()
         .find(|p| matches!(p.kind, ParameterKind::Place(_) | ParameterKind::Value))?;
+    // A named type's effect arguments are quantifiers of its `Value` impl too.
     let mut substitution = FxHashMap::default();
+    let mut effects = FxHashMap::default();
     if !bind_call_type_instantiation(
         receiver.ty,
         ty,
         &mut substitution,
         &mut FxHashMap::default(),
+        &mut FxHashSet::default(),
+    ) || !monomorphize::bind_effect_variables(
+        receiver.ty,
+        ty,
+        &mut effects,
         &mut FxHashSet::default(),
     ) {
         return None;
@@ -948,7 +955,7 @@ pub(crate) fn cleanup_template(
     let mut template = FunctionEdit::new(source.clone());
     monomorphize::map_types(
         &mut template,
-        &mut SimpleInstantiationMapper::new(&(substitution, FxHashMap::default())),
+        &mut SimpleInstantiationMapper::new(&(substitution, effects)),
         env,
     )
     .ok()?;
