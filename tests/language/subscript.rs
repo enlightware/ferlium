@@ -1444,6 +1444,30 @@ fn a_missing_field_that_a_generic_function_reads_is_reported_at_its_call() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_field_of_an_integer_literal_is_missing_on_int() {
+    // The field's type does not determine the literal's, which defaults to `int` and lacks it.
+    for src in [
+        "let f = 3; f.mass",
+        "fn mass_of(x) { x.mass } mass_of(3)",
+        "fn n() { let f = 3; f.mass }",
+    ] {
+        match TestSession::new().fail_compilation(src).into_inner() {
+            CompilationErrorImpl::InvalidRecordField {
+                field, record_ty, ..
+            }
+            | CompilationErrorImpl::InvalidRecordFieldAccess {
+                field, record_ty, ..
+            } => {
+                assert_eq!(field, "mass", "in {src}");
+                assert_eq!(record_ty, "int", "in {src}");
+            }
+            other => panic!("expected a missing field on int in {src}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn projection_fallback_on_tuple_newtype_reports_projection_context() {
     assert_invalid_record_field(
         indoc! { r#"

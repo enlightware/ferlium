@@ -200,6 +200,8 @@ Eligible numeric and unit defaults run before publication. Defaults made eligibl
 are retried in both expressions and function bodies, and the resulting obligations are rechecked.
 Defaulting respects the current signature, explicit parameters and their connected constraints;
 delaying a subtype relation must not make a generic variable appear local.
+A constraint connects the types that determine the others to them, but not conversely: a
+record or tuple to its fields, and a trait's inputs to its outputs.
 
 ## Never
 

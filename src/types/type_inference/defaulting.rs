@@ -57,36 +57,25 @@ impl ConstraintBoundary {
             return FxHashSet::default();
         }
 
-        let constraints = constraints
-            .iter()
-            .map(Borrow::borrow)
-            .collect::<Vec<&PubTypeConstraint>>();
-        let mut ins: FxHashSet<_> = constraints
-            .iter()
-            .enumerate()
-            .filter(|(_, constraint)| constraint.contains_any_ty_vars(&self.seed_ty_vars))
-            .map(|(index, _)| index)
-            .collect();
-
+        let mut reached: FxHashSet<_> = self.seed_ty_vars.iter().copied().collect();
+        let mut ins = FxHashSet::default();
         loop {
-            let accessible_ty_vars: Vec<_> = ins
-                .iter()
-                .flat_map(|index| constraints[*index].inner_ty_vars())
-                .unique()
-                .collect();
-            let new_ins: FxHashSet<_> = constraints
-                .iter()
-                .enumerate()
-                .filter(|(_, constraint)| constraint.contains_any_ty_vars(&accessible_ty_vars))
-                .map(|(index, _)| index)
-                .collect();
-            if new_ins.len() == ins.len() {
-                break;
+            let count = ins.len();
+            for (index, constraint) in constraints.iter().enumerate() {
+                let constraint = constraint.borrow();
+                if !ins.contains(&index)
+                    && reaching_ty_vars(constraint)
+                        .iter()
+                        .any(|var| reached.contains(var))
+                {
+                    ins.insert(index);
+                    reached.extend(constraint.inner_ty_vars());
+                }
             }
-            ins = new_ins;
+            if ins.len() == count {
+                return ins;
+            }
         }
-
-        ins
     }
 
     pub fn accessible_constraints<'a, C: Borrow<PubTypeConstraint>>(
@@ -215,6 +204,38 @@ struct DefaultingProgressKey {
     retained_bound_count: usize,
 }
 
+/// The type variables of `constraint` that determine its other ones. A record's type determines
+/// its fields' but not conversely, so `B: { mass: A }` does not tie `B` to a signature that holds
+/// only `A`, and `A` is not free to default while `B` is unknown. The same holds for a tuple and
+/// its elements and for a trait's inputs and outputs. All the variables of a variant constraint
+/// determine each other, as variants have their own defaulting.
+fn determining_ty_vars(constraint: &PubTypeConstraint) -> Vec<TypeVar> {
+    match constraint {
+        PubTypeConstraint::TupleAtIndexIs { tuple_ty, .. } => tuple_ty.inner_ty_vars(),
+        PubTypeConstraint::ProjectionSubscriptIs { subscript_ty, .. } => {
+            subscript_ty.receiver_ty().inner_ty_vars()
+        }
+        PubTypeConstraint::HaveTrait { input_tys, .. } => input_tys
+            .iter()
+            .flat_map(|ty| ty.inner_ty_vars())
+            .unique()
+            .collect(),
+        PubTypeConstraint::TypeHasVariant { .. }
+        | PubTypeConstraint::VariantPayloadLayout { .. } => constraint.inner_ty_vars(),
+    }
+}
+
+/// The type variables from which `constraint` reaches its other ones for defaulting: its
+/// [`determining_ty_vars`], or all of them once its determining types are known.
+fn reaching_ty_vars(constraint: &PubTypeConstraint) -> Vec<TypeVar> {
+    let determining = determining_ty_vars(constraint);
+    if determining.is_empty() {
+        constraint.inner_ty_vars()
+    } else {
+        determining
+    }
+}
+
 /// Whether `constraint` ties its type variables together for defaulting: it is not one of the
 /// `derived` `Value` applications, which hold whenever their leaves do.
 fn links(derived: &FxHashSet<(TraitId, Type)>, constraint: &PubTypeConstraint) -> bool {
@@ -268,9 +289,6 @@ fn trait_implies_on_self(trait_id: TraitId, implied: TraitId, solver: &TraitSolv
 }
 
 impl UnifiedTypeInference {
-    /// Signature reachability includes retained subtype relations as well as
-    /// public obligations. Otherwise delaying publication makes a generic
-    /// variable appear orphaned and eligible for numeric defaulting.
     /// The remaining constraints that tie their type variables together for defaulting: all but
     /// the compiler-derived `Value` applications whose leaves are requirements of their own, as
     /// `Value<(T, B)>` beside `Value<T>` and `Value<B>`. Such an application holds whenever its
@@ -293,31 +311,35 @@ impl UnifiedTypeInference {
             .collect()
     }
 
+    /// Signature reachability includes retained subtype relations as well as
+    /// public obligations. Otherwise delaying publication makes a generic
+    /// variable appear orphaned and eligible for numeric defaulting.
+    ///
+    /// A constraint reaches its variables only from its [`reaching_ty_vars`].
     pub(crate) fn constraint_boundary(
         &mut self,
         seeds: impl IntoIterator<Item = TypeVar>,
     ) -> ConstraintBoundary {
-        let mut neighbors = FxHashMap::<TypeVar, Vec<TypeVar>>::default();
         let derived = self.derived_value_applications();
-        let groups = self
+        let groups: Vec<_> = self
             .remaining_ty_constraints
             .iter()
             .filter(|constraint| links(&derived, constraint))
-            .map(|c| c.inner_ty_vars())
+            .map(|constraint| (reaching_ty_vars(constraint), constraint.inner_ty_vars()))
             .chain(self.bounds.relations().map(|bound| {
-                bound
+                let vars: Vec<_> = bound
                     .lower
                     .inner_ty_vars()
                     .into_iter()
                     .chain(bound.upper.inner_ty_vars())
-                    .collect()
-            }));
-        for vars in groups {
-            if let Some(first) = vars.first() {
-                for var in &vars[1..] {
-                    neighbors.entry(*first).or_default().push(*var);
-                    neighbors.entry(*var).or_default().push(*first);
-                }
+                    .collect();
+                (vars.clone(), vars)
+            }))
+            .collect();
+        let mut groups_from = FxHashMap::<TypeVar, Vec<usize>>::default();
+        for (index, (determining, _)) in groups.iter().enumerate() {
+            for var in determining {
+                groups_from.entry(*var).or_default().push(index);
             }
         }
         let mut reachable: FxHashSet<_> = seeds
@@ -326,9 +348,11 @@ impl UnifiedTypeInference {
             .collect();
         let mut queue: Vec<_> = reachable.iter().copied().collect();
         while let Some(var) = queue.pop() {
-            for next in neighbors.get(&var).into_iter().flatten() {
-                if reachable.insert(*next) {
-                    queue.push(*next);
+            for index in groups_from.get(&var).into_iter().flatten() {
+                for next in &groups[*index].1 {
+                    if reachable.insert(*next) {
+                        queue.push(*next);
+                    }
                 }
             }
         }
@@ -753,7 +777,6 @@ impl UnifiedTypeInference {
             if let PubTypeConstraint::HaveTrait {
                 trait_id,
                 input_tys,
-                output_tys,
                 ..
             } = constraint
             {
@@ -766,21 +789,15 @@ impl UnifiedTypeInference {
                 {
                     num_ty_vars.insert(ty_var);
                 }
-                let input_ty_vars: FxHashSet<_> =
-                    input_tys.iter().flat_map(|ty| ty.inner_ty_vars()).collect();
-                invalid_ty_vars.extend(
-                    output_tys
-                        .iter()
-                        .flat_map(|ty| ty.inner_ty_vars())
-                        .filter(|ty_var| !input_ty_vars.contains(ty_var)),
-                );
-            } else if !matches!(
-                constraint,
-                PubTypeConstraint::TypeHasVariant { .. }
-                    | PubTypeConstraint::VariantPayloadLayout { .. }
-            ) {
-                invalid_ty_vars.extend(constraint.inner_ty_vars());
             }
+            // A variable that other ones determine is not free to default.
+            let determining = determining_ty_vars(constraint);
+            invalid_ty_vars.extend(
+                constraint
+                    .inner_ty_vars()
+                    .into_iter()
+                    .filter(|ty_var| !determining.contains(ty_var)),
+            );
         }
 
         // Determine defaults for Num-constrained type variables.
