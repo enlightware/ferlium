@@ -30,7 +30,9 @@ use crate::{
 use super::{
     SymbolicApplication, TRAIT_SOLVER_RECURSION_LIMIT, TraitSolver,
     canonical::application_key,
-    matching::{BlanketCandidate, BlanketConstraintMode, DefaultedEffectRowsMapper},
+    matching::{
+        BlanketCandidate, BlanketConstraintMode, DefaultedEffectRowsMapper, UnresolvedConstraints,
+    },
     probe::TraitOutputQuery,
 };
 
@@ -419,12 +421,16 @@ impl<'a> TraitSolver<'a> {
 
         // No concrete implementation found, search for a matching blanket implementation.
         let mut search = CandidateSearch::new(&self.impls.pending);
-        let blanket_constraint_mode = if self.selecting_by_structure {
-            BlanketConstraintMode::Structural
-        } else if trait_id == value_trait_id {
-            BlanketConstraintMode::DeferConcreteObligations
+        // Impls of `Value` may be recursive: a prerequisite that cannot be solved yet waits for
+        // the reservation of this application's impl, however the impl is selected.
+        let unresolved = if trait_id == value_trait_id {
+            UnresolvedConstraints::Defer
         } else {
-            BlanketConstraintMode::RequireAllResolved
+            UnresolvedConstraints::Reject
+        };
+        let blanket_constraint_mode = BlanketConstraintMode {
+            by_structure: self.selecting_by_structure,
+            unresolved,
         };
         if let Some(impl_id) = self.select_blanket_candidate(
             trait_id,
@@ -645,12 +651,12 @@ impl<'a> TraitSolver<'a> {
         let (selection_input_tys, mode) = if by_structure {
             (
                 instantiate_types(input_tys, &mut EffectErasingMapper),
-                BlanketConstraintMode::Structural,
+                BlanketConstraintMode::by_structure(UnresolvedConstraints::Reject),
             )
         } else {
             (
                 input_tys.to_vec(),
-                BlanketConstraintMode::RequireAllResolved,
+                BlanketConstraintMode::with_effects(UnresolvedConstraints::Reject),
             )
         };
         let previous = mem::replace(&mut self.selecting_by_structure, by_structure);

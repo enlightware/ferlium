@@ -433,6 +433,110 @@ fn mutually_recursive_custom_value_impls() {
     );
 }
 
+/// A type with a custom `Value` impl has no derived one, even where its impl does not apply.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_custom_value_impl_that_does_not_apply_is_not_replaced_by_a_derived_one() {
+    let src = r#"
+        trait Tag<Self> { fn tag(x: Self) -> int; }
+        struct S(int)
+        impl Tag for S { fn tag(x) { 0 } }
+        struct V<T>(T)
+        impl<T> Value for V<T> where T: Value, T: Tag {
+            fn eq(x: V<T>, y: V<T>) -> bool { true }
+            fn to_string(x: V<T>) -> string { "V" }
+            fn hash(x: V<T>, state: &mut hasher) {}
+            fn clone(x: V<T>) -> V<T> { V(x.0) }
+            fn drop(x: &mut V<T>) {}
+        }
+    "#;
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    assert_val_eq!(
+        session.run(&format!("{src}V(S(1)) == V(S(2))")),
+        bool_value(true)
+    );
+    for expr in [
+        "V(1) == V(2)",
+        "to_string(V(1))",
+        "(V(1), 2) == (V(1), 2)",
+        "fn same(a, b) { a == b } same(V(1), V(2))",
+    ] {
+        match session
+            .fail_compilation(&format!("{src}{expr}"))
+            .into_inner()
+        {
+            CompilationErrorImpl::TraitImplNotFound { input_tys, .. } => {
+                assert_eq!(input_tys, ["Self = V<int>"], "{expr}")
+            }
+            other => panic!("expected no Value impl for V<int> in {expr}, got {other:?}"),
+        }
+    }
+}
+
+/// A cycle of custom `Value` impls holds as a whole: a prerequisite failing anywhere in it fails
+/// each of its impls.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_failing_prerequisite_fails_a_cycle_of_custom_value_impls() {
+    let value_impl = |name: &str, prerequisites: &str| {
+        format!(
+            "struct {name}<T>(T)
+            impl<T> Value for {name}<T> where T: Value, {prerequisites} {{
+                fn eq(x: {name}<T>, y: {name}<T>) -> bool {{ true }}
+                fn to_string(x: {name}<T>) -> string {{ \"{name}\" }}
+                fn hash(x: {name}<T>, state: &mut hasher) {{}}
+                fn clone(x: {name}<T>) -> {name}<T> {{ {name}(x.0) }}
+                fn drop(x: &mut {name}<T>) {{}}
+            }}
+            "
+        )
+    };
+    let src = format!(
+        "trait Tag<Self> {{ fn tag(x: Self) -> int; }}
+        struct S(int)
+        impl Tag for S {{ fn tag(x) {{ 0 }} }}
+        {}{}",
+        value_impl("Left", "Right<T>: Value"),
+        value_impl("Right", "T: Tag, Left<T>: Value"),
+    );
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    assert_val_eq!(
+        session.run(&format!(
+            "{src}to_string(Left(S(1))) == \"Left\" and to_string(Right(S(1))) == \"Right\""
+        )),
+        bool_value(true)
+    );
+    for (expr, missing) in [
+        ("to_string(Left(1))", "Self = Left<int>"),
+        ("to_string(Right(1))", "Self = Right<int>"),
+        // Beside a cycle that holds, in either order.
+        (
+            "let a = to_string(Left(S(1))); to_string(Left(1))",
+            "Self = Left<int>",
+        ),
+        (
+            "let a = to_string(Right(1)); to_string(Right(S(1)))",
+            "Self = Right<int>",
+        ),
+        (
+            "fn show(x) { to_string(Left(x)) } show(1)",
+            "Self = Left<int>",
+        ),
+    ] {
+        match session
+            .fail_compilation(&format!("{src}{expr}"))
+            .into_inner()
+        {
+            CompilationErrorImpl::TraitImplNotFound { input_tys, .. } => {
+                assert_eq!(input_tys, [missing], "{expr}")
+            }
+            other => panic!("expected no Value impl in {expr}, got {other:?}"),
+        }
+    }
+}
+
 /// A unit-shaped generic type has no data to copy, so its derived `Value::clone` must construct a
 /// fresh value rather than copy the whole one — a `memcpy` of a generic named type is not
 /// statically trivially copyable, and lowering emitted MIR the verifier rejects. Found by the

@@ -166,25 +166,43 @@ pub(super) struct ResolvedRuntimeRequirement {
     pub(super) req: DictionaryReq,
 }
 
-/// Controls how `match_blanket_impl` treats nested trait constraints that are
-/// still not fully resolved after reaching a fixed point.
+/// How `match_blanket_impl` reads a blanket impl, and what it makes of the nested trait
+/// constraints that are still not resolved after reaching a fixed point.
 #[derive(Clone, Copy)]
-pub(super) enum BlanketConstraintMode {
-    /// Matching is only considered successful if every nested trait constraint
-    /// can be resolved immediately.
-    RequireAllResolved,
-    /// As `RequireAllResolved`, on arguments without effects: whether the impl applies by
-    /// structure, which effects never decide. So nested outputs lose their effects too.
-    Structural,
-    /// As `AllowUnknown`, by structure as in `Structural`.
-    StructuralAllowUnknown,
-    /// A partially resolved fixed point is reported back as `Unknown` instead
-    /// of being treated as a definite mismatch.
-    AllowUnknown,
-    /// Matching may succeed with concrete nested constraints that cannot be
-    /// materialized until after reserving the concrete impl. Currently used for
-    /// recursive `Value` materialization.
-    DeferConcreteObligations,
+pub(super) struct BlanketConstraintMode {
+    /// Whether the impl applies by structure, which effects never decide: its arguments are
+    /// without effects, and nested outputs lose theirs too.
+    pub(super) by_structure: bool,
+    pub(super) unresolved: UnresolvedConstraints,
+}
+
+impl BlanketConstraintMode {
+    pub(super) fn with_effects(unresolved: UnresolvedConstraints) -> Self {
+        Self {
+            by_structure: false,
+            unresolved,
+        }
+    }
+
+    pub(super) fn by_structure(unresolved: UnresolvedConstraints) -> Self {
+        Self {
+            by_structure: true,
+            unresolved,
+        }
+    }
+}
+
+/// What a match makes of a nested trait constraint that it cannot resolve.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum UnresolvedConstraints {
+    /// The impl does not match: every nested trait constraint must resolve immediately.
+    Reject,
+    /// The match is reported as `Unknown` instead of a definite mismatch.
+    Unknown,
+    /// The match succeeds, and gives the constraint as a requirement that holds if the
+    /// application being matched does: it is solved after reserving that application's impl.
+    /// For `Value`, whose impls may be recursive.
+    Defer,
 }
 
 /// The index, in a match, of a constraint that the answer to another constraint requires: it is
@@ -527,14 +545,8 @@ impl<'a> TraitSolver<'a> {
             .map(|eff| mapper.map_effect_type(eff))
             .collect();
         let mut runtime_requirements = Vec::new();
-        let structural = matches!(
-            mode,
-            BlanketConstraintMode::Structural | BlanketConstraintMode::StructuralAllowUnknown
-        );
-        let scratch = !matches!(
-            mode,
-            BlanketConstraintMode::AllowUnknown | BlanketConstraintMode::StructuralAllowUnknown
-        );
+        let structural = mode.by_structure;
+        let scratch = mode.unresolved != UnresolvedConstraints::Unknown;
 
         // Then unify the instantiated blanket input types against the requested trait
         // application. The caller's own inference, matching for improvement, also relates the
@@ -731,9 +743,7 @@ impl<'a> TraitSolver<'a> {
                     };
                     match solved {
                         Ok(outputs) => outputs,
-                        Err(_)
-                            if matches!(mode, BlanketConstraintMode::DeferConcreteObligations) =>
-                        {
+                        Err(_) if mode.unresolved == UnresolvedConstraints::Defer => {
                             still_remaining.push((*constraint_index, substituted_constraint));
                             continue;
                         }
@@ -829,16 +839,14 @@ impl<'a> TraitSolver<'a> {
             }
 
             if still_remaining == old_remaining {
-                match mode {
-                    BlanketConstraintMode::RequireAllResolved
-                    | BlanketConstraintMode::Structural => {
+                match mode.unresolved {
+                    UnresolvedConstraints::Reject => {
                         return Ok(BlanketImplMatch::No);
                     }
-                    BlanketConstraintMode::AllowUnknown
-                    | BlanketConstraintMode::StructuralAllowUnknown => {
+                    UnresolvedConstraints::Unknown => {
                         return Ok(BlanketImplMatch::Unknown);
                     }
-                    BlanketConstraintMode::DeferConcreteObligations => {
+                    UnresolvedConstraints::Defer => {
                         for (constraint_index, constraint) in still_remaining {
                             let substituted_constraint =
                                 ty_inf.substitute_in_constraint(&constraint);
@@ -1288,7 +1296,7 @@ impl<'a> TraitSolver<'a> {
             ConstraintAssumptions::all(&[]),
             span,
             arena,
-            BlanketConstraintMode::RequireAllResolved,
+            BlanketConstraintMode::with_effects(UnresolvedConstraints::Reject),
         )?;
         let BlanketImplMatch::Yes {
             mut instantiation, ..
@@ -1357,7 +1365,7 @@ impl<'a> TraitSolver<'a> {
             ConstraintAssumptions::all(&[]),
             fn_span,
             &mut arena,
-            BlanketConstraintMode::Structural,
+            BlanketConstraintMode::by_structure(UnresolvedConstraints::Reject),
         );
         self.selecting_by_structure = false;
         self.rollback_derived_impl_state(snapshot);
@@ -1404,7 +1412,7 @@ impl<'a> TraitSolver<'a> {
         );
         let fully_determined = input_tys.iter().all(Type::is_constant);
         // By structure, the candidate is seen without effects, as the application is.
-        let by_structure = matches!(mode, BlanketConstraintMode::Structural);
+        let by_structure = mode.by_structure;
         for (module, blanket_impls) in blankets {
             for (sub_key, impl_id) in blanket_impls.iter() {
                 if !input_heads_may_match(&sub_key.input_tys, input_tys) {

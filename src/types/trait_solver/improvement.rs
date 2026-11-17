@@ -24,7 +24,9 @@ use crate::{
 use super::{
     TraitSolver,
     canonical::AlphaCanonicalTypeMapper,
-    matching::{BlanketConstraintMode, BlanketImplMatch, input_heads_may_match},
+    matching::{
+        BlanketConstraintMode, BlanketImplMatch, UnresolvedConstraints, input_heads_may_match,
+    },
     probe::{ConstraintAssumptions, LazyTraitSolverProbe, NeverProbe, TraitOutputQuery},
 };
 
@@ -287,7 +289,7 @@ impl<'a> TraitSolver<'a> {
                     assumptions,
                     fn_span,
                     arena,
-                    BlanketConstraintMode::AllowUnknown,
+                    BlanketConstraintMode::with_effects(UnresolvedConstraints::Unknown),
                 )? {
                     BlanketImplMatch::No => TraitImprovementMatch::No,
                     BlanketImplMatch::Unknown => TraitImprovementMatch::Unknown,
@@ -348,7 +350,7 @@ impl<'a> TraitSolver<'a> {
                     assumptions,
                     fn_span,
                     arena,
-                    BlanketConstraintMode::StructuralAllowUnknown,
+                    BlanketConstraintMode::by_structure(UnresolvedConstraints::Unknown),
                 )?;
                 return Ok(!matches!(matched, BlanketImplMatch::No));
             }

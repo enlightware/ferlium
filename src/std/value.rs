@@ -3142,11 +3142,13 @@ fn derive_structural_value_impl(
 ) -> Result<Option<TraitImplId>, InternalCompilationError> {
     let ty_data = input_types[0].data();
     if let TypeKind::Named(named) = &*ty_data {
+        // A type with a custom `Value` impl has no other one, even where that impl does not apply.
         let type_def = solver.type_def(named.def);
-        if type_def
-            .attributes
-            .iter()
-            .any(|attribute| attribute.path.0 == ustr(NO_DERIVE_VALUE_ATTRIBUTE))
+        if type_def.has_custom_value_impl
+            || type_def
+                .attributes
+                .iter()
+                .any(|attribute| attribute.path.0 == ustr(NO_DERIVE_VALUE_ATTRIBUTE))
         {
             return Ok(None);
         }

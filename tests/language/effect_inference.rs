@@ -3949,29 +3949,6 @@ fn a_custom_value_impl_restricts_an_inferred_callback_effect() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn an_inapplicable_custom_value_impl_does_not_restrict_effects() {
-    // `Missing` has no impl, so the custom impl does not apply and `Value` is derived.
-    let src = format!(
-        "{RUN_PRELUDE}trait Missing<Self> {{ fn missing(x: Self) -> int; }}\n{}\
-         fn h(g: () -> int) -> string {{ to_string(Wrap(Cb(g))) }}\n",
-        named_value_impl("Wrap", "T: Missing, T: Run<! E = ()>")
-    );
-    let mut session = TestSession::new();
-    session.allow_unsafe();
-    assert_eq!(
-        signature(&mut session, &src, "h"),
-        "fn h<! e₀>(g: () -> int ! e₀) -> string"
-    );
-    let mut session = TestSession::new();
-    session.allow_unsafe();
-    assert_val_eq!(
-        session.run(&format!("{src}let a = [1];\nh(|| a[0])")),
-        string("Wrap (Cb (<function>))")
-    );
-}
-
-#[test]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn recursive_custom_value_impls_restrict_effects_across_the_cycle() {
     // The restriction is on the far side of the cycle from the call.
     let left = named_value_impl("Left", "Right<T>: Value");
@@ -3991,6 +3968,29 @@ fn recursive_custom_value_impls_restrict_effects_across_the_cycle() {
         let mut session = TestSession::new();
         session.allow_unsafe();
         session.fail_compilation(&format!("{src}f(|| idiv(1, 0))"));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_failing_prerequisite_fails_a_cycle_of_custom_value_impls_with_an_inferred_effect() {
+    // The callback's effect is inferred, so the impls are first selected by structure.
+    let left = named_value_impl("Left", "Right<T>: Value");
+    let right = named_value_impl("Right", "T: Missing, Left<T>: Value");
+    let f = "fn f(g: () -> int) -> string { to_string(Left(Cb(g))) }\n";
+    for [first, second] in [[&left, &right], [&right, &left]] {
+        let src = format!(
+            "{RUN_PRELUDE}trait Missing<Self> {{ fn missing(x: Self) -> int; }}\n\
+             {first}{second}{f}"
+        );
+        let mut session = TestSession::new();
+        session.allow_unsafe();
+        match session.fail_compilation(&src).into_inner() {
+            CompilationErrorImpl::TraitImplNotFound { trait_ref, .. } => {
+                assert_eq!(trait_ref, "Value")
+            }
+            other => panic!("expected no Value impl, got {other:?}"),
+        }
     }
 }
 
