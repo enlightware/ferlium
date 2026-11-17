@@ -9,11 +9,11 @@ use std::{
 use crate::{
     CompilationError, DiagnosticSeverity, Location, SourceId,
     compiler::error::{
-        CompilationErrorImpl, ImportKind, InfiniteTypeKind, InvalidRecordFieldContext,
-        MutabilityMustBeContext, MutabilityMustBeWhat, ORPHAN_RULE_HINT, PRIVATE_IMPL_HINT,
-        PRIVATE_NAME_HINT, WhatIsNotAProductType, WhichProductTypeIsNot, effect_arguments_message,
-        format_output_effect_mismatches, impl_effect_restriction_message, overlap_effects_hint,
-        undeclared_requirement_message,
+        CompilationErrorImpl, FieldAccessSite, ImportKind, InfiniteTypeKind,
+        InvalidRecordFieldContext, MutabilityMustBeContext, MutabilityMustBeWhat, ORPHAN_RULE_HINT,
+        PRIVATE_IMPL_HINT, PRIVATE_NAME_HINT, WhatIsNotAProductType, WhichProductTypeIsNot,
+        effect_arguments_message, format_output_effect_mismatches, impl_effect_restriction_message,
+        overlap_effects_hint, undeclared_requirement_message,
     },
     parser::location::SourceTable,
     types::effects::NamedEffectRow,
@@ -88,6 +88,15 @@ pub struct CompilationReport {
 impl Display for ErrorData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.text)
+    }
+}
+
+/// The message `text` of an error on a field, saying so when a generic function that the error's
+/// location uses reads the field.
+fn with_required_by(text: String, site: &FieldAccessSite) -> String {
+    match site {
+        FieldAccessSite::Access { .. } => text,
+        FieldAccessSite::RequiredBy(_) => format!("{text} (required by this use)"),
     }
 }
 
@@ -465,44 +474,46 @@ pub(super) fn compilation_error_to_data(
             ]
         }
         InvalidRecordField {
-            field_span,
+            field,
             record_ty,
+            site,
             ctx,
-            ..
         } => {
-            let field_name = fmt_span(field_span);
             let text = match ctx {
                 InvalidRecordFieldContext::StructuralField => {
-                    format!("Field `{field_name}` not found in record `{record_ty}`")
+                    format!("Field `{field}` not found in record `{record_ty}`")
                 }
                 InvalidRecordFieldContext::ProjectionFallback => {
-                    format!(
-                        "No projection or structural field `{field_name}` found for `{record_ty}`"
-                    )
+                    format!("No projection or structural field `{field}` found for `{record_ty}`")
                 }
             };
-            vec![error_data_from_location(field_span, text)]
+            vec![error_data_from_location(
+                &site.span(),
+                with_required_by(text, site),
+            )]
         }
         InvalidRecordFieldAccess {
-            field_span,
+            field,
             record_ty,
+            site,
             ctx,
-            ..
         } => {
-            let field_name = fmt_span(field_span);
             let text = match ctx {
                 InvalidRecordFieldContext::StructuralField => {
                     format!(
-                        "Expected record because of `.{field_name}`, but `{record_ty}` was provided instead"
+                        "Expected record because of `.{field}`, but `{record_ty}` was provided instead"
                     )
                 }
                 InvalidRecordFieldContext::ProjectionFallback => {
                     format!(
-                        "No projection `.{field_name}` found for `{record_ty}`, and structural field lookup requires a record"
+                        "No projection `.{field}` found for `{record_ty}`, and structural field lookup requires a record"
                     )
                 }
             };
-            vec![error_data_from_location(field_span, text)]
+            vec![error_data_from_location(
+                &site.span(),
+                with_required_by(text, site),
+            )]
         }
         InvalidVariantName { name, ty, valid } => {
             let name_text = fmt_span(name);

@@ -25,8 +25,8 @@ use super::{
 use crate::{
     FxHashMap, FxHashSet,
     compiler::error::{
-        ADTAccessType, InfiniteTypeKind, InternalCompilationError, InvalidRecordFieldContext,
-        MutabilityMustBeContext, MutabilityMustBeWhat,
+        ADTAccessType, FieldAccessSite, InfiniteTypeKind, InternalCompilationError,
+        InvalidRecordFieldContext, MutabilityMustBeContext, MutabilityMustBeWhat,
     },
     hir::{NodeArena, value::LiteralValue},
     internal_compilation_error,
@@ -1319,9 +1319,8 @@ impl UnifiedTypeInference {
     fn structural_projection_subscript_type(
         &mut self,
         receiver_ty: Type,
-        receiver_span: Location,
         field: Ustr,
-        field_span: Location,
+        site: FieldAccessSite,
         ctx: InvalidRecordFieldContext,
         trait_solver: &mut TraitSolver<'_>,
     ) -> Result<Option<SubscriptType>, InternalCompilationError> {
@@ -1334,14 +1333,14 @@ impl UnifiedTypeInference {
                 .find_map(|(name, ty)| (*name == field).then_some(*ty))
                 .ok_or_else(|| {
                     internal_compilation_error!(InvalidRecordField {
-                        field_span,
+                        field,
                         record_ty: receiver_ty,
-                        record_span: receiver_span,
+                        site,
                         ctx: InvalidRecordFieldContext::StructuralField,
                     })
                 })?,
             TypeKind::Named(named) => {
-                trait_solver.reject_inaccessible_private_repr(named.def, field_span)?;
+                trait_solver.reject_inaccessible_private_repr(named.def, site.span())?;
                 let shape = trait_solver
                     .type_def(named.def)
                     .instantiated_shape_with_effects(&named.params, &named.effect_params);
@@ -1355,18 +1354,18 @@ impl UnifiedTypeInference {
                     })
                     .ok_or_else(|| {
                         internal_compilation_error!(InvalidRecordField {
-                            field_span,
+                            field,
                             record_ty: receiver_ty,
-                            record_span: receiver_span,
+                            site,
                             ctx,
                         })
                     })?
             }
             _ => {
                 return Err(internal_compilation_error!(InvalidRecordFieldAccess {
+                    field,
                     record_ty: receiver_ty,
-                    record_span: receiver_span,
-                    field_span,
+                    site,
                     ctx,
                 }));
             }
@@ -2493,11 +2492,20 @@ impl UnifiedTypeInference {
                 } else {
                     InvalidRecordFieldContext::StructuralField
                 };
+                // A requirement instantiated at a use reads its field in the generic function
+                // that the use instantiates, whose source this use does not show.
+                let site = if field_span.use_site == field_span.def_site {
+                    FieldAccessSite::Access {
+                        field_span: field_span.use_site,
+                        record_span: receiver_span.use_site,
+                    }
+                } else {
+                    FieldAccessSite::RequiredBy(field_span.use_site)
+                };
                 self.structural_projection_subscript_type(
                     receiver_ty,
-                    receiver_span.use_site,
                     *field,
-                    field_span.use_site,
+                    site,
                     ctx,
                     trait_solver,
                 )?

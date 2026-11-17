@@ -133,6 +133,13 @@ impl TraitAssociatedConst {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraitDefaultMethod {
     pub function: FunctionId,
+    /// Whether the default needs evidence beyond the trait's contract: the `Value` of its types,
+    /// or their fields. Computed once its requirements are reduced.
+    ///
+    /// Invariant: a completion that passes only the trait's own evidence, as for native and
+    /// compiler-generated implementations, uses only a default for which this is false. Source
+    /// implementations solve the default's requirements as any call does, so they may use any.
+    pub requires_extra_evidence: bool,
 }
 
 /// The attribute that restricts the impls of a trait to its module.

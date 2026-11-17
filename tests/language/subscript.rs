@@ -6,9 +6,9 @@ use ferlium::{
     SourceId,
     ast::{ModuleDisplay, PExprKind, SubscriptMemberMode},
     compiler::error::{
-        CompilationErrorImpl, InvalidRecordFieldContext, InvalidSubscriptDefinitionKind,
-        InvalidYieldKind, MutabilityMustBeWhat, SourceFailureKind, SubscriptDefinitionSubject,
-        UnsupportedSubscriptFeatureKind,
+        CompilationErrorImpl, FieldAccessSite, InvalidRecordFieldContext,
+        InvalidSubscriptDefinitionKind, InvalidYieldKind, MutabilityMustBeWhat, SourceFailureKind,
+        SubscriptDefinitionSubject, UnsupportedSubscriptFeatureKind,
     },
     format::FormatWith,
     hir::{ENodeArena, ENodeId, NodeKind},
@@ -1418,6 +1418,28 @@ fn projection_fallback_on_missing_record_field_reports_projection_context() {
         "# },
         InvalidRecordFieldContext::ProjectionFallback,
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_missing_field_that_a_generic_function_reads_is_reported_at_its_call() {
+    // The field is read in `mass_of`: the error names it, at the call that needs it.
+    let src = indoc! { r#"
+        fn mass_of<T>(x: T) -> int where nothing { x.mass }
+        struct Feather { grams: int }
+        mass_of(Feather { grams: 12 })
+    "# };
+    match TestSession::new().fail_compilation(src).into_inner() {
+        CompilationErrorImpl::InvalidRecordField {
+            field,
+            site: FieldAccessSite::RequiredBy(span),
+            ..
+        } => {
+            assert_eq!(field, "mass");
+            assert_eq!(span.start_usize(), src.rfind("mass_of").unwrap());
+        }
+        other => panic!("expected a missing field at the call, got {other:?}"),
+    }
 }
 
 #[test]

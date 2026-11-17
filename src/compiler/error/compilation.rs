@@ -1058,6 +1058,29 @@ pub enum InvalidRecordFieldContext {
     ProjectionFallback,
 }
 
+/// Where a field is read that a type does not have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldAccessSite {
+    /// In the code being checked: the field name and the expression that it is read on.
+    Access {
+        field_span: Location,
+        record_span: Location,
+    },
+    /// In a generic function, whose requirement of the field this use instantiates: a call, or
+    /// an implementation that keeps a default method.
+    RequiredBy(Location),
+}
+
+impl FieldAccessSite {
+    /// The location to report the error at.
+    pub fn span(&self) -> Location {
+        match self {
+            Self::Access { field_span, .. } => *field_span,
+            Self::RequiredBy(span) => *span,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvalidLoopControlKind {
     OutsideLoop,
@@ -1277,15 +1300,15 @@ pub enum CompilationErrorImpl<S: Scope> {
         ctx: DuplicatedFieldContext,
     },
     InvalidRecordField {
-        field_span: Location,
+        field: Ustr,
         record_ty: S::Type,
-        record_span: Location,
+        site: FieldAccessSite,
         ctx: InvalidRecordFieldContext,
     },
     InvalidRecordFieldAccess {
-        field_span: Location,
+        field: Ustr,
         record_ty: S::Type,
-        record_span: Location,
+        site: FieldAccessSite,
         ctx: InvalidRecordFieldContext,
     },
     InvalidVariantName {
@@ -2107,12 +2130,18 @@ impl FormatWith<SourceTable> for CompilationError {
                 )
             }
             InvalidRecordField {
-                field_span,
+                field,
                 record_ty,
-                record_span,
+                site,
                 ctx,
-            } => match ctx {
-                InvalidRecordFieldContext::StructuralField => {
+            } => match (site, ctx) {
+                (
+                    FieldAccessSite::Access {
+                        field_span,
+                        record_span,
+                    },
+                    InvalidRecordFieldContext::StructuralField,
+                ) => {
                     write!(
                         f,
                         "Field {} not found in record {} of type `{}`",
@@ -2121,7 +2150,13 @@ impl FormatWith<SourceTable> for CompilationError {
                         record_ty,
                     )
                 }
-                InvalidRecordFieldContext::ProjectionFallback => {
+                (
+                    FieldAccessSite::Access {
+                        field_span,
+                        record_span,
+                    },
+                    InvalidRecordFieldContext::ProjectionFallback,
+                ) => {
                     write!(
                         f,
                         "No projection or structural field {} found for {} of type `{}`",
@@ -2130,14 +2165,37 @@ impl FormatWith<SourceTable> for CompilationError {
                         record_ty,
                     )
                 }
+                (FieldAccessSite::RequiredBy(span), InvalidRecordFieldContext::StructuralField) => {
+                    write!(
+                        f,
+                        "Field `{field}` not found in record type `{record_ty}` (required by {})",
+                        fmt_span(span),
+                    )
+                }
+                (
+                    FieldAccessSite::RequiredBy(span),
+                    InvalidRecordFieldContext::ProjectionFallback,
+                ) => {
+                    write!(
+                        f,
+                        "No projection or structural field `{field}` found for type `{record_ty}` (required by {})",
+                        fmt_span(span),
+                    )
+                }
             },
             InvalidRecordFieldAccess {
-                field_span,
+                field,
                 record_ty,
-                record_span,
+                site,
                 ctx,
-            } => match ctx {
-                InvalidRecordFieldContext::StructuralField => {
+            } => match (site, ctx) {
+                (
+                    FieldAccessSite::Access {
+                        field_span,
+                        record_span,
+                    },
+                    InvalidRecordFieldContext::StructuralField,
+                ) => {
                     write!(
                         f,
                         "Expected record due to {}, got `{}` in {}",
@@ -2146,13 +2204,36 @@ impl FormatWith<SourceTable> for CompilationError {
                         fmt_span(record_span)
                     )
                 }
-                InvalidRecordFieldContext::ProjectionFallback => {
+                (
+                    FieldAccessSite::Access {
+                        field_span,
+                        record_span,
+                    },
+                    InvalidRecordFieldContext::ProjectionFallback,
+                ) => {
                     write!(
                         f,
                         "No projection field {} found for type `{}`, and structural field lookup in {} requires a record",
                         fmt_span(field_span),
                         record_ty,
                         fmt_span(record_span)
+                    )
+                }
+                (FieldAccessSite::RequiredBy(span), InvalidRecordFieldContext::StructuralField) => {
+                    write!(
+                        f,
+                        "Expected record due to field `{field}`, got `{record_ty}` (required by {})",
+                        fmt_span(span),
+                    )
+                }
+                (
+                    FieldAccessSite::RequiredBy(span),
+                    InvalidRecordFieldContext::ProjectionFallback,
+                ) => {
+                    write!(
+                        f,
+                        "No projection field `{field}` found for type `{record_ty}`, and structural field lookup requires a record (required by {})",
+                        fmt_span(span),
                     )
                 }
             },
@@ -3089,25 +3170,25 @@ impl CompilationError {
                 ctx,
             }),
             InvalidRecordField {
-                field_span,
+                field,
                 record_ty,
-                record_span,
+                site,
                 ctx,
             } => compilation_error!(InvalidRecordField {
-                field_span,
+                field,
                 record_ty: record_ty.format_with(env).to_string(),
-                record_span,
+                site,
                 ctx,
             }),
             InvalidRecordFieldAccess {
-                field_span,
+                field,
                 record_ty,
-                record_span,
+                site,
                 ctx,
             } => compilation_error!(InvalidRecordFieldAccess {
-                field_span,
+                field,
                 record_ty: record_ty.format_with(env).to_string(),
-                record_span,
+                site,
                 ctx,
             }),
             InvalidVariantName { name, ty, .. } => compilation_error!(InvalidVariantName {

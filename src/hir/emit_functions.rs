@@ -17,9 +17,9 @@ use crate::{
         diagnostics::CompilationWarning,
         error::{
             AttributeTarget, CompilationErrorImpl, GenericParamsOwner, InternalCompilationError,
-            InvalidAttributeKind, InvalidGenericParamsKind, InvalidSubscriptDefinitionKind,
-            InvalidTraitDefinitionKind, MissingRequirement, SubscriptDefinitionSubject,
-            UnsafeFeature, UnsupportedSubscriptFeatureKind,
+            InvalidAttributeKind, InvalidDefaultMethodKind, InvalidGenericParamsKind,
+            InvalidSubscriptDefinitionKind, InvalidTraitDefinitionKind, MissingRequirement,
+            SubscriptDefinitionSubject, UnsafeFeature, UnsupportedSubscriptFeatureKind,
         },
         lints::report_needless_returns_in_tail,
     },
@@ -1895,42 +1895,30 @@ fn discovered_shapes<'func>(
     )
 }
 
-/// Checks the inferred body of a default method against the signature that its trait declares
-/// for it, and returns the requirements of its scheme: the declared ones, after those that the
-/// body needs besides.
+/// Checks that the inferred body of a default method keeps the generality of the signature that
+/// its trait declares for it, and returns the requirements of its scheme: those that the body
+/// needs, then the declared ones. The former are reduced to the latter later, as under a
+/// complete clause.
 fn fit_declared_signature(
     declared: &TypeScheme<FnType>,
     mut constraints: Vec<PubTypeConstraint>,
     input: EmitFunctionInput<'_>,
     output: &Module,
-    others: &Modules,
     ty_inf: &mut UnifiedTypeInference,
 ) -> Result<Vec<PubTypeConstraint>, InternalCompilationError> {
-    let function = input.function;
-    let checked_constraints = constraints.iter().filter(|constraint| {
-        !is_compiler_provided_value_constraint(constraint, ModuleEnv::new(output, others))
-    });
-    let checked = check_declared_signature(declared, checked_constraints, ty_inf);
-    if let Err((reason, missing)) = checked {
+    if let Err(reason) = check_declared_signature(declared, ty_inf) {
         let (trait_id, index) = input
             .trait_default
             .expect("only a default method has a declared signature");
         let trait_def = output.trait_def(trait_id);
-        let missing_constraint = missing.and_then(|constraint| {
-            let env = ModuleEnv::new(output, others);
-            let scheme = trait_def
-                .default_method_scheme(trait_id, index, env, function.span)
-                .ok()?;
-            missing_requirement(&constraint, trait_def, &scheme, declared, ty_inf, &env)
-        });
         return Err(internal_compilation_error!(InvalidTraitDefinition {
             trait_name: trait_def.name,
             kind: InvalidTraitDefinitionKind::InvalidDefaultMethod {
                 method_name: trait_def.method(index).0,
                 reason,
-                missing_constraint,
+                missing_constraint: None,
             },
-            span: function.span,
+            span: input.function.span,
         }));
     }
     constraints.extend(
@@ -1940,6 +1928,38 @@ fn fit_declared_signature(
             .map(|constraint| ty_inf.substitute_in_constraint(constraint)),
     );
     Ok(constraints.into_iter().unique().collect())
+}
+
+/// The error for a requirement, `missing`, that the body of the default method of `input` needs
+/// and that the contract that its trait declares, `declared`, does not give.
+fn undeclared_default_requirement(
+    missing: &PubTypeConstraint,
+    declared: &TypeScheme<FnType>,
+    input: EmitFunctionInput<'_>,
+    output: &Module,
+    others: &Modules,
+    ty_inf: &mut UnifiedTypeInference,
+) -> InternalCompilationError {
+    let (trait_id, index) = input
+        .trait_default
+        .expect("only a default method has a declared signature");
+    let env = ModuleEnv::new(output, others);
+    let trait_def = env.trait_def(trait_id);
+    let missing_constraint = trait_def
+        .default_method_scheme(trait_id, index, env, input.function.span)
+        .ok()
+        .and_then(|scheme| {
+            missing_requirement(missing, trait_def, &scheme, declared, ty_inf, &env)
+        });
+    internal_compilation_error!(InvalidTraitDefinition {
+        trait_name: trait_def.name,
+        kind: InvalidTraitDefinitionKind::InvalidDefaultMethod {
+            method_name: trait_def.method(index).0,
+            reason: InvalidDefaultMethodKind::UndeclaredConstraint,
+            missing_constraint,
+        },
+        span: input.function.span,
+    })
 }
 
 /// The requirements that function `id` publishes, from those, `constraints`, that its types
@@ -2994,6 +3014,7 @@ where
             output.traits[trait_id.index.as_index()].default_methods[index.as_index()] =
                 Some(TraitDefaultMethod {
                     function: FunctionId::new(output.module_id(), id),
+                    requires_extra_evidence: false,
                 });
             output.name_function_with_visibility(id, name.0, *visibility);
         }
@@ -4892,8 +4913,7 @@ where
 
             let mut constraints = constraints;
             if let Some(declared) = declared {
-                constraints =
-                    fit_declared_signature(declared, constraints, input, output, others, ty_inf)?;
+                constraints = fit_declared_signature(declared, constraints, input, output, ty_inf)?;
                 let declared_ty = ty_inf.substitute_in_fn_type(&declared.ty);
                 output.functions[id.as_index()].definition.ty_scheme.ty = declared_ty;
             }
@@ -5031,6 +5051,7 @@ where
         local_fns,
         function_explicit_root_tys,
         complete_clauses,
+        declared_signatures,
         ..
     } = declarations;
     // Every member of an exported recursive group needs the public leaves of its
@@ -5038,22 +5059,25 @@ where
     // unreduced private requirement. A group that settles has them already.
     let exports_group = group_is_exported(ast_functions());
     let mut published_requirements_changed = false;
-    for (((input, id), explicit_roots), complete) in ast_functions()
+    for ((((input, id), explicit_roots), complete), declared) in ast_functions()
         .zip(local_fns)
         .zip(function_explicit_root_tys)
         .zip(complete_clauses)
+        .zip(declared_signatures)
     {
         // A group that settles has the public form of its requirements already, but for its
         // functions with a complete clause.
-        if input.trait_default.is_some() || (settled && complete.is_none()) {
+        if settled && complete.is_none() {
             continue;
         }
         // A complete clause leaves to the callers what it writes, whether the function is
-        // exported or not.
-        let leaves = match complete {
-            Some(complete) => ReductionLeaves::Written(&complete.leaves),
-            None if exports_group => ReductionLeaves::Public,
-            None => continue,
+        // exported or not, and the contract that its trait declares is complete for a default
+        // method.
+        let leaves = match (complete, declared) {
+            (_, Some(declared)) => ReductionLeaves::Written(&declared.constraints),
+            (Some(complete), None) => ReductionLeaves::Written(&complete.leaves),
+            (None, None) if exports_group => ReductionLeaves::Public,
+            (None, None) => continue,
         };
         let mut scheme = output.functions[id.as_index()].definition.ty_scheme.clone();
         // The implied requirements that the function uses are requirements of the function.
@@ -5064,14 +5088,19 @@ where
                 }
             }
         }
-        let rigid = scheme
-            .ty
-            .args
-            .iter()
-            .map(|arg| arg.ty)
-            .chain(explicit_roots.iter().copied())
-            .collect::<Vec<_>>();
-        let Some(constraints) = reduced_requirements(
+        let rigid =
+            scheme
+                .ty
+                .args
+                .iter()
+                .map(|arg| arg.ty)
+                .chain(explicit_roots.iter().copied())
+                // The variables of the contract that a trait declares for a default method.
+                .chain(declared.iter().flat_map(|declared| {
+                    declared.ty_quantifiers.iter().copied().map(Type::variable)
+                }))
+                .collect::<Vec<_>>();
+        let reduced = reduced_requirements(
             &scheme.constraints,
             &rigid,
             leaves,
@@ -5085,10 +5114,44 @@ where
             associated_lambdas,
             ty_inf,
             solver_arena,
-        )?
-        else {
+        );
+        let reduced = match (reduced, declared) {
+            (Err(error), Some(declared)) => match &*error {
+                CompilationErrorImpl::UndeclaredRequirement { requirement, .. } => {
+                    let requirement = requirement.clone();
+                    return Err(undeclared_default_requirement(
+                        &requirement,
+                        declared,
+                        input,
+                        output,
+                        others,
+                        ty_inf,
+                    ));
+                }
+                _ => return Err(error),
+            },
+            (reduced, _) => reduced?,
+        };
+        let Some(constraints) = reduced else {
             continue;
         };
+        // Beyond its trait's contract, a default method may need from implementations what any
+        // function with a complete clause leaves to its callers: the `Value` of its types and
+        // their structure.
+        if let (Some(declared), Some((trait_id, index))) = (declared, input.trait_default) {
+            let contract = declared
+                .constraints
+                .iter()
+                .map(|constraint| ty_inf.substitute_in_constraint(constraint))
+                .collect::<Vec<_>>();
+            let requires_extra_evidence = constraints
+                .iter()
+                .any(|constraint| !contract.contains(constraint));
+            output.traits[trait_id.index.as_index()].default_methods[index.as_index()]
+                .as_mut()
+                .expect("a default method is registered with its trait")
+                .requires_extra_evidence = requires_extra_evidence;
+        }
         published_requirements_changed = true;
         for function_id in function_and_associated_lambdas(id, associated_lambdas) {
             output.functions[function_id.as_index()]

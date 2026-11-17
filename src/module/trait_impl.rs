@@ -1730,6 +1730,13 @@ fn complete_native_methods(
             // Native defaults currently use their enclosing trait evidence. Source defaults with
             // additional contracts need a registration path that resolves those contracts too.
             assert!(trait_def.parent_constraints.is_empty() && trait_def.constraints.is_empty());
+            assert!(
+                !default.requires_extra_evidence,
+                "a native implementation of `{}` must supply method `{}`: its default needs the \
+                 `Value` or fields of the implementation's types",
+                trait_def.name,
+                trait_def.method(TraitMethodIndex::from_index(index)).0,
+            );
             definition.ty_scheme.constraints = prerequisites.to_vec();
             crate::hir::trait_defaults::native_default_call(
                 default.function,

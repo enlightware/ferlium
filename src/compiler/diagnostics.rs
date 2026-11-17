@@ -8,7 +8,7 @@ use wasm_bindgen::prelude::*;
 use crate::{
     Location, SourceId, SourceTable,
     compiler::{
-        error::{CompilationError, CompilationErrorImpl},
+        error::{CompilationError, CompilationErrorImpl, FieldAccessSite},
         session::{CompilationRevision, SourceVersion},
     },
     format::FormatWith,
@@ -210,7 +210,15 @@ pub(crate) fn diagnostics_from_error(
         | EffectVariablesCombined { span, .. }
         | AmbiguousEffectGeneric { span, .. }
         | RecursiveGroupBodyDoesNotFit { span, .. }
-        | RecursiveGroupDoesNotSettle { span, .. } => vec![*span],
+        | RecursiveGroupDoesNotSettle { span, .. }
+        | InvalidRecordField {
+            site: FieldAccessSite::RequiredBy(span),
+            ..
+        }
+        | InvalidRecordFieldAccess {
+            site: FieldAccessSite::RequiredBy(span),
+            ..
+        } => vec![*span],
         WrongNumberOfEffectArguments {
             expected_span,
             got_span,
@@ -247,13 +255,19 @@ pub(crate) fn diagnostics_from_error(
             ..
         }
         | InvalidRecordField {
-            field_span: expected_span,
-            record_span: got_span,
+            site:
+                FieldAccessSite::Access {
+                    field_span: expected_span,
+                    record_span: got_span,
+                },
             ..
         }
         | InvalidRecordFieldAccess {
-            field_span: expected_span,
-            record_span: got_span,
+            site:
+                FieldAccessSite::Access {
+                    field_span: expected_span,
+                    record_span: got_span,
+                },
             ..
         }
         | InconsistentADT {
