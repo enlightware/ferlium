@@ -1425,3 +1425,21 @@ fn types_of_signatures_are_not_defaulted() {
         );
     }
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn defaulting_a_literal_keeps_a_signature_that_its_output_reaches_generic() {
+    // The signature does not reach the literal's type, which defaults to `int`, but it reaches the
+    // output of `make`, and through `combine` the type of `x`, which stays generic.
+    let src = indoc! { r#"
+        trait Make<T |-> O> { fn make(x: T) -> O; }
+        impl Make for <T = int |-> O = int> { fn make(x) { x } }
+        trait Combine<A, C> { fn combine(a: A, c: C) -> C; }
+        impl Combine for <int, int> { fn combine(a, c) { c } }
+        impl Combine for <int, float> { fn combine(a, c) { c } }
+        fn f(x) { combine(make(1), x + 1) }
+    "# };
+    let mut session = TestSession::new();
+    assert_val_eq!(session.run(&format!("{src}f(2.5)")), float(3.5));
+    assert_val_eq!(session.run(&format!("{src}f(2)")), int(3));
+}

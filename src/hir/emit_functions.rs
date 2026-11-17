@@ -3676,10 +3676,7 @@ where
         head_tys.extend(output_tys.iter().copied());
         let head_quantifiers = collect_ty_vars(&head_tys);
         ty_inf.normalize_remaining_constraints();
-        let head_boundary = ty_inf.constraint_boundary(head_quantifiers.iter().copied());
-        let orphan_constraints =
-            head_boundary.owned_inaccessible_constraints(&ty_inf.linking_constraints());
-        let scope = DefaultingScope::from_constraints(&orphan_constraints);
+        let scope = DefaultingScope::beyond_signature(head_quantifiers);
         let mut solver = trait_solver_from_module!(output, others);
         ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, solver_arena)?;
         ty_inf.finalize_type_bounds(&mut solver, solver_arena)?;
@@ -5571,8 +5568,9 @@ fn function_defaulting_scope(
     sig_ty_vars = sig_ty_vars.into_iter().unique().collect();
     ty_inf.normalize_remaining_constraints();
     let sig_boundary = ty_inf.constraint_boundary(sig_ty_vars.iter().copied());
-    let orphan_constraints =
-        sig_boundary.owned_inaccessible_constraints(&ty_inf.linking_constraints());
+    let has_orphans = !sig_boundary
+        .inaccessible_constraints(&ty_inf.linking_constraints())
+        .is_empty();
     // If the signature still exposes type variables, it defines the boundary for
     // defaulting and body-local `None`/unit evidence must not bias it.
     // Only functions with no remaining signature boundary can use their body root
@@ -5589,8 +5587,12 @@ fn function_defaulting_scope(
     } else {
         Vec::new()
     };
-    DefaultingScope::from_constraints(&orphan_constraints)
-        .with_unit_variant_seed_tys(unit_variant_seed_tys)
+    let scope = if has_orphans {
+        DefaultingScope::beyond_signature(sig_ty_vars)
+    } else {
+        DefaultingScope::default()
+    };
+    scope.with_unit_variant_seed_tys(unit_variant_seed_tys)
 }
 
 /// Reject functions whose published types combine two declared effect variables in one effect.

@@ -129,13 +129,17 @@ impl ConstraintBoundary {
 #[derive(Debug, Clone, Default)]
 pub struct DefaultingScope {
     boundary: ConstraintBoundary,
+    /// Whether the scope is the constraints that `boundary` does not reach, rather than those it
+    /// reaches.
+    beyond_boundary: bool,
     expr_root_ty: Option<Type>,
     unit_variant_seed_tys: Vec<Type>,
 }
 
 impl DefaultingScope {
     pub(crate) fn is_empty(&self) -> bool {
-        self.boundary.seed_ty_vars.is_empty()
+        !self.beyond_boundary
+            && self.boundary.seed_ty_vars.is_empty()
             && self.expr_root_ty.is_none()
             && self.unit_variant_seed_tys.is_empty()
     }
@@ -143,8 +147,18 @@ impl DefaultingScope {
     pub fn from_constraints(constraints: &[PubTypeConstraint]) -> Self {
         Self {
             boundary: ConstraintBoundary::from_constraints(constraints),
-            expr_root_ty: None,
-            unit_variant_seed_tys: Vec::new(),
+            ..Self::default()
+        }
+    }
+
+    /// The constraints that the variables of a signature do not reach, at every round: as a
+    /// constraint reaches its variables only from those that determine them, one that the
+    /// signature does not reach can still hold some of its variables, which must not default.
+    pub fn beyond_signature(sig_ty_vars: impl IntoIterator<Item = TypeVar>) -> Self {
+        Self {
+            boundary: ConstraintBoundary::from_seed_ty_vars(sig_ty_vars),
+            beyond_boundary: true,
+            ..Self::default()
         }
     }
 
@@ -169,7 +183,12 @@ impl DefaultingScope {
             .flat_map(|var| inference.lookup_type_var(*var).inner_ty_vars())
             .collect::<Vec<_>>();
         let boundary = inference.constraint_boundary(seeds);
-        boundary.owned_accessible_constraints(&inference.linking_constraints())
+        let constraints = inference.linking_constraints();
+        if self.beyond_boundary {
+            boundary.owned_inaccessible_constraints(&constraints)
+        } else {
+            boundary.owned_accessible_constraints(&constraints)
+        }
     }
 
     fn unit_default_constraints(
