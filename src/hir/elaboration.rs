@@ -1,6 +1,8 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
+use std::rc::Rc;
+
 use ustr::{Ustr, ustr};
 
 use crate::{
@@ -10,8 +12,8 @@ use crate::{
     hir::{
         borrow_checker::BorrowContext,
         dictionary::{
-            DictElaborationCtx, DictionaryReq, EvidenceBindingSource, LateFunctionInstData,
-            StaticEvidence, instantiate_dictionary_requirements,
+            DictElaborationCtx, DictionaryReq, EvidenceBindingSource, ExtraParameters,
+            LateFunctionInstData, StaticEvidence, instantiate_dictionary_requirements,
         },
         hir_syn::{call_dictionary_function, get_dictionary},
         value_dispatch::{resolve_local_clone, resolve_local_drop},
@@ -19,11 +21,11 @@ use crate::{
     internal_compilation_error,
     module::{
         ELocalDecl, EvidenceBindingId, FunctionId, GeneratedStructuralProjectionSpec, LocalDecl,
-        LocalDeclId, LocalFunctionId, Module, ModuleEnv, ModuleId,
+        LocalDeclId, LocalFunctionId, Module, ModuleEnv, ModuleId, ParentAccessor,
         PendingGeneratedStructuralProjectionSubscripts, PendingLocalClone, PendingLocalDrop,
         PendingModuleFunction, PendingTakeLocalValueMode, ProjectionIndex, ProjectionKey,
         ResolvedLocalClone, ResolvedLocalDrop, ResolvedTakeLocalValueMode, SubscriptId,
-        SubscriptMemberKind, TraitDictionaryId, TraitId,
+        SubscriptMemberKind, TraitDictionaryId, TraitId, TraitImplId,
         generated_structural_projection_definition, id::Id,
     },
     std::core_traits_names::VALUE_TRAIT_NAME,
@@ -547,6 +549,13 @@ fn trait_dictionary_evidence_binding_inner(
 ) -> Result<EvidenceBindingId, InternalCompilationError> {
     if let Some(index) = ctx.dicts.given_trait_impl(trait_id, input_tys) {
         return Ok(EvidenceBindingId::from_index(index));
+    }
+    // A dictionary that the function is given holds the evidence of what its trait implies.
+    // Known types select a dictionary that is static instead.
+    if input_tys.iter().any(|ty| !ty.inner_ty_vars().is_empty())
+        && let Some(binding) = ctx.parent_evidence(trait_id, input_tys)
+    {
+        return Ok(binding);
     }
     let (input_tys, output_tys, output_effs) = default_unquantified_trait_application_effects(
         input_tys,
@@ -1375,6 +1384,132 @@ pub(crate) fn elaborate_hir_with_warnings<'d, 'sr, 'sm>(
             .map(LocalDecl::into_elaborated)
             .collect(),
     })
+}
+
+/// The static form of `binding`, if it is closed over static evidence only: a dictionary that
+/// elaboration builds from static captures, as compiler-provided `Value` dictionaries, is static.
+fn closed_static_evidence(
+    ctx: &DictElaborationCtx<'_, '_, '_>,
+    binding: EvidenceBindingId,
+) -> Option<StaticEvidence> {
+    let binding = &ctx.evidence_bindings[binding.as_index()];
+    match &binding.source {
+        EvidenceBindingSource::Static(evidence) => Some(evidence.clone()),
+        EvidenceBindingSource::ConstructedDictionary {
+            definition,
+            captures,
+        } => {
+            let captures = captures
+                .iter()
+                .map(|capture| closed_static_evidence(ctx, *capture))
+                .collect::<Option<Box<[_]>>>()?;
+            let DictionaryReq::TraitImpl {
+                input_tys,
+                output_tys,
+                ..
+            } = &binding.requirement
+            else {
+                return None;
+            };
+            let ty_args = ctx
+                .trait_solver
+                .get_impl_data_by_id(TraitImplId::new(definition.module_id, definition.impl_id))
+                .ty_args(input_tys, output_tys);
+            Some(StaticEvidence::dictionary(*definition, &ty_args, captures))
+        }
+        EvidenceBindingSource::ConstructedSubscript {
+            definition,
+            captures,
+        } => Some(StaticEvidence::Subscript {
+            definition: *definition,
+            captures: captures
+                .iter()
+                .map(|capture| closed_static_evidence(ctx, *capture))
+                .collect::<Option<Box<[_]>>>()?,
+        }),
+        EvidenceBindingSource::Parameter(_) | EvidenceBindingSource::Parent { .. } => None,
+    }
+}
+
+/// Resolve the parent accessors of the dictionaries of `module` that wait for its
+/// implementations: the static dictionaries of their slots, which selection gives. Dictionaries
+/// that selection generates on the way may have pending accessors of their own, which the next
+/// round resolves; this ends as the dictionaries of slots are of traits defined earlier.
+pub(crate) fn resolve_pending_parent_accessors(
+    module: &mut Module,
+    others: &Modules,
+) -> Result<(), InternalCompilationError> {
+    let mut pending = pending_parent_accessors(module, 0);
+    while !pending.is_empty() {
+        // Selection appends the dictionaries that it generates after the existing ones.
+        let generated_from = module.impls.data.len();
+        let dicts = ExtraParameters::default();
+        let mut pending_functions = FxHashMap::default();
+        let generated_projection_subscripts =
+            PendingGeneratedStructuralProjectionSubscripts::new(module);
+        let mut solver = trait_solver_from_module!(module, others);
+        let mut ctx = DictElaborationCtx::new_with_generated_projection_subscripts(
+            &dicts,
+            None,
+            &mut solver,
+            generated_projection_subscripts,
+        );
+        // Selecting a static dictionary generates no node that the evidence keeps.
+        let mut scratch = UNodeArena::default();
+        let mut resolved = Vec::with_capacity(pending.len());
+        for (index, slot, requirement, span) in pending {
+            let binding =
+                evidence_binding_for_requirement(&mut scratch, &requirement, span, &mut ctx)?;
+            let evidence = closed_static_evidence(&ctx, binding).ok_or_else(|| {
+                internal_compilation_error!(Internal {
+                    error: format!("The parent slot {requirement:?} has no static dictionary"),
+                    span,
+                })
+            })?;
+            resolved.push((index, slot, evidence));
+        }
+        let generated_projection_subscripts = ctx.take_generated_projection_subscripts();
+        let generated = solver.finish().commit(
+            &mut module.functions,
+            &mut module.def_table,
+            &mut pending_functions,
+        );
+        if let Some(generated_projection_subscripts) = generated_projection_subscripts {
+            generated_projection_subscripts.commit(module, others);
+        }
+        elaborate_generated_functions(module, others, &mut pending_functions, generated)?;
+        let impls = Rc::make_mut(&mut module.impls.data);
+        for (index, slot, evidence) in resolved {
+            impls[index].dictionary_value.parents_mut()[slot] = ParentAccessor::Static(evidence);
+        }
+        pending = pending_parent_accessors(module, generated_from);
+    }
+    Ok(())
+}
+
+/// The pending parent accessors of the dictionaries of `module` from index `from`: the
+/// dictionary's index, the slot's, its requirement and where to report an error.
+fn pending_parent_accessors(
+    module: &Module,
+    from: usize,
+) -> Vec<(usize, usize, DictionaryReq, Location)> {
+    module.impls.data[from..]
+        .iter()
+        .enumerate()
+        .flat_map(|(index, imp)| {
+            let span = imp.source_span.unwrap_or_else(Location::new_synthesized);
+            imp.dictionary_value
+                .parents()
+                .iter()
+                .enumerate()
+                .filter_map(move |(slot, parent)| match parent {
+                    ParentAccessor::Pending(requirement) => {
+                        Some((from + index, slot, requirement.clone(), span))
+                    }
+                    ParentAccessor::Capture(_) | ParentAccessor::Static(_) => None,
+                })
+        })
+        .collect()
 }
 
 /// Finalize generated functions returned by trait-solver commits into the final HIR arena.

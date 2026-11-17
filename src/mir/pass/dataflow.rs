@@ -35,7 +35,9 @@ use smallvec::SmallVec;
 use ustr::Ustr;
 
 use crate::{
-    define_id_type, graph,
+    define_id_type,
+    emit_mir::lower_static_evidence,
+    graph,
     hir::{
         function::{ArgConvention, arg_conventions_for_args},
         value::LiteralValue,
@@ -46,7 +48,8 @@ use crate::{
         value::{Constant, ParameterId, StaticEvidence, ValueId, same_literal_representation},
     },
     module::{
-        FunctionId, ModuleEnv, ProjectionIndex, TraitDictionaryEntry, TraitDictionaryId, id::Id,
+        FunctionId, ModuleEnv, ParentAccessor, ProjectionIndex, TraitDictionaryEntry,
+        TraitDictionaryId, id::Id,
     },
     std::math::Int,
     types::{
@@ -1290,32 +1293,110 @@ fn dictionary_entry_of(
     ))
 }
 
+/// The captures of a dictionary known at compile time, borrowed where they are written.
+enum KnownCaptures<'a> {
+    /// The operands of the `build_dictionary` that builds it.
+    Operands(&'a [mir::Value]),
+    /// The captures of its static evidence.
+    Static(Cow<'a, [StaticEvidence]>),
+}
+
+impl<'a> KnownCaptures<'a> {
+    /// Capture `index`, which a known dictionary gives.
+    fn capture(self, index: usize) -> Option<KnownValue<'a>> {
+        Some(match self {
+            Self::Operands(operands) => KnownValue::Operand(operands.get(index)?),
+            Self::Static(Cow::Borrowed(captures)) => {
+                KnownValue::Static(Cow::Borrowed(captures.get(index)?))
+            }
+            Self::Static(Cow::Owned(mut captures)) => {
+                (index < captures.len()).then_some(())?;
+                KnownValue::Static(Cow::Owned(captures.swap_remove(index)))
+            }
+        })
+    }
+
+    /// Capture `index` as an operand.
+    fn value(&self, index: usize) -> Option<mir::Value> {
+        match self {
+            Self::Operands(operands) => operands.get(index).cloned(),
+            Self::Static(captures) => captures
+                .get(index)
+                .map(|capture| mir::Value::Evidence(Box::new(capture.clone()))),
+        }
+    }
+}
+
+/// A value that may be a dictionary known at compile time.
+enum KnownValue<'a> {
+    Operand(&'a mir::Value),
+    Static(Cow<'a, StaticEvidence>),
+}
+
+/// The definition and captures of the dictionary that `value` is, when known at compile time.
 fn dictionary<'a>(
-    value: &mir::Value,
+    value: KnownValue<'a>,
     definition_of: &dyn Fn(mir::ValueId) -> Option<&'a Operation>,
-) -> Option<(TraitDictionaryId, Vec<mir::Value>)> {
-    match value {
-        mir::Value::Dictionary(id) => Some((*id, vec![])),
-        mir::Value::Evidence(evidence) => match &**evidence {
-            StaticEvidence::Dictionary {
+    env: ModuleEnv<'_>,
+) -> Option<(TraitDictionaryId, KnownCaptures<'a>)> {
+    let operand = match value {
+        KnownValue::Operand(operand) => operand,
+        KnownValue::Static(Cow::Borrowed(StaticEvidence::Dictionary {
+            definition,
+            captures,
+            ..
+        })) => return Some((*definition, KnownCaptures::Static(Cow::Borrowed(captures)))),
+        KnownValue::Static(Cow::Owned(StaticEvidence::Dictionary {
+            definition,
+            captures,
+            ..
+        })) => {
+            return Some((
                 definition,
-                captures,
-                ..
-            } => Some((
-                *definition,
-                captures
-                    .iter()
-                    .map(|c| mir::Value::Evidence(Box::new(c.clone())))
-                    .collect(),
-            )),
-            _ => None,
-        },
+                KnownCaptures::Static(Cow::Owned(captures.into_vec())),
+            ));
+        }
+        KnownValue::Static(_) => return None,
+    };
+    match operand {
+        mir::Value::Dictionary(id) => Some((*id, KnownCaptures::Operands(&[]))),
+        mir::Value::Evidence(evidence) => dictionary(
+            KnownValue::Static(Cow::Borrowed(evidence)),
+            definition_of,
+            env,
+        ),
         mir::Value::Register(id) => {
             let operation = definition_of(*id)?;
-            let OperationKind::BuildDictionary { definition, .. } = operation.kind else {
-                return None;
-            };
-            Some((definition, operation.operands.to_vec()))
+            match operation.kind {
+                OperationKind::BuildDictionary { definition, .. } => {
+                    Some((definition, KnownCaptures::Operands(&operation.operands)))
+                }
+                // A parent slot of a known dictionary is what its accessor gives: a capture, or
+                // a static dictionary.
+                OperationKind::DictParent { index, .. } => {
+                    let (holder, captures) = dictionary(
+                        KnownValue::Operand(&operation.operands[0]),
+                        definition_of,
+                        env,
+                    )?;
+                    let parent = env
+                        .module_by_id(holder.module_id)?
+                        .get_impl_data(holder.impl_id)?
+                        .dictionary_value
+                        .parents()
+                        .get(index.as_index())?;
+                    let parent = match parent {
+                        ParentAccessor::Capture(capture) => captures.capture(capture.as_index())?,
+                        ParentAccessor::Pending(_) | ParentAccessor::Static(_) => {
+                            KnownValue::Static(Cow::Owned(lower_static_evidence(
+                                parent.static_evidence()?,
+                            )))
+                        }
+                    };
+                    dictionary(parent, definition_of, env)
+                }
+                _ => None,
+            }
         }
         _ => None,
     }
@@ -1337,14 +1418,21 @@ pub(crate) fn resolve_dictionary_callee<'a>(
     let OperationKind::DictEntry { entry_index, .. } = operation.kind else {
         return None;
     };
-    let (id, captures) = dictionary(&operation.operands[0], definition_of)?;
+    let (id, captures) = dictionary(
+        KnownValue::Operand(&operation.operands[0]),
+        definition_of,
+        env,
+    )?;
     let definition = &env
         .module_by_id(id.module_id)?
         .get_impl_data(id.impl_id)?
         .dictionary_value;
     let TraitDictionaryEntry::Function(function) = definition.entry(entry_index);
-    let captures = definition
-        .project_entry_captures(entry_index, &captures, || operation.operands[0].clone())?;
+    let captures = definition.project_entry_captures_with(
+        entry_index,
+        |capture| captures.value(capture.as_index()),
+        || operation.operands[0].clone(),
+    )?;
     Some((FunctionId::new(id.module_id, function), captures))
 }
 

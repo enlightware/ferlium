@@ -1122,6 +1122,7 @@ fn record_writes(
         | OperationKind::AddressOffset { .. }
         | OperationKind::AddressOffsetPlace { .. }
         | OperationKind::DictEntry { .. }
+        | OperationKind::DictParent { .. }
         | OperationKind::SubscriptMember { .. }
         | OperationKind::BorrowSubscriptMember { .. }
         | OperationKind::Variant { .. }

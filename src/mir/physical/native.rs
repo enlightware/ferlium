@@ -372,6 +372,7 @@ fn operation_types(kind: &OperationKind, types: &mut Vec<Type>) {
         | AddressOffset { ty, .. }
         | DictEntry { ty, .. }
         | BuildDictionary { ty, .. }
+        | DictParent { ty, .. }
         | SubscriptMember { ty, .. }
         | BuildSubscriptEvidence { ty }
         | BuildSubscript { ty }

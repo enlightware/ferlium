@@ -7,7 +7,7 @@ use rustc_hash::FxHashMap;
 
 use crate::{
     containers::b,
-    emit_mir::static_dictionary_type,
+    emit_mir::{lower_static_evidence, static_dictionary_type},
     hir::value::LiteralValue,
     mir::{
         self, BlockId, Function, Operation, OperationKind,
@@ -16,7 +16,8 @@ use crate::{
         terminator::{Terminator, TerminatorKind},
         value::{StaticEvidence, ValueId},
     },
-    module::ModuleEnv,
+    module::{ModuleEnv, ParentAccessor, TraitDictionaryId, id::Id},
+    types::r#trait::TraitParentSlotIndex,
 };
 
 struct BoolStore {
@@ -161,6 +162,85 @@ fn single_bool_store(func: &Function, block: BlockId) -> Option<BoolStore> {
     })
 }
 
+/// The accessor of parent slot `index` of the dictionaries of `definition`.
+fn parent_accessor<'e>(
+    env: ModuleEnv<'e>,
+    definition: TraitDictionaryId,
+    index: TraitParentSlotIndex,
+) -> Option<&'e ParentAccessor> {
+    env.module_by_id(definition.module_id)?
+        .get_impl_data(definition.impl_id)?
+        .dictionary_value
+        .parents()
+        .get(index.as_index())
+}
+
+/// A parent slot that [`known_parent`] resolves.
+enum KnownParent {
+    /// Static evidence.
+    Static(StaticEvidence),
+    /// An operand of the construction of the dictionary, not yet known to be static.
+    Operand(mir::Value),
+}
+
+/// Parent slot `index` of `dictionary`, when its definition is known: from static evidence (as
+/// a register that [`close_static_dictionaries`] closed, or as an operand), or from a
+/// construction. Only the slot is copied.
+fn known_parent(
+    dictionary: &mir::Value,
+    index: TraitParentSlotIndex,
+    closed: &FxHashMap<ValueId, StaticEvidence>,
+    constructions: &FxHashMap<ValueId, &Operation>,
+    env: ModuleEnv<'_>,
+) -> Option<KnownParent> {
+    /// Where the captures of the dictionary are.
+    enum Captures<'a> {
+        Static(&'a [StaticEvidence]),
+        Operands(&'a [mir::Value]),
+    }
+    fn static_captures(evidence: &StaticEvidence) -> Option<(TraitDictionaryId, Captures<'_>)> {
+        match evidence {
+            StaticEvidence::Dictionary {
+                definition,
+                captures,
+                ..
+            } => Some((*definition, Captures::Static(captures))),
+            _ => None,
+        }
+    }
+    let (definition, captures) = match dictionary {
+        mir::Value::Register(id) => match closed.get(id) {
+            Some(evidence) => static_captures(evidence)?,
+            None => {
+                let construction = constructions.get(id)?;
+                let OperationKind::BuildDictionary { definition, .. } = construction.kind else {
+                    return None;
+                };
+                (definition, Captures::Operands(&construction.operands))
+            }
+        },
+        mir::Value::Evidence(evidence) => static_captures(evidence)?,
+        mir::Value::Dictionary(definition) => (*definition, Captures::Static(&[])),
+        _ => return None,
+    };
+    Some(match parent_accessor(env, definition, index)? {
+        ParentAccessor::Capture(capture) => match captures {
+            Captures::Static(captures) => {
+                KnownParent::Static(captures.get(capture.as_index())?.clone())
+            }
+            Captures::Operands(operands) => match operands.get(capture.as_index())? {
+                mir::Value::Register(id) if closed.contains_key(id) => {
+                    KnownParent::Static(closed[id].clone())
+                }
+                operand => KnownParent::Operand(operand.clone()),
+            },
+        },
+        parent @ (ParentAccessor::Pending(_) | ParentAccessor::Static(_)) => KnownParent::Static(
+            lower_static_evidence(parent.static_evidence().expect("a static parent accessor")),
+        ),
+    })
+}
+
 /// Replaces each dictionary closed over static evidence only by that static evidence.
 ///
 /// Inlining binds a callee's dictionary parameters to the caller's evidence, so a
@@ -169,15 +249,26 @@ fn single_bool_store(func: &Function, block: BlockId) -> Option<BoolStore> {
 /// register, its entries are opaque to devirtualization; as static evidence, they resolve to
 /// direct calls carrying their captures, which specialization and inlining then reach. Nested
 /// closures resolve to a fixpoint, since a capture may itself be such a register.
+///
+/// A parent slot read from static evidence or from a dictionary built here follows the parent
+/// accessor of its definition: a capture is that evidence's capture or that construction's
+/// operand, a static parent is its static dictionary.
 pub(crate) fn close_static_dictionaries(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
     let mut closed: FxHashMap<ValueId, StaticEvidence> = FxHashMap::default();
+    let mut forwarded: FxHashMap<ValueId, mir::Value> = FxHashMap::default();
     let static_operand =
         |closed: &FxHashMap<ValueId, StaticEvidence>, operand: &mir::Value| match operand {
             mir::Value::Register(id) => closed.get(id).cloned(),
             _ => static_evidence_operand(operand, env),
         };
+    let constructions = func
+        .blocks()
+        .flat_map(|id| func.block(id).operations())
+        .filter(|op| matches!(op.kind, OperationKind::BuildDictionary { .. }))
+        .filter_map(|op| op.result_id().map(|id| (id, op)))
+        .collect::<FxHashMap<_, _>>();
     loop {
-        let found = closed.len();
+        let found = closed.len() + forwarded.len();
         for operation in func.blocks().flat_map(|block| {
             let block = func.block(block);
             block
@@ -188,6 +279,26 @@ pub(crate) fn close_static_dictionaries(func: &Function, env: ModuleEnv<'_>) -> 
                     _ => None,
                 })
         }) {
+            if let OperationKind::DictParent { index, .. } = operation.kind
+                && let Some(result) = operation.result_id()
+                && !closed.contains_key(&result)
+                && !forwarded.contains_key(&result)
+            {
+                let dictionary = match &operation.operands[0] {
+                    mir::Value::Register(id) => forwarded.get(id).unwrap_or(&operation.operands[0]),
+                    operand => operand,
+                };
+                match known_parent(dictionary, index, &closed, &constructions, env) {
+                    Some(KnownParent::Static(evidence)) => {
+                        closed.insert(result, evidence);
+                    }
+                    Some(KnownParent::Operand(operand)) => {
+                        forwarded.insert(result, operand);
+                    }
+                    None => {}
+                }
+                continue;
+            }
             let OperationKind::BuildDictionary { definition, ty } = operation.kind else {
                 continue;
             };
@@ -220,7 +331,7 @@ pub(crate) fn close_static_dictionaries(func: &Function, env: ModuleEnv<'_>) -> 
                 StaticEvidence::dictionary(definition, &ty_args, captures),
             );
         }
-        if closed.len() == found {
+        if closed.len() + forwarded.len() == found {
             break;
         }
     }
@@ -230,7 +341,7 @@ pub(crate) fn close_static_dictionaries(func: &Function, env: ModuleEnv<'_>) -> 
         .flat_map(|id| func.block(id).operations())
         .filter_map(|op| op.result_id().map(|id| (id, op)))
         .collect::<FxHashMap<_, _>>();
-    let mut changed = !closed.is_empty();
+    let mut changed = !closed.is_empty() || !forwarded.is_empty();
     for block in edit.blocks().collect::<Vec<_>>() {
         let block_data = edit.block_mut(block);
         for operation in
@@ -263,16 +374,32 @@ pub(crate) fn close_static_dictionaries(func: &Function, env: ModuleEnv<'_>) -> 
             }
         }
         edit.block_mut(block).operations.retain(|operation| {
-            operation
-                .result_id()
-                .is_none_or(|result| !closed.contains_key(&result))
+            operation.result_id().is_none_or(|result| {
+                !closed.contains_key(&result) && !forwarded.contains_key(&result)
+            })
         });
     }
-    edit.visit_operands_mut(|operand| {
-        if let mir::Value::Register(id) = operand
-            && let Some(evidence) = closed.get(id)
+    // A forwarded parent may itself read a forwarded or closed one.
+    let resolve = |mut value: mir::Value| {
+        while let mir::Value::Register(id) = value
+            && let Some(next) = forwarded.get(&id)
         {
-            *operand = mir::Value::Evidence(b(evidence.clone()));
+            value = next.clone();
+        }
+        match value {
+            mir::Value::Register(id) if closed.contains_key(&id) => {
+                mir::Value::Evidence(b(closed[&id].clone()))
+            }
+            value => value,
+        }
+    };
+    edit.visit_operands_mut(|operand| {
+        if let mir::Value::Register(id) = operand {
+            if let Some(evidence) = closed.get(id) {
+                *operand = mir::Value::Evidence(b(evidence.clone()));
+            } else if forwarded.contains_key(id) {
+                *operand = resolve(operand.clone());
+            }
         }
     });
     changed.then(|| edit.finish(env))

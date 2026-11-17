@@ -128,6 +128,7 @@ fn declared_outputs_follow_from_inputs(imp: &TraitImpl) -> bool {
 fn blanket_dictionary(
     trait_id: TraitId,
     input_tys: &[Type],
+    parents: Vec<DictionaryReq>,
     methods: &[LocalFunctionId],
     associated_const_getters: &[LocalFunctionId],
     requirements: &[BlanketMethodRequirements],
@@ -144,6 +145,7 @@ fn blanket_dictionary(
         capture_schema,
         entry_capture_mappings,
     )
+    .with_parents(parents)
 }
 
 pub(super) fn materialized_associated_const_values(
@@ -309,7 +311,9 @@ impl<'a> TraitSolver<'a> {
             |index| associated_const_names[index],
         );
         let dictionary_ty = TraitImpls::dictionary_ty(tys, associated_const_tys);
-        let dictionary_value = build_dictionary_value(&methods, &associated_const_getters);
+        let parents = self.parent_slots(trait_id, input_types, output_types, output_effs);
+        let dictionary_value =
+            build_dictionary_value(&methods, &associated_const_getters).with_parents(parents);
         let imp = TraitImpl::new(
             trait_id,
             input_types.to_vec(),
@@ -994,9 +998,11 @@ impl<'a> TraitSolver<'a> {
                     |index| associated_const_names[index],
                 );
             let dictionary_ty = TraitImpls::dictionary_ty(tys, associated_const_tys);
+            let parents = self.parent_slots(trait_id, input_tys, &output_tys, &output_effs);
             let dictionary_value = blanket_dictionary(
                 trait_id,
                 input_tys,
+                parents,
                 &methods,
                 &associated_const_getters,
                 &method_requirements,
@@ -1146,10 +1152,12 @@ impl<'a> TraitSolver<'a> {
         let associated_const_getters = self.impls.data[local_impl_id.as_index()]
             .associated_const_getters
             .clone();
+        let parents = self.parent_slots(trait_id, input_tys, &output_tys, &output_effs);
         Rc::make_mut(&mut self.impls.data)[local_impl_id.as_index()].dictionary_value =
             blanket_dictionary(
                 trait_id,
                 input_tys,
+                parents,
                 &methods,
                 &associated_const_getters,
                 &method_requirements,

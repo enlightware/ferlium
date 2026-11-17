@@ -22,6 +22,7 @@ use crate::{
     CompilerSession, Location,
     compiler::MirOptimization,
     containers::b,
+    emit_mir::lower_static_evidence,
     eval::{EvalCtx, PlaceResult, RuntimeError, ValOrMut, ValueRef, buffer},
     execution::ReferenceInterpreterLimits,
     hir::{
@@ -37,8 +38,8 @@ use crate::{
         terminator::TerminatorKind, value::StaticEvidence,
     },
     module::{
-        FunctionId, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, TraitDictionaryEntry,
-        id::Id,
+        FunctionId, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, ParentAccessor,
+        TraitDictionaryEntry, id::Id,
     },
     place::Place,
     std::{
@@ -876,6 +877,24 @@ impl<'a> Interpreter<'a> {
                         captures,
                     }),
                 );
+            }
+            OperationKind::DictParent { index, .. } => {
+                let dictionary = self
+                    .try_dict_operand(slots, &operation.operands[0])
+                    .expect("dict_parent reads a trait dictionary");
+                let parent =
+                    match &self.ctx.dictionary_value(&dictionary).parents()[index.as_index()] {
+                        ParentAccessor::Capture(capture) => {
+                            dictionary.captures[capture.as_index()].clone()
+                        }
+                        parent => static_evidence_value(&lower_static_evidence(
+                            parent.static_evidence().expect("a static parent accessor"),
+                        )),
+                    };
+                let HiddenEvidenceArgValue::TraitDictionary(parent) = parent else {
+                    panic!("a parent slot holds a trait dictionary");
+                };
+                Self::bind(slots, def.unwrap(), Binding::Dictionary(parent));
             }
             OperationKind::SubscriptMember { mut_member, .. } => {
                 self.exec_subscript_member(

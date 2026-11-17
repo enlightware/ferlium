@@ -71,7 +71,7 @@ fn a_complete_clause_refuses_a_requirement_for_its_callers() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn a_complete_clause_accepts_what_it_implies_and_publishes_what_is_used() {
+fn a_complete_clause_accepts_what_it_implies_and_publishes_what_it_writes() {
     let src = indoc! { r#"
         fn twice<T>(x: T) -> T where T: Real { x + x }
         fn same<T>(x: T) -> T where T: Real, T: Value { x }
@@ -80,15 +80,26 @@ fn a_complete_clause_accepts_what_it_implies_and_publishes_what_is_used() {
         TestSession::new().run(&format!("{src}(twice(1.5), same(2.5))")),
         expected_tuple([3.0, 2.5].map(crate::harness::float))
     );
-    // `Real: Div: Num`: the body that adds publishes `T: Num`, the other does not.
+    // `Real: Div: Num`: the body that adds reads `Num` from the dictionary of `Real`.
     assert_eq!(
         signature(&mut TestSession::new(), src, "twice"),
-        "fn twice<T>(x: T) -> T where T: Num + Real"
+        "fn twice<T>(x: T) -> T where T: Real"
     );
     assert_eq!(
         signature(&mut TestSession::new(), src, "same"),
         "fn same<T>(x: T) -> T where T: Real + Value"
     );
+    // A parent that leaves an output to the implementations has no slot: it is published when
+    // the body uses it, as the dictionary of the written requirement does not hold it.
+    let src = indoc! { r#"
+        trait Act<Self |-> ! E> { fn act(x: Self) -> int ! E; }
+        trait Named<Self>: Act<Self> {}
+        impl Act for <Self = int |-> ! E = ()> { fn act(x: int) -> int { x } }
+        impl Named for int {}
+        fn run<T>(x: T) -> int where T: Named { act(x) }
+    "# };
+    assert!(signature(&mut TestSession::new(), src, "run").contains("Act"));
+    assert_val_eq!(TestSession::new().run(&format!("{src}run(7)")), int(7));
 }
 
 /// `Container` implies `Source` at the same item; `W` reaches `Source` through an impl.

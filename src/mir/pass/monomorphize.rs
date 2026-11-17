@@ -1862,6 +1862,7 @@ fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapp
         | OperationKind::BlackBox { ty }
         | OperationKind::DictEntry { ty, .. }
         | OperationKind::BuildDictionary { ty, .. }
+        | OperationKind::DictParent { ty, .. }
         | OperationKind::SubscriptMember { ty, .. }
         | OperationKind::BuildSubscriptEvidence { ty }
         | OperationKind::BuildSubscript { ty }

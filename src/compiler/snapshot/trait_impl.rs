@@ -7,14 +7,14 @@ use ustr::ustr;
 
 use super::{
     SnapshotError, SnapshotLiteral, SnapshotTypeGraphBuilder, SnapshotTypeId,
-    hir::SnapshotDictionaryReq, semantic::SnapshotConstraint,
+    hir::SnapshotDictionaryReq, mir::SnapshotStaticEvidence, semantic::SnapshotConstraint,
 };
 use crate::{
     Location,
     module::{
-        BlanketTraitImplSubKey, ConcreteTraitImplKey, DictionaryEntryEvidence, ImplGenericNames,
-        LocalFunctionId, LocalImplId, ModuleId, TraitId, TraitImpl, TraitImpls,
-        build_dictionary_value, id::Id,
+        BlanketTraitImplSubKey, ConcreteTraitImplKey, DictionaryCaptureIndex,
+        DictionaryEntryEvidence, ImplGenericNames, LocalFunctionId, LocalImplId, ModuleId,
+        ParentAccessor, TraitId, TraitImpl, TraitImpls, build_dictionary_value, id::Id,
     },
     types::{
         effects::{EffType, Effect, EffectVar},
@@ -38,6 +38,14 @@ struct SnapshotBlanketSubKey {
     constraints: Vec<SnapshotConstraint>,
 }
 
+/// A resolved parent accessor of a dictionary.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SnapshotParentAccessor {
+    Capture(DictionaryCaptureIndex),
+    Static(SnapshotStaticEvidence),
+}
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SnapshotTraitImpl {
@@ -50,6 +58,7 @@ struct SnapshotTraitImpl {
     associated_const_getters: Vec<LocalFunctionId>,
     capture_schema: Vec<SnapshotDictionaryReq>,
     entry_capture_mappings: Vec<Vec<DictionaryEntryEvidence>>,
+    parents: Vec<SnapshotParentAccessor>,
     dictionary_ty: SnapshotTypeId,
     public: bool,
     source_span: Option<Location>,
@@ -172,6 +181,22 @@ impl SnapshotTraitImpl {
                 .map(|requirement| SnapshotDictionaryReq::capture(requirement, graph))
                 .collect::<Result<_, _>>()?,
             entry_capture_mappings: value.dictionary_value.entry_capture_mappings().to_vec(),
+            parents: value
+                .dictionary_value
+                .parents()
+                .iter()
+                .map(|parent| {
+                    Ok(match parent {
+                        ParentAccessor::Capture(index) => SnapshotParentAccessor::Capture(*index),
+                        ParentAccessor::Pending(_) | ParentAccessor::Static(_) => {
+                            SnapshotParentAccessor::Static(SnapshotStaticEvidence::capture_hir(
+                                parent.static_evidence().expect("a static parent accessor"),
+                                graph,
+                            )?)
+                        }
+                    })
+                })
+                .collect::<Result<_, SnapshotError>>()?,
             dictionary_ty: graph.capture(value.dictionary_ty)?,
             public: value.public,
             source_span: value.source_span,
@@ -197,13 +222,29 @@ impl SnapshotTraitImpl {
             .map(SnapshotLiteral::materialize)
             .collect::<Result<Vec<_>, _>>()?;
         let dictionary_value =
-            build_dictionary_value(&self.methods, &self.associated_const_getters).with_captures(
-                self.capture_schema
-                    .iter()
-                    .map(|requirement| requirement.materialize(types))
-                    .collect::<Result<_, _>>()?,
-                self.entry_capture_mappings.clone(),
-            );
+            build_dictionary_value(&self.methods, &self.associated_const_getters)
+                .with_captures(
+                    self.capture_schema
+                        .iter()
+                        .map(|requirement| requirement.materialize(types))
+                        .collect::<Result<_, _>>()?,
+                    self.entry_capture_mappings.clone(),
+                )
+                .with_parent_accessors(
+                    self.parents
+                        .iter()
+                        .map(|parent| {
+                            Ok(match parent {
+                                SnapshotParentAccessor::Capture(index) => {
+                                    ParentAccessor::Capture(*index)
+                                }
+                                SnapshotParentAccessor::Static(evidence) => {
+                                    ParentAccessor::Static(evidence.materialize_hir(types)?)
+                                }
+                            })
+                        })
+                        .collect::<Result<_, SnapshotError>>()?,
+                );
         Ok(TraitImpl {
             trait_id: self.trait_id,
             input_tys: live_types(&self.input_tys, types)?,

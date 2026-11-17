@@ -4,10 +4,13 @@
 //! Relocatable trait-dictionary metadata carried by one physical MIR module.
 
 use crate::{
+    emit_mir::lower_static_evidence,
     hir::dictionary::DictionaryReq,
+    mir::value::StaticEvidence,
     module::{
-        DictionaryEntryEvidence, FunctionId, LocalImplId, Module, ModuleEnv, ModuleId,
-        TraitDictionaryEntry, TraitDictionaryId, TraitId, id::Id,
+        DictionaryCaptureIndex, DictionaryEntryEvidence, FunctionId, LocalImplId, Module,
+        ModuleEnv, ModuleId, ParentAccessor, TraitDictionaryEntry, TraitDictionaryId, TraitId,
+        id::Id,
     },
     std::{
         core_traits_names::VALUE_TRAIT_NAME,
@@ -16,7 +19,10 @@ use crate::{
     types::{r#trait::TraitDictionaryEntryIndex, r#type::Type},
 };
 
-use super::{evidence::PhysicalEvidenceReferences, program::ProgramDescriptorId};
+use super::{
+    evidence::{PhysicalEvidenceReferences, try_for_each_static_evidence},
+    program::ProgramDescriptorId,
+};
 use std::{
     alloc::{Layout, LayoutError},
     rc::Rc,
@@ -99,6 +105,15 @@ impl PhysicalDictionaryEntry {
     }
 }
 
+/// How a physical dictionary gives the dictionary of one of its trait's parent slots.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum PhysicalParentAccessor {
+    /// This capture of the dictionary.
+    Capture(DictionaryCaptureIndex),
+    /// A static dictionary, which the program interns with its other static evidence.
+    Static(StaticEvidence),
+}
+
 /// A relocatable dictionary definition owned by one physical MIR module.
 ///
 /// Function and dictionary identities remain module-qualified. Later whole-program assembly may
@@ -113,6 +128,7 @@ pub(crate) struct PhysicalDictionaryDefinition {
     environment: EvidenceEnvironmentLayout,
     layout_entries: Option<[usize; 2]>,
     entries: Box<[PhysicalDictionaryEntry]>,
+    parents: Box<[PhysicalParentAccessor]>,
 }
 
 impl PhysicalDictionaryDefinition {
@@ -146,6 +162,11 @@ impl PhysicalDictionaryDefinition {
 
     pub(crate) fn entries(&self) -> &[PhysicalDictionaryEntry] {
         &self.entries
+    }
+
+    /// The accessors of the parent slots of this dictionary's trait.
+    pub(crate) fn parents(&self) -> &[PhysicalParentAccessor] {
+        &self.parents
     }
 }
 
@@ -215,16 +236,46 @@ impl PhysicalDictionaryCatalog {
                         })
                     }),
                     entries,
+                    parents: dictionary
+                        .parents()
+                        .iter()
+                        .map(|parent| match parent {
+                            ParentAccessor::Capture(index) => {
+                                PhysicalParentAccessor::Capture(*index)
+                            }
+                            ParentAccessor::Pending(_) | ParentAccessor::Static(_) => {
+                                PhysicalParentAccessor::Static(lower_static_evidence(
+                                    parent.static_evidence().expect("a static parent accessor"),
+                                ))
+                            }
+                        })
+                        .collect(),
                 }
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
 
+        // The static parents of a definition are references of its module too.
+        let mut parent_dictionaries = Vec::new();
+        for definition in &definitions {
+            for parent in definition.parents() {
+                if let PhysicalParentAccessor::Static(evidence) = parent {
+                    let _ = try_for_each_static_evidence(evidence, &mut |evidence| {
+                        if let StaticEvidence::Dictionary { definition, .. } = evidence {
+                            parent_dictionaries.push(*definition);
+                        }
+                        Ok::<_, ()>(())
+                    });
+                }
+            }
+        }
         let mut imports = references
             .dictionaries()
+            .chain(parent_dictionaries)
             .filter(|id| id.module_id != module)
             .collect::<Vec<_>>();
         imports.sort_by_key(|id| (id.module_id.as_index(), id.impl_id.as_index()));
+        imports.dedup();
 
         Self {
             module,

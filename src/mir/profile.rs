@@ -129,6 +129,7 @@ impl MirInstructionKind {
                 | Op::AddressOffsetPlace
                 | Op::DictEntry
                 | Op::BuildDictionary
+                | Op::DictParent
                 | Op::SubscriptMember
                 | Op::BuildSubscriptEvidence
                 | Op::BorrowSubscriptMember,

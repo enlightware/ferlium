@@ -33,7 +33,7 @@ use crate::{
     },
     types::{
         effects::{EffType, Effect},
-        r#trait::TraitDictionaryEntryIndex,
+        r#trait::{TraitDictionaryEntryIndex, TraitParentSlotIndex},
         r#type::{BareNativeTypeB, CallImplType, CallResultConvention, FnArgType, FnType, Type},
     },
 };
@@ -327,6 +327,11 @@ enum SnapshotOperationKind {
     },
     BuildDictionary {
         definition: TraitDictionaryId,
+        ty: SnapshotTypeId,
+    },
+    DictParent {
+        trait_id: TraitId,
+        index: TraitParentSlotIndex,
         ty: SnapshotTypeId,
     },
     SubscriptMember {
@@ -1053,6 +1058,15 @@ impl SnapshotOperationKind {
                 definition: *definition,
                 ty: graph.capture(*ty)?,
             },
+            Source::DictParent {
+                trait_id,
+                index,
+                ty,
+            } => Stored::DictParent {
+                trait_id: *trait_id,
+                index: *index,
+                ty: graph.capture(*ty)?,
+            },
             Source::SubscriptMember { mut_member, ty } => Stored::SubscriptMember {
                 mut_member: *mut_member,
                 ty: graph.capture(*ty)?,
@@ -1223,6 +1237,15 @@ impl SnapshotOperationKind {
             },
             Stored::BuildDictionary { definition, ty } => Runtime::BuildDictionary {
                 definition: *definition,
+                ty: resolve_type(types, *ty)?,
+            },
+            Stored::DictParent {
+                trait_id,
+                index,
+                ty,
+            } => Runtime::DictParent {
+                trait_id: *trait_id,
+                index: *index,
                 ty: resolve_type(types, *ty)?,
             },
             Stored::SubscriptMember { mut_member, ty } => Runtime::SubscriptMember {

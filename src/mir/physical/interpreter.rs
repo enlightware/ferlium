@@ -5,7 +5,7 @@
 //! Function storage is prepared on dispatch; every executed access is checked.
 
 use super::{
-    DictionaryReference, EvidenceEnvironmentLayout,
+    DictionaryReference, EvidenceEnvironmentLayout, PhysicalParentAccessor,
     interpreter_memory::{
         Address, CallableReference, Generation, Memory, Scalar, ScalarKind, StoredValue,
     },
@@ -40,6 +40,7 @@ use crate::{
         value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX},
     },
     types::{
+        r#trait::TraitParentSlotIndex,
         r#type::{CallResultConvention, Type, TypeKind},
         type_inference::substitution::InstSubst,
         type_like::TypeLike,
@@ -1153,6 +1154,47 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         )
     }
 
+    /// The dictionary in parent slot `index` of the dictionary `evidence`, as its definition's
+    /// accessor gives it: one of its captures, or a static dictionary.
+    fn dictionary_parent(
+        &self,
+        evidence: Evidence,
+        index: TraitParentSlotIndex,
+    ) -> Result<Evidence, RuntimeError> {
+        let Evidence::Physical { reference, .. } = &evidence else {
+            return Err(invalid("expected a dictionary"));
+        };
+        let parent = self
+            .program
+            .descriptor(
+                reference
+                    .descriptor_id()
+                    .ok_or_else(|| invalid("unresolved dictionary"))?,
+            )
+            .ok_or_else(|| invalid("unresolved dictionary"))?
+            .parents()
+            .get(index.as_index())
+            .ok_or_else(|| invalid("missing parent slot"))?;
+        match parent {
+            PhysicalParentAccessor::Capture(capture) => self
+                .memory
+                .evidence_captures(&evidence)?
+                .get(capture.as_index())
+                .cloned()
+                .ok_or_else(|| invalid("missing parent capture")),
+            PhysicalParentAccessor::Static(static_evidence) => {
+                let id = self
+                    .program
+                    .static_evidence_id(static_evidence)
+                    .ok_or_else(|| invalid("unresolved static parent"))?;
+                self.static_evidence
+                    .get(&id)
+                    .cloned()
+                    .ok_or_else(|| invalid("unprepared static parent"))
+            }
+        }
+    }
+
     fn dictionary_entry(&self, evidence: Evidence, index: usize) -> Result<Callable, RuntimeError> {
         let Evidence::Physical { reference, .. } = &evidence else {
             return Err(invalid("expected a dictionary"));
@@ -1177,7 +1219,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 .iter()
                 .map(|mapping| match mapping {
                     DictionaryEntryEvidence::Capture(index) => captures
-                        .get(*index)
+                        .get(index.as_index())
                         .cloned()
                         .ok_or_else(|| invalid("missing dictionary capture")),
                     DictionaryEntryEvidence::SelfDictionary => Ok(evidence.clone()),
@@ -1248,6 +1290,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             | Call { .. }
             | DictEntry { .. }
             | BuildDictionary { .. }
+            | DictParent { .. }
             | AddressOffset { .. }
             | AddressOffsetPlace { .. }
             | AllocaPlace { .. }
@@ -2100,6 +2143,12 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             DictEntry { entry_index, .. } => Some(Binding::Callable(
                 self.dictionary_entry(operand(0)?.evidence(&self.memory)?, entry_index.as_index())?,
             )),
+            DictParent { index, .. } => {
+                let dictionary = operand(0)?.evidence(&self.memory)?;
+                Some(Binding::Evidence(
+                    self.dictionary_parent(dictionary, *index)?,
+                ))
+            }
             Alloca { ty } => {
                 let ty = self.types.resolve(*ty);
                 Some(Binding::Place(match witnessed_layout {

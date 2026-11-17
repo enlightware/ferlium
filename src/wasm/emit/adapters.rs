@@ -169,7 +169,7 @@ pub(super) fn dictionary_adapter(
                 ..memarg(2)
             }));
             code.instruction(&I::I32Const(
-                definition.environment().fields[*index].offset as i32,
+                definition.environment().fields[index.as_index()].offset as i32,
             ));
             code.instruction(&I::I32Add);
         }

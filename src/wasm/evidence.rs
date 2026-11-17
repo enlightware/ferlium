@@ -13,7 +13,7 @@ use crate::{
     mir::{
         Value,
         physical::{
-            DictionaryReference, EvidenceEnvironmentLayout,
+            DictionaryReference, EvidenceEnvironmentLayout, PhysicalParentAccessor,
             program::{
                 Descriptor, InternedStaticEvidence, ProgramEvidenceId, ResolvedPhysicalProgram,
             },
@@ -24,6 +24,13 @@ use crate::{
 };
 
 use super::{abi::DispatchTableSlotId, runtime};
+
+/// The kind of a parent table entry whose value is the environment offset of a capture.
+pub(super) const PARENT_CAPTURE: u32 = 0;
+/// The kind of a parent table entry whose value is the address of a static dictionary.
+pub(super) const PARENT_STATIC: u32 = 1;
+// `dict_parent` selects the static address by the kind word, as a Wasm condition.
+const _: () = assert!(PARENT_CAPTURE == 0 && PARENT_STATIC != 0);
 
 /// Descriptor offsets are relative to the instance's immutable data base; table entries are local.
 #[repr(C)]
@@ -47,11 +54,33 @@ pub(super) struct ReachableEvidence {
     static_set: FxHashSet<ProgramEvidenceId>,
     dispatched_dictionaries: usize,
     dispatched_entries: usize,
+    /// Dictionaries whose static parents are reachable already.
+    parents_reached: usize,
     dictionaries_by_trait: FxHashMap<TraitId, Vec<TraitDictionaryId>>,
     entries_by_trait: FxHashMap<TraitId, Vec<TraitDictionaryEntryIndex>>,
 }
 
 impl ReachableEvidence {
+    /// Make the static parents of the reachable dictionaries reachable: unspecialized code may
+    /// read any parent of a dictionary that it is given. They may reach more dictionaries.
+    pub fn reach_static_parents(
+        &mut self,
+        program: &ResolvedPhysicalProgram<'_>,
+    ) -> Result<(), String> {
+        while let Some(&id) = self.dictionaries.get(self.parents_reached) {
+            self.parents_reached += 1;
+            for parent in program.dictionary(id).unwrap().parents() {
+                if let PhysicalParentAccessor::Static(evidence) = parent {
+                    let evidence = program
+                        .static_evidence_id(evidence)
+                        .ok_or_else(|| format!("uninterned static parent of {id:?}"))?;
+                    self.static_value(program, evidence)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Visit each reachable dictionary/entry pair once, including pairs discovered by callees.
     pub fn discover_dispatches(
         &mut self,
@@ -194,13 +223,21 @@ impl Image {
             words: vec![0; count],
             ..Self::default()
         };
+        // Words of descriptors that hold the address of a static parent, laid out after them.
+        let mut static_parents = Vec::new();
         for &id in &reachable.dictionaries {
             let definition = program.dictionary(id).unwrap();
             let layout = definition.environment();
             let descriptor = this.words.len() * 4;
             let index = program.reference_index(Descriptor::Dictionary(id)).unwrap();
             this.words[index.as_index()] = descriptor as u32;
-            let entries = descriptor + size_of::<DictionaryDescriptor>() + layout.fields.len() * 4;
+            // The parent table ends where the entry table starts: slot `k` of a dictionary of a
+            // trait with `n` slots is `8 * (n - k)` bytes before its entries, whatever the
+            // dictionary.
+            let entries = descriptor
+                + size_of::<DictionaryDescriptor>()
+                + layout.fields.len() * 4
+                + definition.parents().len() * 8;
             this.words.extend([
                 layout.allocation.size() as u32,
                 layout.allocation.align() as u32,
@@ -210,6 +247,20 @@ impl Image {
             this.words.extend(layout.fields.iter().map(|field| {
                 field.offset as u32 | if field.is_storage_flag { 1 << 31 } else { 0 }
             }));
+            for parent in definition.parents() {
+                match parent {
+                    PhysicalParentAccessor::Capture(capture) => this.words.extend([
+                        PARENT_CAPTURE,
+                        layout.fields[capture.as_index()].offset as u32,
+                    ]),
+                    PhysicalParentAccessor::Static(evidence) => {
+                        let evidence = program.static_evidence_id(evidence).unwrap();
+                        this.words.push(PARENT_STATIC);
+                        static_parents.push((this.words.len(), evidence));
+                        this.words.push(0);
+                    }
+                }
+            }
             this.words.extend(
                 (0..definition.entries().len())
                     .map(|index| table.get(&(id, index)).map_or(0, |slot| slot.as_u32())),
@@ -283,6 +334,10 @@ impl Image {
                 }
             };
             this.references.insert(id, offset as u32);
+        }
+        for (word, evidence) in static_parents {
+            this.words[word] = this.references[&evidence];
+            this.relocations.push(word);
         }
         this
     }

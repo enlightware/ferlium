@@ -23,8 +23,8 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        DefKind, DictionaryEntryRequirements, ModuleId, PendingModuleFunction, SubscriptId,
-        TraitId, TraitImpl, TraitImplId, TraitImpls, TypeDefId, Visibility,
+        DefKind, DictionaryEntryRequirements, ModuleId, ParentAccessor, PendingModuleFunction,
+        SubscriptId, TraitId, TraitImpl, TraitImplId, TraitImpls, TypeDefId, Visibility,
         build_capturing_dictionary_value, dictionary_capture_plan, id::Id,
         named_modules_in_environment,
     },
@@ -590,7 +590,7 @@ impl TraitSolver<'_> {
         if let Some(id) = self.impls.uniform_dictionaries.get(&key) {
             return Ok(TraitImplId::new(self.current_type_items.module.id, *id));
         }
-        let source = self.get_impl_data_by_id(application.dictionary).clone();
+        let mut source = self.get_impl_data_by_id(application.dictionary).clone();
         let mut mapper = BitmapInstantiationMapper::new(&application.substitution);
         let captures = source
             .dictionary_value
@@ -679,7 +679,10 @@ impl TraitSolver<'_> {
             mappings.extend(getters.iter().map(|_| Vec::new()));
         }
 
-        let dictionary = build_capturing_dictionary_value(&entries, &getters, captures, mappings);
+        // The captures are the source's, in its order, so its parent accessors fit them.
+        let parents = source.dictionary_value.take_parents();
+        let dictionary = build_capturing_dictionary_value(&entries, &getters, captures, mappings)
+            .with_parent_accessors(parents);
         let ty = self.trait_def(*trait_id).get_dictionary_type_for_tys(
             input_tys,
             output_tys,
@@ -1133,29 +1136,61 @@ impl TraitSolver<'_> {
         };
         // Match capture slots to the selected impl's own declared prerequisites, before any
         // instantiation. Keep the complete contract, including fixed effect bounds, and record
-        // these indices immediately when allocating that impl's obligation nodes.
+        // these indices immediately when allocating that impl's obligation nodes. A capture that
+        // a parent accessor reads need not be a prerequisite (`Div<W<T>>` for `Real<W<T>>`): it
+        // is an obligation of its own, after the prerequisites.
         let value_trait = self.std_trait_id(VALUE_TRAIT_NAME);
-        let capture_obligations = self
-            .get_impl_data_by_id(candidate.id)
-            .dictionary_value
-            .capture_schema()
+        let dictionary = &self.get_impl_data_by_id(candidate.id).dictionary_value;
+        let schema = dictionary.capture_schema();
+        let parent_captures = dictionary
+            .parents()
             .iter()
-            .map(|capture| {
-                candidate
-                    .constraints
-                    .iter()
-                    .position(|constraint| {
-                        constraint
-                            .dictionary_requirement_key(value_trait)
-                            .is_some_and(|requirement| requirement.same_contract(capture))
-                    })
-                    .ok_or_else(|| {
-                        internal_compilation_error!(Internal {
-                            error: "A source dictionary capture has no corresponding prerequisite"
-                                .into(),
-                            span,
-                        })
-                    })
+            .filter_map(|parent| match parent {
+                ParentAccessor::Capture(index) => Some(index.as_index()),
+                ParentAccessor::Pending(_) | ParentAccessor::Static(_) => None,
+            })
+            .collect::<FxHashSet<_>>();
+        let mut slot_obligations = Vec::new();
+        let capture_obligations = schema
+            .iter()
+            .enumerate()
+            .map(|(index, capture)| {
+                let prerequisite = candidate.constraints.iter().position(|constraint| {
+                    constraint
+                        .dictionary_requirement_key(value_trait)
+                        .is_some_and(|requirement| requirement.same_contract(capture))
+                });
+                if let Some(prerequisite) = prerequisite {
+                    return Ok(prerequisite);
+                }
+                let DictionaryReq::TraitImpl {
+                    trait_id,
+                    input_tys,
+                    output_tys,
+                    output_effs,
+                } = capture
+                else {
+                    return Err(internal_compilation_error!(Internal {
+                        error: "A source dictionary capture has no corresponding prerequisite"
+                            .into(),
+                        span,
+                    }));
+                };
+                if !parent_captures.contains(&index) {
+                    return Err(internal_compilation_error!(Internal {
+                        error: "A source dictionary capture has no corresponding prerequisite"
+                            .into(),
+                        span,
+                    }));
+                }
+                slot_obligations.push(PubTypeConstraint::new_have_trait(
+                    *trait_id,
+                    input_tys.clone(),
+                    output_tys.clone(),
+                    output_effs.clone(),
+                    span,
+                ));
+                Ok(candidate.constraints.len() + slot_obligations.len() - 1)
             })
             .collect::<Result<Vec<_>, _>>()?;
         let mut substitution = (
@@ -1201,10 +1236,10 @@ impl TraitSolver<'_> {
         let obligations = candidate
             .constraints
             .iter()
-            .map(|c| {
-                let mut obligation = c
-                    .instantiate_simple(&substitution)
-                    .instantiate_location_cloned(span);
+            .chain(&slot_obligations)
+            .map(|c| c.instantiate_simple(&substitution))
+            .map(|obligation| {
+                let mut obligation = obligation.instantiate_location_cloned(span);
                 obligation.set_origin(constraint.origin());
                 obligation
             })

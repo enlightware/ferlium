@@ -986,7 +986,7 @@ impl<'a> TraitSolver<'a> {
                     input_tys,
                     output_tys,
                     ..
-                } if !self.trait_def(*trait_id).has_runtime_dictionary_entries()
+                } if !self.trait_def(*trait_id).has_runtime_dictionary()
                     || is_value_trait_for_function_type(
                         *trait_id,
                         self.trait_def(*trait_id),
@@ -1025,7 +1025,7 @@ impl<'a> TraitSolver<'a> {
                     output_effs,
                 } => {
                     let trait_def = self.trait_def(*trait_id);
-                    if !trait_def.has_runtime_dictionary_entries() {
+                    if !trait_def.has_runtime_dictionary() {
                         None
                     } else {
                         Some(DictionaryReq::new_trait_impl(
@@ -1076,7 +1076,7 @@ impl<'a> TraitSolver<'a> {
                 continue;
             };
             // Marker traits have no runtime dictionary entries.
-            if !self.trait_def(*trait_id).has_runtime_dictionary_entries() {
+            if !self.trait_def(*trait_id).has_runtime_dictionary() {
                 continue;
             }
             if self.is_compiler_provided_no_output_trait_query(

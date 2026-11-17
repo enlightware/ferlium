@@ -803,6 +803,7 @@ fn emit_with_export_kind(
     let mut subscript_adapter_set = FxHashSet::default();
     loop {
         if pending.is_empty() {
+            reachable.reach_static_parents(program)?;
             reachable.discover_dispatches(program, |id, entry| {
                 let definition = program.dictionary(id).unwrap();
                 let target =

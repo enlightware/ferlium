@@ -18,7 +18,7 @@ use crate::{
         ModuleFunction, ModuleFunctionSpans, ResolvedLocalClone, ResolvedLocalDrop, SubscriptId,
         TraitDictionaryId, id::Id,
     },
-    types::{mutability::MutType, r#type::Type},
+    types::{mutability::MutType, r#trait::TraitParentSlotIndex, r#type::Type},
 };
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -88,6 +88,10 @@ enum SnapshotEvidenceBindingSource {
         definition: SubscriptId,
         captures: Vec<EvidenceBindingId>,
     },
+    Parent {
+        dictionary: EvidenceBindingId,
+        index: TraitParentSlotIndex,
+    },
 }
 
 impl SnapshotEvidenceBindingSource {
@@ -114,6 +118,10 @@ impl SnapshotEvidenceBindingSource {
                 definition: *definition,
                 captures: captures.clone(),
             },
+            EvidenceBindingSource::Parent { dictionary, index } => Self::Parent {
+                dictionary: *dictionary,
+                index: *index,
+            },
         })
     }
 
@@ -136,6 +144,10 @@ impl SnapshotEvidenceBindingSource {
             } => EvidenceBindingSource::ConstructedSubscript {
                 definition: *definition,
                 captures: captures.clone(),
+            },
+            Self::Parent { dictionary, index } => EvidenceBindingSource::Parent {
+                dictionary: *dictionary,
+                index: *index,
             },
         })
     }

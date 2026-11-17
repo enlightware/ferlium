@@ -99,6 +99,19 @@ A thunk that forwards to a function at that function's own signature records the
 instantiation — every quantifier standing for itself — rather than an empty list, so that the
 argument lists are always as long as the quantifier lists.
 
+## Parent slots
+
+A dictionary gives the dictionaries of the requirements that its trait implies and that an
+application of the trait determines: its parent slots, at the same index in every dictionary of
+the trait. A body that is given a dictionary reads the evidence of an implied requirement from it
+rather than receiving another parameter; with known types, it uses that evidence directly.
+
+A slot whose requirement has type or effect variables is one of the dictionary's captures, built
+with it. A closed slot is a static dictionary, stored in the dictionary's definition rather than
+in its value, and selected once the defining module has all its impls. So a parent may hold the
+dictionary whose parent it is: with `impl<T> Parent for T where T: Child` and `impl Child for int`,
+the static `Parent<int>` captures `Child<int>`, whose definition gives `Parent<int>` as its parent.
+
 ## Sharing compiler-generated open dictionaries
 
 Some runtime dictionaries are generated while their input type still contains variables. A

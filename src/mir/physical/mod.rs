@@ -83,7 +83,7 @@ use crate::{
 use dictionary::PhysicalDictionaryCatalog;
 pub(crate) use dictionary::{
     DictionaryReference, EvidenceEnvironmentLayout, PhysicalDictionaryDefinition,
-    PhysicalDictionaryEntry,
+    PhysicalDictionaryEntry, PhysicalParentAccessor,
 };
 use evidence::{PhysicalEvidenceReferences, try_for_each_static_evidence};
 use native::{NativeRequirementError, NativeRequirements};
@@ -3051,6 +3051,7 @@ fn verify_physical_operation(
         | OperationKind::AddressOffsetPlace { .. }
         | OperationKind::DictEntry { .. }
         | OperationKind::BuildDictionary { .. }
+        | OperationKind::DictParent { .. }
         | OperationKind::BuildSubscriptEvidence { .. }
         | OperationKind::BuildSubscript { .. }
         | OperationKind::CloneSubscriptEnv { .. }
@@ -3241,7 +3242,7 @@ fn verify_dictionary_catalog(
                 });
             }
             if entry.capture_mapping().iter().any(|mapping| {
-                matches!(mapping, DictionaryEntryEvidence::Capture(capture) if *capture >= definition.capture_schema().len())
+                matches!(mapping, DictionaryEntryEvidence::Capture(capture) if capture.as_index() >= definition.capture_schema().len())
             }) {
                 return Err(BackendReadinessError::InvalidDictionaryDefinition {
                     dictionary: definition.id(),

@@ -21,9 +21,9 @@ use crate::{
     },
     module::{
         ELocalDecl as LocalDecl, EvidenceBindingId, FunctionId, LocalDeclId, LocalFunctionId,
-        ModuleFunction, ModuleId, ProjectionIndex, ResolvedLocalClone, ResolvedLocalDrop,
-        ResolvedTakeLocalValueMode, ResolvedValueLayout, TraitDictionaryEntry, TraitDictionaryId,
-        id::Id,
+        ModuleFunction, ModuleId, ParentAccessor, ProjectionIndex, ResolvedLocalClone,
+        ResolvedLocalDrop, ResolvedTakeLocalValueMode, ResolvedValueLayout, TraitDictionaryEntry,
+        TraitDictionaryId, id::Id,
     },
     place::Place,
     std::{
@@ -50,6 +50,7 @@ impl HirFrame {
         environment_base: usize,
         metadata: &ModuleFunction,
         incoming: &[HiddenEvidenceArgValue],
+        runtime: &EvalCtx,
     ) -> Self {
         let expected = metadata
             .evidence_bindings
@@ -64,7 +65,7 @@ impl HirFrame {
         );
         Self {
             environment_base,
-            evidence: materialize_evidence_bindings(&metadata.evidence_bindings, incoming),
+            evidence: materialize_evidence_bindings(&metadata.evidence_bindings, incoming, runtime),
             returns_place: metadata.definition.returns_place(),
         }
     }
@@ -115,7 +116,7 @@ fn eval_script_call(
     if base.saturating_add(arg_count) > runtime.environment_cell_limit {
         return Err(runtime.environment_cell_limit_error(Some(span)));
     }
-    let frame = HirFrame::for_call(function, base, metadata, &evidence);
+    let frame = HirFrame::for_call(function, base, metadata, &evidence, runtime);
     runtime.environment.extend(arguments.take());
     runtime.call_depth += 1;
     let mut interpreter = HirInterpreter::new(runtime, frame);
@@ -341,6 +342,7 @@ impl<'run, 'session> HirInterpreter<'run, 'session> {
             self.runtime.environment.len(),
             metadata,
             &evidence,
+            self.runtime,
         );
         let base = frame.environment_base;
         let caller_module = mem::replace(&mut self.runtime.module_id, function.module);
@@ -970,6 +972,7 @@ fn extra_parameter_value(
 fn materialize_evidence_bindings(
     bindings: &[EvidenceBinding],
     parameters: &[HiddenEvidenceArgValue],
+    runtime: &EvalCtx,
 ) -> Vec<HiddenEvidenceArgValue> {
     let mut values: Vec<HiddenEvidenceArgValue> = Vec::with_capacity(bindings.len());
     for binding in bindings {
@@ -996,6 +999,21 @@ fn materialize_evidence_bindings(
                     .map(|capture| values[capture.as_index()].clone())
                     .collect(),
             })),
+            EvidenceBindingSource::Parent { dictionary, index } => {
+                match &values[dictionary.as_index()] {
+                    HiddenEvidenceArgValue::TraitDictionary(dictionary) => {
+                        match &runtime.dictionary_value(dictionary).parents()[index.as_index()] {
+                            ParentAccessor::Capture(capture) => {
+                                dictionary.captures[capture.as_index()].clone()
+                            }
+                            parent => materialize_static_evidence(
+                                parent.static_evidence().expect("a static parent accessor"),
+                            ),
+                        }
+                    }
+                    other => panic!("a parent slot of non-dictionary evidence {other:?}"),
+                }
+            }
         };
         values.push(value);
     }

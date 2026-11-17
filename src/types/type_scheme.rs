@@ -170,6 +170,25 @@ impl PubTypeConstraint {
         }
     }
 
+    /// The dictionary requirement of this constraint if it is a trait requirement.
+    pub(crate) fn trait_requirement(&self) -> Option<DictionaryReq> {
+        match self {
+            Self::HaveTrait {
+                trait_id,
+                input_tys,
+                output_tys,
+                output_effs,
+                ..
+            } => Some(DictionaryReq::new_trait_impl(
+                *trait_id,
+                input_tys.clone(),
+                output_tys.clone(),
+                output_effs.clone(),
+            )),
+            _ => None,
+        }
+    }
+
     /// Return the canonical dictionary key represented by this constraint before filtering marker
     /// traits or compiler-provided evidence. Variant layout provenance deliberately maps to the
     /// ordinary `Value<payload_ty>` key used by the physical ABI.
@@ -184,18 +203,7 @@ impl PubTypeConstraint {
                 Vec::new(),
                 Vec::new(),
             )),
-            Self::HaveTrait {
-                trait_id,
-                input_tys,
-                output_tys,
-                output_effs,
-                ..
-            } => Some(DictionaryReq::new_trait_impl(
-                *trait_id,
-                input_tys.clone(),
-                output_tys.clone(),
-                output_effs.clone(),
-            )),
+            Self::HaveTrait { .. } => self.trait_requirement(),
             Self::ProjectionSubscriptIs { .. }
             | Self::TypeHasVariant { .. }
             | Self::TupleAtIndexIs { .. } => self.structural_requirement_key(),
@@ -1298,7 +1306,7 @@ pub(crate) fn extra_parameters_from_constraints_with<'t>(
                 ..
             } => {
                 let trait_def = trait_def(*trait_id);
-                if !trait_def.has_runtime_dictionary_entries()
+                if !trait_def.has_runtime_dictionary()
                     || is_value_trait_for_function_type(*trait_id, trait_def, input_tys, output_tys)
                     || is_function_surface_only_value_trait_application(
                         *trait_id, trait_def, input_tys, output_tys,

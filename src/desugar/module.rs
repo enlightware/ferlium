@@ -998,7 +998,8 @@ impl PModule {
                     Some((TraitMethodIndex::from_index(index), function))
                 })
                 .collect::<Vec<_>>();
-            let desugared = trait_def.desugar(&env, &mut modules_used)?;
+            let mut desugared = trait_def.desugar(&env, &mut modules_used)?;
+            desugared.set_parent_slots(|id| Some(env.trait_def(id)));
             let id = output.add_trait_with_visibility(desugared, visibility);
             let trait_id = TraitId::new(output.module_id(), id);
             for (index, function) in default_functions {
@@ -1362,6 +1363,7 @@ impl ast::TraitDefinition {
             output_type_names,
             output_effect_names,
             parent_constraints,
+            parent_slots: Vec::new(),
             constraints,
             default_methods: vec![None; methods.len()],
             methods,

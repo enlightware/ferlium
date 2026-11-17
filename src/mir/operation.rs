@@ -44,7 +44,7 @@ use crate::{
     std::value::{TypeLayoutEnv, is_abi_scalar},
     types::{
         effects::EffType,
-        r#trait::TraitDictionaryEntryIndex,
+        r#trait::{TraitDictionaryEntryIndex, TraitParentSlotIndex},
         r#type::{CallImplType, CallResultConvention, FnArgType, Type},
         type_inference::substitution::InstSubst,
         type_like::TypeLike,
@@ -709,6 +709,29 @@ impl Operation {
             span: span.into(),
             operands: captures.into_boxed_slice(),
             kind: OperationKind::BuildDictionary { definition, ty },
+        }
+    }
+
+    /// Reads parent slot `index` of a dictionary of `trait_id`: the dictionary of the requirement
+    /// that the trait implies in that slot, as an owned reference, which the parent accessor of
+    /// the dictionary's definition gives (a capture, or a static dictionary). Every dictionary of
+    /// the trait has the slot at the same index. Pure and effect-free.
+    pub fn dict_parent(
+        span: impl Into<DebugLocation>,
+        dict: mir::Value,
+        trait_id: TraitId,
+        index: TraitParentSlotIndex,
+        ty: Type,
+    ) -> Self {
+        Operation {
+            result_id: None,
+            span: span.into(),
+            operands: Box::new([dict]),
+            kind: OperationKind::DictParent {
+                trait_id,
+                index,
+                ty,
+            },
         }
     }
 
@@ -1555,6 +1578,12 @@ pub enum OperationKind {
         definition: TraitDictionaryId,
         ty: Type,
     },
+    /// Read a parent slot of a dictionary of `trait_id`, as evidence.
+    DictParent {
+        trait_id: TraitId,
+        index: TraitParentSlotIndex,
+        ty: Type,
+    },
     /// Resolve a member function place from a symbolic subscript.
     SubscriptMember { mut_member: bool, ty: Type },
     /// Close symbolic subscript evidence over additional evidence operands.
@@ -1665,6 +1694,7 @@ impl OperationKind {
             | AddressOffsetPlace { .. }
             | DictEntry { .. }
             | BuildDictionary { .. }
+            | DictParent { .. }
             | SubscriptMember { .. }
             | BuildSubscriptEvidence { .. }
             | BuildSubscript { .. }
@@ -1731,6 +1761,7 @@ impl OperationKind {
             | AddressOffsetPlace { .. }
             | DictEntry { .. }
             | BuildDictionary { .. }
+            | DictParent { .. }
             | SubscriptMember { .. }
             | BuildSubscriptEvidence { .. }
             | BuildSubscript { .. }
@@ -1844,7 +1875,7 @@ impl OperationKind {
             ),
             CompareEqual => OperationResult::Lowered(cached_primitive_ty!(bool)),
             Load => OperationResult::pointee_of(OperationResult::Same(whole.operands[0].clone())),
-            BuildDictionary { ty, .. } | BuildSubscriptEvidence { ty } => {
+            BuildDictionary { ty, .. } | DictParent { ty, .. } | BuildSubscriptEvidence { ty } => {
                 OperationResult::Lowered(*ty)
             }
             BuildSubscript { ty } | CloneSubscriptEnv { ty } | CloneClosureEnv { ty } => {
@@ -1988,6 +2019,11 @@ impl OperationKind {
             ),
             // A generic definition can also need its use-site type when it has no captures.
             BuildDictionary { .. } => {}
+            DictParent { .. } => assert_eq!(
+                whole.operands.len(),
+                1,
+                "dict_parent takes exactly the dictionary operand"
+            ),
             SubscriptMember { .. } => assert_eq!(
                 whole.operands.len(),
                 1,
@@ -2244,6 +2280,12 @@ impl OperationKind {
                 f,
                 "dict_entry {} from {}",
                 entry_index,
+                whole.operands[0].format_with(env)
+            ),
+            DictParent { index, .. } => write!(
+                f,
+                "dict_parent {} from {}",
+                index,
                 whole.operands[0].format_with(env)
             ),
             BuildDictionary { definition, .. } => {

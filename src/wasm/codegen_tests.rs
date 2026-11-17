@@ -1660,6 +1660,86 @@ fn wasm_codegen_generic_evidence_cleanup() {
 }
 
 #[wasm_bindgen_test]
+fn wasm_codegen_reads_parent_slots_of_dictionaries() {
+    // `scale` gets only `Real`, and reads `Div` and `Num` from its parent slots; `first` reads the
+    // iterator that the `where` clause of `Seq` implies. Raw code keeps the generic bodies.
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(optimization);
+        assert_wasm_runs(
+            &mut session,
+            "#[inline(never)] fn scale<T>(x: T) -> T where T: Real { x / x + x }
+             #[inline(never)] fn first<S, A, I>(s: S) -> Option<A>
+             where S: Seq<Item = A, Iter = I> {
+                 let mut it = iter(s);
+                 next(it)
+             }
+             pub fn compute(n: int) -> int {
+                 let a = scale(n as float) as int;
+                 let b = match first([n, 1]) { None => 0, Some(v) => v };
+                 a + b
+             }",
+            4_isize,
+            9_isize,
+        );
+    }
+}
+
+#[wasm_bindgen_test]
+fn wasm_codegen_built_dictionaries_hold_and_release_their_parents() {
+    // `wrapped` builds `Div<W<T>>` at run time; its parent slot `Num<W<T>>` is built from the
+    // `Num<T>` that `wrapped` reads from its own `Div<T>`, and `scale` reads that slot back.
+    let source = r#"
+        struct W<T>(T)
+        impl<T> Num for W<T> where T: Num {
+            fn add(a: W<T>, b: W<T>) -> W<T> { W(a.0 + b.0) }
+            fn sub(a: W<T>, b: W<T>) -> W<T> { W(a.0 - b.0) }
+            fn mul(a: W<T>, b: W<T>) -> W<T> { W(a.0 * b.0) }
+            fn neg(a: W<T>) -> W<T> { W(-a.0) }
+            fn abs(a: W<T>) -> W<T> { W(abs(a.0)) }
+            fn signum(a: W<T>) -> W<T> { W(signum(a.0)) }
+            fn from_int(n: int) -> W<T> { W(from_int(n)) }
+        }
+        impl<T> Div for W<T> where T: Div {
+            fn div(a: W<T>, b: W<T>) -> W<T> { W(a.0 / b.0) }
+        }
+        #[inline(never)] fn scale<T>(x: T) -> T where T: Div { x + x / x }
+        #[inline(never)] fn wrapped<T>(x: T) -> T where T: Div { scale(W(x)).0 }
+        pub fn compute(n: int) -> int { wrapped(n as float) as int }
+    "#;
+    for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(optimization);
+        session.set_physical_mir_optimization(optimization);
+        let entry = compile(&mut session, source);
+        for (raw, code) in [
+            (true, compile_raw(&session, entry)),
+            (false, CompiledProgram::compile(&session, entry).unwrap()),
+        ] {
+            let before = LIVE_ENVIRONMENTS.get();
+            let built = BUILT_ENVIRONMENTS.get();
+            let result = code
+                .instantiate::<(isize,), isize>()
+                .unwrap()
+                .run((4,), WasmLimits::default())
+                .unwrap();
+            assert_eq!(result, 5, "({optimization:?}, raw: {raw})");
+            if raw && optimization == MirOptimization::Disabled {
+                assert!(
+                    BUILT_ENVIRONMENTS.get() > built,
+                    "generic code builds its dictionaries at run time"
+                );
+            }
+            assert_eq!(
+                LIVE_ENVIRONMENTS.get(),
+                before,
+                "({optimization:?}, raw: {raw})"
+            );
+        }
+    }
+}
+
+#[wasm_bindgen_test]
 fn wasm_codegen_captured_trait_evidence() {
     for optimization in [MirOptimization::Disabled, MirOptimization::Enabled] {
         let mut session = CompilerSession::new();

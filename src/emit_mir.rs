@@ -29,7 +29,7 @@ use crate::{
     },
     module::{
         self, EvidenceBindingId, ExtraParameterId, FunctionId, LocalDeclId, LocalFunctionId,
-        Module, ModuleEnv, ModuleId, ResolvedLocalClone, ResolvedLocalDrop,
+        Module, ModuleEnv, ModuleId, ParentAccessor, ResolvedLocalClone, ResolvedLocalDrop,
         ResolvedTakeLocalValueMode, TraitDictionaryEntry, TraitDictionaryId, TraitId, TraitImpl,
         TraitImplId, id::Id,
     },
@@ -79,7 +79,8 @@ pub(crate) struct TextSourceMapEntry {
     pub(crate) inline_depth: u32,
 }
 
-fn lower_static_evidence(evidence: &StaticEvidence) -> mir::value::StaticEvidence {
+/// The MIR form of static evidence.
+pub(crate) fn lower_static_evidence(evidence: &StaticEvidence) -> mir::value::StaticEvidence {
     match evidence {
         StaticEvidence::Dictionary {
             definition,
@@ -787,6 +788,46 @@ impl<'a> Emitter<'a> {
                             binding.requirement.to_dict_type_in_env(&self.env),
                         ))
                         .expect("build_subscript_evidence must produce evidence")
+                    }
+                }
+                EvidenceBindingSource::Parent { dictionary, index } => {
+                    if let Some(mir::value::StaticEvidence::Dictionary {
+                        definition,
+                        captures,
+                        ..
+                    }) = self.context.static_evidence.get(dictionary)
+                    {
+                        // The parent of static evidence is what its definition's accessor gives.
+                        let parent = &self
+                            .env
+                            .module_by_id(definition.module_id)
+                            .and_then(|module| module.get_impl_data(definition.impl_id))
+                            .expect("static evidence has a definition")
+                            .dictionary_value
+                            .parents()[index.as_index()];
+                        let evidence = match parent {
+                            ParentAccessor::Capture(capture) => {
+                                captures[capture.as_index()].clone()
+                            }
+                            ParentAccessor::Pending(_) | ParentAccessor::Static(_) => {
+                                lower_static_evidence(
+                                    parent.static_evidence().expect("a static parent accessor"),
+                                )
+                            }
+                        };
+                        known_static = Some(evidence.clone());
+                        static_evidence_value(evidence, self.env)
+                    } else {
+                        let trait_id = self.context.evidence_traits[dictionary];
+                        let dictionary = self.context.evidence_bindings[dictionary].clone();
+                        self.insert(Operation::dict_parent(
+                            self.context.span,
+                            dictionary,
+                            trait_id,
+                            *index,
+                            binding.requirement.to_dict_type_in_env(&self.env),
+                        ))
+                        .expect("dict_parent must produce evidence")
                     }
                 }
             };

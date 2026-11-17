@@ -121,7 +121,7 @@ fn emit_expr_unsafe_with_options(
     warnings: &mut Vec<CompilationWarning>,
 ) -> Result<PendingExprEntry, InternalCompilationError> {
     let mut expr_arena = UNodeArena::default();
-    emit_expr_unsafe_inner(
+    let entry = emit_expr_unsafe_inner(
         source,
         parsed_arena,
         module,
@@ -130,7 +130,10 @@ fn emit_expr_unsafe_with_options(
         &mut expr_arena,
         options,
         warnings,
-    )
+    )?;
+    // The expression may have generated dictionaries whose static parents are still to select.
+    super::elaboration::resolve_pending_parent_accessors(module, others)?;
+    Ok(entry)
 }
 
 #[allow(clippy::too_many_arguments)]

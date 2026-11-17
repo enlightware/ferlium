@@ -522,7 +522,12 @@ static data similarly resolve to target addresses.
 
 `env_ptr` points to the captured prerequisite evidence, or is zero for a captureless dictionary.
 The descriptor determines the environment's layout and entry calling contracts, including how
-each entry receives its required evidence.
+each entry receives its required evidence. The descriptor also gives, for each parent slot of the
+trait (a requirement that the trait implies and that its application determines), how to read
+its dictionary: as one of the captures, or as a static dictionary. These accessors end where the
+entries start, so a parent is read at the same place from the descriptor of any dictionary of the
+trait. A static parent is stored in the descriptor rather than in the environment, so it may
+capture the dictionary whose parent it is.
 
 Dictionary entries use the trait declaration's argument transport, before implementation-type
 substitution, and the caller-allocated result convention. Adapters bridge to implementation ABIs

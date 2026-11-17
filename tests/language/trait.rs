@@ -915,7 +915,7 @@ fn where_clauses_accept_positional_trait_inputs_with_named_outputs() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn parent_trait_constraints_are_not_trait_use_entailment() {
+fn a_parent_that_a_body_uses_is_read_from_the_written_requirement() {
     let mut session = TestSession::new();
     let module = session.compile_and_get_module(indoc! {r#"
         trait Parent<Self> {
@@ -950,8 +950,8 @@ fn parent_trait_constraints_are_not_trait_use_entailment() {
         })
         .collect::<Vec<_>>();
 
-    assert!(trait_names.contains(&ustr("Child")));
-    assert!(trait_names.contains(&ustr("Parent")));
+    // The dictionary of `Child` holds that of `Parent`: `Parent` is not a parameter.
+    assert_eq!(trait_names, [ustr("Child")]);
 }
 
 #[test]

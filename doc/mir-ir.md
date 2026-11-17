@@ -193,7 +193,7 @@ itself leaves it unchanged. The main groups are:
 |---|---|---|
 | storage | `alloca`, `alloca_place`, `runtime_alloc`, `runtime_dealloc`, `is_initialized`, `load`, `store`, `clear`, `memcpy`, `move`, `move_bytes`, `move_range`, `replace` | Stack storage follows stack regions; runtime storage has an explicit lifetime. `is_initialized` exposes a physical drop flag without fixing its storage layout. `store` never drops; `memcpy` requires a concrete `TrivialCopy` pointee; moves leave their source absent. `move_bytes` carries an already-materialized byte extent instead of a layout dictionary. `move_range` transfers initialized elements between disjoint sequence allocations, making only the source range absent and initializing only the destination range; it carries byte offsets and extent plus interpreter-only element indices and count. `replace` installs a fully initialized whole owned value without an observable initialization gap, retaining the displaced state for cleanup. Its destination may be a projection, absent, or partially initialized. |
 | aggregates | `subfield`, `variant`, `extract_tag`, `extract_payload_indirection`, `build_array`, `closure_capture` | Aggregate construction and ownership remain field-addressable. Product `subfield` records its aggregate type and carries `Value` witnesses for direct members with open inline layouts. A variant operation first builds an uninitialized payload shell, which a store must consume; when every case carries unit, the shell is the whole value and an ordinary register. Generic variant construction and payload-marked `subfield` operations carry the selected payload's `Value<B>` layout witness; projection reads inline/indirect classification from the stored tag. `extract_tag` yields an opaque semantic tag, while physical `extract_payload_indirection` yields the representation bit as `bool`. `build_array` initializes fresh canonical array storage from borrowed `TrivialCopy` elements. `closure_capture` is the read-only place of a value capture of a closure known to be of a given lambda: a field of the closure under that case, as a payload is under a known tag. |
-| evidence | `dict_entry`, `build_dictionary`, `subscript_member`, `build_subscript_evidence` | Evidence remains symbolic. Construction closes a definition over evidence operands; dictionary entries are closed function places. |
+| evidence | `dict_entry`, `build_dictionary`, `dict_parent`, `subscript_member`, `build_subscript_evidence` | Evidence remains symbolic. Construction closes a definition over evidence operands; dictionary entries are closed function places; `dict_parent` reads a dictionary's parent slot as evidence. |
 | calls/projections | `call`, `project`, `end_project` | Proven source-infallible forms are ordinary operations. Potentially source-fallible forms occur only inside `invoke`. |
 | ownership | `clone`, `drop`, `build_closure`, `clone_closure_env`, `drop_closure_env`, `build_subscript`, `clone_subscript_env`, `drop_subscript_env` | Semantic ownership actions are explicit. `Value::clone` and `Value::drop` are source-infallible by contract. |
 | matching | `comp_eq` | Compares a borrowed/materialized runtime value with compile-time pattern data. |
@@ -219,6 +219,11 @@ function directly and place its recursively static hidden evidence immediately a
 have the evidence role and follow the definition's canonical capture schema. A capture-free
 dictionary remains a symbolic constant; an entirely static construction folds to recursive static
 evidence.
+
+`dict_parent k from dictionary` is pure and effect-free. It yields, as owned evidence, parent slot
+`k` of a dictionary of the named trait: one of the dictionary's captures or a static dictionary, as
+its definition says. When the dictionary is static evidence or a `build_dictionary`, it folds to
+that capture or operand, or to the static dictionary.
 
 `build_array<A> [e0, ...] to destination` representation-copies each borrowed element and
 initializes `destination: [A]` with a fresh logical array of exactly that length. `A` must be

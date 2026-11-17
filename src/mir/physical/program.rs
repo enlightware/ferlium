@@ -26,9 +26,10 @@ use crate::{
 
 use super::{
     BackendReadyMirArtifacts, ConstructedSubscript, PhysicalDictionaryDefinition,
-    PhysicalSubscriptDefinition, PhysicalSubscriptMember, constructed_dictionary_definitions,
-    constructed_subscript_definitions, evidence::try_for_each_static_evidence, physical_call_arity,
-    results::callable_targets, static_dictionary_definition, static_subscript,
+    PhysicalParentAccessor, PhysicalSubscriptDefinition, PhysicalSubscriptMember,
+    constructed_dictionary_definitions, constructed_subscript_definitions,
+    evidence::try_for_each_static_evidence, physical_call_arity, results::callable_targets,
+    static_dictionary_definition, static_subscript,
 };
 
 define_id_type!(
@@ -156,6 +157,15 @@ impl ResolvedPhysicalProgram<'_> {
     /// Resolve a symbolic compile-time evidence operand to its program-wide interned identity.
     pub(crate) fn evidence_id(&self, value: &Value) -> Option<ProgramEvidenceId> {
         evidence_value_id(self, value)
+    }
+
+    /// Resolve static evidence to its program-wide interned identity.
+    pub(crate) fn static_evidence_id(
+        &self,
+        evidence: &StaticEvidence,
+    ) -> Option<ProgramEvidenceId> {
+        let interned = interned_static_evidence(&self.evidence_ids, evidence)?;
+        self.evidence_ids.get(&interned).copied()
     }
 
     /// The type arguments of the evidence a [`Value::Dictionary`] stands for: its impl's own
@@ -432,6 +442,14 @@ pub(crate) fn resolve_physical_program<'a>(
     for module in program.modules() {
         for function in module.entries.iter().flatten() {
             intern_function_evidence(function, &program, &mut interner);
+        }
+        // A static parent is read at run time from a dictionary of the program.
+        for dictionary in module.dictionaries() {
+            for parent in dictionary.parents() {
+                if let PhysicalParentAccessor::Static(evidence) = parent {
+                    interner.static_evidence(evidence);
+                }
+            }
         }
     }
     let (static_evidence, evidence_ids) = interner.finish();
@@ -904,7 +922,7 @@ fn evidence_value_id(
             definition: *definition,
             captures: Box::new([]),
         },
-        Value::Evidence(evidence) => interned_static_evidence(ids, evidence)?,
+        Value::Evidence(evidence) => return program.static_evidence_id(evidence),
         _ => return None,
     };
     ids.get(&interned).copied()

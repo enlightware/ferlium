@@ -44,6 +44,7 @@ use crate::{
     hir::interpreter::eval_function_with_ctx,
     hir::{
         self,
+        elaboration::resolve_pending_parent_accessors,
         emit_expr::emit_expr_entry_with_private_impls,
         hir_syn::local,
         value::{Value, VariantPayloadStorage},
@@ -1122,6 +1123,9 @@ impl CompilerSession {
         environment.install(&mut module);
         module.derive_impl_visibility(self.raw_modules());
         module.validate_native_optional_results(ModuleEnv::new(&module, self.raw_modules()));
+        if let Err(error) = resolve_pending_parent_accessors(&mut module, self.raw_modules()) {
+            panic!("native module {path} lacks a parent implementation: {error:?}");
+        }
         let module_id = self
             .modules
             .insert(path, ModuleEntry::new_fresh_raw(module));

@@ -185,6 +185,7 @@ impl Places {
                     op.kind,
                     OperationKind::DictEntry { .. }
                         | OperationKind::BuildDictionary { .. }
+                        | OperationKind::DictParent { .. }
                         | OperationKind::Variant { .. }
                 ) {
                     result.definitions.insert(id, (*op).clone());

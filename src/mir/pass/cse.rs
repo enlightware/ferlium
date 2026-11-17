@@ -1570,6 +1570,7 @@ impl Numbering<'_> {
                     | OperationKind::AddressOffsetPlace { .. }
                     | OperationKind::DictEntry { .. }
                     | OperationKind::BuildDictionary { .. }
+                    | OperationKind::DictParent { .. }
                     | OperationKind::BuildSubscriptEvidence { .. }
                     | OperationKind::StackSave
                     | OperationKind::CheckCallDepth

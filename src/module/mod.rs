@@ -1652,8 +1652,13 @@ impl Module {
 
     // Trait definitions and implementations
 
-    /// Add a trait definition to this module, returning its ID.
-    pub fn add_trait(&mut self, trait_def: Trait) -> LocalTraitId {
+    /// Add a native trait definition to this module, returning its ID. Its parent slots are the
+    /// requirements on traits of this module that it implies; see [`Trait::set_parent_slots`].
+    pub fn add_trait(&mut self, mut trait_def: Trait) -> LocalTraitId {
+        let module_id = self.module_id();
+        trait_def.set_parent_slots(|id| {
+            (id.module == module_id).then(|| &self.traits[id.index.as_index()])
+        });
         self.add_trait_with_visibility(trait_def, Visibility::Public)
     }
 
@@ -2108,12 +2113,20 @@ impl Module {
         }));
         let (captures, mappings) =
             dictionary_capture_plan(trait_id, &emit_output.input_tys, &entry_requirements);
+        let parents = ModuleEnv::new(self, others)
+            .trait_def(trait_id)
+            .parent_slots(
+                &emit_output.input_tys,
+                &emit_output.output_tys,
+                &emit_output.output_effs,
+            );
         let dictionary_value = build_capturing_dictionary_value(
             &emit_output.functions,
             &associated_const_getters,
             captures,
             mappings,
-        );
+        )
+        .with_parents(parents);
         let mut imp = TraitImpl::new(
             trait_id,
             emit_output.input_tys.to_vec(),

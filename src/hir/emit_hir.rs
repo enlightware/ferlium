@@ -58,7 +58,7 @@ use crate::{
     hir::{
         self, UNodeArena,
         dictionary::{DictElaborationCtx, ExtraParameters, LateFunctionInstData, ModuleInstData},
-        elaboration::elaborate_generated_functions,
+        elaboration::{elaborate_generated_functions, resolve_pending_parent_accessors},
         emit_functions::{
             EmitFunctionInput, EmitFunctionKind, EmitTraitCtx, SubscriptMemberAttachment,
             emit_function_group, emit_impl_methods,
@@ -1138,7 +1138,11 @@ fn emit_module_contents(
                 &associated_const_names,
                 imp.span,
             )?;
-            let dictionary_value = build_dictionary_value(&method_ids, &associated_const_getters);
+            let parents = ModuleEnv::new(output, others)
+                .trait_def(trait_id)
+                .parent_slots(&input_tys, &output_tys, &output_effs);
+            let dictionary_value = build_dictionary_value(&method_ids, &associated_const_getters)
+                .with_parents(parents);
             let dictionary_ty =
                 output.computer_dictionary_ty(&method_ids, associated_const_tys.iter().copied());
             let stub = TraitImpl::new(
@@ -1220,6 +1224,9 @@ fn emit_module_contents(
         .filter(|(subscript, _)| subscript.visibility.is_public())
         .map(|(subscript, id)| (subscript.name, *id));
     check_public_signatures(ctx.output, others, public_functions, public_subscripts)?;
+    // The module's implementations all exist: the static parents of its dictionaries can be
+    // selected.
+    resolve_pending_parent_accessors(ctx.output, others)?;
 
     Ok(())
 }
@@ -1438,6 +1445,13 @@ impl ModuleEmission<'_> {
                 );
             let new_dictionary_ty =
                 output.computer_dictionary_ty(&emit_output.functions, associated_const_tys);
+            let parents = ModuleEnv::new(output, others)
+                .trait_def(trait_id)
+                .parent_slots(
+                    &emit_output.input_tys,
+                    &emit_output.output_tys,
+                    &emit_output.output_effs,
+                );
             let impl_data = Rc::make_mut(&mut output.impls.data)
                 .get_mut(stub_data.id.as_index())
                 .unwrap();
@@ -1456,7 +1470,8 @@ impl ModuleEmission<'_> {
                 &impl_data.associated_const_getters,
                 captures,
                 mappings,
-            );
+            )
+            .with_parents(parents);
             stub_data.id
         } else {
             check_trait_impl(

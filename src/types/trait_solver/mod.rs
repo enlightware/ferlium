@@ -33,6 +33,7 @@ use ustr::Ustr;
 use crate::{
     FxHashMap, FxHashSet, Location, Modules,
     compiler::error::InternalCompilationError,
+    hir::dictionary::DictionaryReq,
     internal_compilation_error,
     module::{
         self, BlanketImpls, ConcreteImpls, ConcreteTraitImplKey, CurrentTypeItems, DefTable,
@@ -343,6 +344,20 @@ pub(crate) fn current_projection_subscript_type_map(
             Some((*key, subscript.type_scheme(module)?))
         })
         .collect()
+}
+
+impl TraitSolver<'_> {
+    /// The parent slots of a dictionary of `trait_id` for an application.
+    pub(crate) fn parent_slots(
+        &self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        output_tys: &[Type],
+        output_effs: &[EffType],
+    ) -> Vec<DictionaryReq> {
+        self.trait_def(trait_id)
+            .parent_slots(input_tys, output_tys, output_effs)
+    }
 }
 
 fn trait_def_from_parts<'a>(

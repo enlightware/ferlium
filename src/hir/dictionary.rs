@@ -15,6 +15,7 @@ use crate::{
     },
     types::{
         effects::{EffType, EffectVar},
+        r#trait::{Trait, TraitParentSlotIndex},
         trait_solver::{EvidencePlan, TraitSolver, alpha_canonicalize_dictionary_requirements},
         r#type::{SubscriptType, Type, TypeVar},
         type_like::{TypeLike, instantiate_effect_types_in_place, instantiate_types_in_place},
@@ -61,6 +62,27 @@ impl DictionaryReq {
             requirement,
             field,
             subscript_ty,
+        }
+    }
+
+    /// Whether a trait requirement is closed: no type or effect variable in its types or output
+    /// effects. A closed requirement has one static dictionary, which selection gives; an open
+    /// one depends on its variables, effects included, as the effects of the methods do.
+    pub(crate) fn is_closed(&self) -> bool {
+        match self {
+            Self::TraitImpl {
+                input_tys,
+                output_tys,
+                output_effs,
+                ..
+            } => {
+                input_tys
+                    .iter()
+                    .chain(output_tys)
+                    .all(TypeLike::is_constant)
+                    && output_effs.iter().all(|effects| !effects.has_variables())
+            }
+            Self::ProjectionSubscript { .. } | Self::VariantPayloadIndirection { .. } => false,
         }
     }
 
@@ -389,6 +411,11 @@ pub enum EvidenceBindingSource {
         definition: SubscriptId,
         captures: Vec<EvidenceBindingId>,
     },
+    /// The dictionary in parent slot `index` of the trait dictionary `dictionary`.
+    Parent {
+        dictionary: EvidenceBindingId,
+        index: TraitParentSlotIndex,
+    },
 }
 
 /// One node in a function-scoped, dependency-ordered evidence graph.
@@ -399,7 +426,7 @@ pub struct EvidenceBinding {
 }
 
 /// Data structure to hold extra parameters for a function.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ExtraParameters {
     /// The dictionary requirements for the function.
     /// This is a list of dictionaries that will be passed as extra parameters to the function.
@@ -493,6 +520,176 @@ impl ExtraParameters {
         // distinguish runtime trait dictionaries for otherwise identical function-typed inputs.
         position(&|given| given == input_tys)
             .or_else(|| position(&|given| same_types_erasing_effects(input_tys, given)))
+    }
+}
+
+/// How a [`ParentWalk`] tells that a requirement is one that it has already reached: by its
+/// trait and its input types, which determine its outputs.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum InputMatching {
+    /// The same input types, for contract reduction, which compares requirements as written.
+    Exact,
+    /// The same input types once their effects are erased, for evidence lookup: effects never
+    /// select an implementation, so they give the same dictionary.
+    ErasingEffects,
+}
+
+impl InputMatching {
+    fn same(self, left: &DictionaryReq, right: &DictionaryReq) -> bool {
+        match self {
+            Self::Exact => match (left, right) {
+                (
+                    DictionaryReq::TraitImpl {
+                        trait_id: left_trait,
+                        input_tys: left_inputs,
+                        ..
+                    },
+                    DictionaryReq::TraitImpl {
+                        trait_id: right_trait,
+                        input_tys: right_inputs,
+                        ..
+                    },
+                ) => left_trait == right_trait && left_inputs == right_inputs,
+                _ => false,
+            },
+            Self::ErasingEffects => same_trait_application_erasing_effects(left, right),
+        }
+    }
+}
+
+/// A requirement that a [`ParentWalk`] reaches, and how.
+#[derive(Debug)]
+pub(crate) struct ParentNode {
+    pub requirement: DictionaryReq,
+    pub reached: Reached,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Reached {
+    /// A root, with the caller's index.
+    Root(usize),
+    /// Parent slot `index` of the dictionary of the earlier node `holder`.
+    Slot {
+        holder: usize,
+        index: TraitParentSlotIndex,
+    },
+}
+
+/// A walk over the roots that are trait dictionaries, then the requirements that their
+/// dictionaries hold in their parent slots, transitively, breadth first. It yields the index of
+/// each node as it reaches it, and adds the slots of a node only when the earlier nodes are
+/// yielded, so a caller that stops early does not compute the rest. A requirement that
+/// `matching` finds among the earlier nodes is not added again, so the walk ends: a trait only
+/// implies traits defined before it.
+///
+/// Contract reduction (which implied requirements the slots hold) and evidence lookup (from which
+/// slot to read one) both walk the slots with this, so that they reach the same requirements.
+pub(crate) struct ParentWalk<'t, D: Fn(TraitId) -> &'t Trait> {
+    nodes: Vec<ParentNode>,
+    /// The next node to yield.
+    next: usize,
+    /// The next node whose slots to add.
+    holder: usize,
+    trait_def: D,
+    matching: InputMatching,
+}
+
+impl<'t, D: Fn(TraitId) -> &'t Trait> ParentWalk<'t, D> {
+    pub(crate) fn new(
+        roots: impl IntoIterator<Item = (usize, DictionaryReq)>,
+        trait_def: D,
+        matching: InputMatching,
+    ) -> Self {
+        let mut walk = Self {
+            nodes: Vec::new(),
+            next: 0,
+            holder: 0,
+            trait_def,
+            matching,
+        };
+        for (root, requirement) in roots {
+            if matches!(requirement, DictionaryReq::TraitImpl { .. }) {
+                walk.push(requirement, Reached::Root(root));
+            }
+        }
+        walk
+    }
+
+    /// The nodes reached so far, in the order of their indices.
+    pub(crate) fn nodes(&self) -> &[ParentNode] {
+        &self.nodes
+    }
+
+    /// The nodes reached so far, in the order of their indices.
+    pub(crate) fn into_nodes(self) -> Vec<ParentNode> {
+        self.nodes
+    }
+
+    /// All the nodes, once the walk has reached them.
+    pub(crate) fn into_all_nodes(mut self) -> Vec<ParentNode> {
+        while self.next().is_some() {}
+        self.nodes
+    }
+
+    fn push(&mut self, requirement: DictionaryReq, reached: Reached) {
+        if !self
+            .nodes
+            .iter()
+            .any(|node| self.matching.same(&node.requirement, &requirement))
+        {
+            self.nodes.push(ParentNode {
+                requirement,
+                reached,
+            });
+        }
+    }
+}
+
+impl<'t, D: Fn(TraitId) -> &'t Trait> Iterator for ParentWalk<'t, D> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<usize> {
+        while self.next == self.nodes.len() {
+            let DictionaryReq::TraitImpl {
+                trait_id,
+                input_tys,
+                output_tys,
+                output_effs,
+            } = &self.nodes.get(self.holder)?.requirement
+            else {
+                unreachable!("only trait dictionaries have parent slots")
+            };
+            let slots =
+                (self.trait_def)(*trait_id).parent_slots(input_tys, output_tys, output_effs);
+            let holder = self.holder;
+            self.holder += 1;
+            for (index, requirement) in slots.into_iter().enumerate() {
+                let index = TraitParentSlotIndex::from_index(index);
+                self.push(requirement, Reached::Slot { holder, index });
+            }
+        }
+        self.next += 1;
+        Some(self.next - 1)
+    }
+}
+
+/// Whether two trait requirements are of the same trait at the same input types, effects aside:
+/// they then have the same evidence.
+fn same_trait_application_erasing_effects(left: &DictionaryReq, right: &DictionaryReq) -> bool {
+    match (left, right) {
+        (
+            DictionaryReq::TraitImpl {
+                trait_id: left_trait,
+                input_tys: left_inputs,
+                ..
+            },
+            DictionaryReq::TraitImpl {
+                trait_id: right_trait,
+                input_tys: right_inputs,
+                ..
+            },
+        ) => left_trait == right_trait && same_types_erasing_effects(left_inputs, right_inputs),
+        _ => false,
     }
 }
 
@@ -622,7 +819,8 @@ impl<'d, 'sr, 'sm> DictElaborationCtx<'d, 'sr, 'sm> {
             EvidenceBindingSource::Static(evidence) => Some(evidence.clone()),
             EvidenceBindingSource::Parameter(_)
             | EvidenceBindingSource::ConstructedDictionary { .. }
-            | EvidenceBindingSource::ConstructedSubscript { .. } => None,
+            | EvidenceBindingSource::ConstructedSubscript { .. }
+            | EvidenceBindingSource::Parent { .. } => None,
         }
     }
 
@@ -641,6 +839,13 @@ impl<'d, 'sr, 'sm> DictElaborationCtx<'d, 'sr, 'sm> {
             let captures = match &binding.source {
                 EvidenceBindingSource::ConstructedDictionary { captures, .. }
                 | EvidenceBindingSource::ConstructedSubscript { captures, .. } => captures,
+                EvidenceBindingSource::Parent { dictionary, .. } => {
+                    assert!(
+                        dictionary.as_index() < index,
+                        "evidence binding {index} must refer only to earlier bindings"
+                    );
+                    continue;
+                }
                 EvidenceBindingSource::Parameter(_) | EvidenceBindingSource::Static(_) => {
                     continue;
                 }
@@ -707,6 +912,72 @@ impl<'d, 'sr, 'sm> DictElaborationCtx<'d, 'sr, 'sm> {
             source,
         });
         id
+    }
+
+    /// The evidence of the trait `trait_id` at `input_tys` read from the parent slots of a
+    /// dictionary that the function is given, directly or through other parent slots, if one
+    /// holds it. The shortest path is taken; parameters are searched in order.
+    ///
+    /// The slots are walked as contract reduction (`held_by_dictionaries`) walks them, so this
+    /// finds every requirement that reduction leaves to them.
+    pub(crate) fn parent_evidence(
+        &mut self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+    ) -> Option<EvidenceBindingId> {
+        let mut walk = ParentWalk::new(
+            self.dicts
+                .requirements
+                .iter()
+                .enumerate()
+                .filter(|(_, requirement)| matches!(requirement, DictionaryReq::TraitImpl { .. }))
+                .map(|(index, requirement)| (index, requirement.clone())),
+            |id| self.trait_solver.trait_def(id),
+            InputMatching::ErasingEffects,
+        );
+        // The first slot that holds it is on a shortest path.
+        let found = loop {
+            let index = walk.next()?;
+            let node = &walk.nodes()[index];
+            if let (
+                Reached::Slot { .. },
+                DictionaryReq::TraitImpl {
+                    trait_id: slot_trait,
+                    input_tys: slot_inputs,
+                    ..
+                },
+            ) = (node.reached, &node.requirement)
+                && *slot_trait == trait_id
+                && (slot_inputs.as_slice() == input_tys
+                    || same_types_erasing_effects(slot_inputs, input_tys))
+            {
+                break index;
+            }
+        };
+        let nodes = walk.into_nodes();
+        // Bind the path from its parameter down to the found node.
+        let mut path = Vec::new();
+        let mut node = found;
+        let parameter = loop {
+            match nodes[node].reached {
+                Reached::Root(parameter) => break parameter,
+                Reached::Slot { holder, index } => {
+                    path.push((node, index));
+                    node = holder;
+                }
+            }
+        };
+        let mut binding = EvidenceBindingId::from_index(parameter);
+        for (node, index) in path.into_iter().rev() {
+            binding = self.intern_evidence_binding(
+                nodes[node].requirement.clone(),
+                EvidenceBindingSource::Parent {
+                    dictionary: binding,
+                    index,
+                },
+            );
+        }
+        Some(binding)
     }
 
     pub(crate) fn take_generated_projection_subscripts(

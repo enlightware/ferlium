@@ -179,6 +179,7 @@ pub(super) fn operation_calls_only(
         | OperationKind::AddressOffsetPlace { .. }
         | OperationKind::DictEntry { .. }
         | OperationKind::BuildDictionary { .. }
+        | OperationKind::DictParent { .. }
         | OperationKind::SubscriptMember { .. }
         | OperationKind::BuildSubscriptEvidence { .. }
         | OperationKind::BuildSubscript { .. }

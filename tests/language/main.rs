@@ -17,6 +17,7 @@ mod impl_order;
 mod math;
 mod mir;
 mod multi_module;
+mod parent_dictionaries;
 mod recursive_types;
 mod regression;
 mod serde;

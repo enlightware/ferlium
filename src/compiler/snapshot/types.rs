@@ -90,6 +90,7 @@ pub(crate) struct SnapshotTrait {
     output_effect_names: Vec<String>,
     parent_constraints: Vec<SnapshotConstraint>,
     constraints: Vec<SnapshotConstraint>,
+    parent_slots: Vec<SnapshotConstraint>,
     methods: Vec<(String, SnapshotCallableDefinition)>,
     default_methods: Vec<Option<TraitDefaultMethod>>,
     associated_consts: Vec<SnapshotTraitAssociatedConst>,
@@ -312,6 +313,11 @@ impl SnapshotTrait {
                 .iter()
                 .map(|value| SnapshotConstraint::capture(value, graph))
                 .collect::<Result<_, _>>()?,
+            parent_slots: value
+                .parent_slots
+                .iter()
+                .map(|value| SnapshotConstraint::capture(value, graph))
+                .collect::<Result<_, _>>()?,
             methods: value
                 .methods
                 .iter()
@@ -365,6 +371,11 @@ impl SnapshotTrait {
                 .collect::<Result<_, _>>()?,
             constraints: self
                 .constraints
+                .iter()
+                .map(|value| value.materialize(types))
+                .collect::<Result<_, _>>()?,
+            parent_slots: self
+                .parent_slots
                 .iter()
                 .map(|value| value.materialize(types))
                 .collect::<Result<_, _>>()?,
@@ -488,6 +499,7 @@ mod tests {
             assert_eq!(restored.methods.len(), expected.methods.len());
             assert_eq!(restored.constraints, expected.constraints);
             assert_eq!(restored.parent_constraints, expected.parent_constraints);
+            assert_eq!(restored.parent_slots, expected.parent_slots);
         }
     }
 }

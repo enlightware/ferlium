@@ -1,7 +1,7 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::BTreeMap, fmt, hash::Hash, rc::Rc};
+use std::{collections::BTreeMap, fmt, hash::Hash, mem, rc::Rc};
 
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
@@ -17,7 +17,7 @@ use crate::{
     format::{FormatWith, type_variable_index_to_string_latin, write_with_separator_and_format_fn},
     hir::{
         ENodeArena, NodeArena,
-        dictionary::DictionaryReq,
+        dictionary::{DictionaryReq, StaticEvidence},
         function::{CallableDefinition, Function, PendingScriptFunction, ScriptFunction},
         hir_syn,
         value::LiteralValue,
@@ -205,12 +205,47 @@ pub struct TraitDictionary {
     functions: Vec<LocalFunctionId>,
     capture_schema: Vec<DictionaryReq>,
     entry_capture_mappings: Vec<Vec<DictionaryEntryEvidence>>,
+    /// How the dictionary gives the dictionaries of its trait's parent slots, in slot order.
+    parents: Vec<ParentAccessor>,
 }
+
+/// How a dictionary gives the dictionary of one of its trait's parent slots, from the enclosing
+/// dictionary, as an owned evidence reference.
+#[derive(Debug, Clone)]
+pub enum ParentAccessor {
+    /// The slot's requirement is this capture of the dictionary, resolved where the dictionary
+    /// is built.
+    Capture(DictionaryCaptureIndex),
+    /// The slot's requirement is closed, without type or effect variable: its module resolves it
+    /// to [`Self::Static`] once its implementations exist.
+    Pending(DictionaryReq),
+    /// The static dictionary of the slot's requirement. It is stored in the definition rather
+    /// than in the dictionary's value, so it may capture that dictionary.
+    Static(StaticEvidence),
+}
+
+impl ParentAccessor {
+    /// The static dictionary of this accessor, which must have been resolved.
+    pub fn static_evidence(&self) -> Option<&StaticEvidence> {
+        match self {
+            Self::Capture(_) => None,
+            Self::Pending(requirement) => {
+                panic!("parent accessor for {requirement:?} read before its module resolved it")
+            }
+            Self::Static(evidence) => Some(evidence),
+        }
+    }
+}
+
+define_id_type!(
+    /// Index into the capture schema of a dictionary.
+    DictionaryCaptureIndex
+);
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DictionaryEntryEvidence {
-    Capture(usize),
+    Capture(DictionaryCaptureIndex),
     SelfDictionary,
 }
 
@@ -241,7 +276,7 @@ impl DictionaryEntryRequirements {
             } = requirement
             {
                 let definition = trait_def(*trait_id);
-                if !definition.has_runtime_dictionary_entries()
+                if !definition.has_runtime_dictionary()
                     || is_value_trait_for_function_type(
                         *trait_id, definition, input_tys, output_tys,
                     )
@@ -300,7 +335,7 @@ pub(crate) fn dictionary_capture_plan<'a>(
                                 schema.push(requirement.clone());
                                 index
                             });
-                        DictionaryEntryEvidence::Capture(index)
+                        DictionaryEntryEvidence::Capture(DictionaryCaptureIndex::from_index(index))
                     }
                 })
                 .collect()
@@ -326,6 +361,7 @@ impl TraitDictionary {
                 .collect(),
             capture_schema: Vec::new(),
             entry_capture_mappings: vec![Vec::new(); entry_count],
+            parents: Vec::new(),
         }
     }
 
@@ -340,13 +376,65 @@ impl TraitDictionary {
                 .iter()
                 .flatten()
                 .all(|evidence| match evidence {
-                    DictionaryEntryEvidence::Capture(index) => *index < capture_schema.len(),
+                    DictionaryEntryEvidence::Capture(index) => {
+                        index.as_index() < capture_schema.len()
+                    }
                     DictionaryEntryEvidence::SelfDictionary => true,
                 })
         );
         self.capture_schema = capture_schema;
         self.entry_capture_mappings = entry_capture_mappings;
         self
+    }
+
+    /// Gives this dictionary the accessors of its trait's parent slots, `parents`, at its
+    /// types: a closed slot is static, to be resolved by the module of the dictionary once its
+    /// implementations are known; another is a capture, shared with an entry that captures the
+    /// same requirement.
+    pub(crate) fn with_parents(mut self, parents: Vec<DictionaryReq>) -> Self {
+        self.parents = parents
+            .into_iter()
+            .map(|slot| {
+                if slot.is_closed() {
+                    return ParentAccessor::Pending(slot);
+                }
+                let index = self
+                    .capture_schema
+                    .iter()
+                    .position(|capture| capture.same_capture_schema_entry(&slot))
+                    .unwrap_or_else(|| {
+                        self.capture_schema.push(slot);
+                        self.capture_schema.len() - 1
+                    });
+                ParentAccessor::Capture(DictionaryCaptureIndex::from_index(index))
+            })
+            .collect();
+        self
+    }
+
+    /// Gives this dictionary `parents`, accessors that its captures already provide.
+    pub(crate) fn with_parent_accessors(mut self, parents: Vec<ParentAccessor>) -> Self {
+        assert!(parents.iter().all(|parent| match parent {
+            ParentAccessor::Capture(index) => index.as_index() < self.capture_schema.len(),
+            ParentAccessor::Pending(_) | ParentAccessor::Static(_) => true,
+        }));
+        self.parents = parents;
+        self
+    }
+
+    /// The accessors of the parent slots of this dictionary's trait.
+    pub fn parents(&self) -> &[ParentAccessor] {
+        &self.parents
+    }
+
+    /// The parent accessors that wait for their module to resolve them.
+    pub(crate) fn parents_mut(&mut self) -> &mut [ParentAccessor] {
+        &mut self.parents
+    }
+
+    /// Takes the parent accessors out of this dictionary, leaving none.
+    pub(crate) fn take_parents(&mut self) -> Vec<ParentAccessor> {
+        mem::take(&mut self.parents)
     }
 
     pub fn capture_schema(&self) -> &[DictionaryReq] {
@@ -386,12 +474,27 @@ impl TraitDictionary {
         &self,
         index: TraitDictionaryEntryIndex,
         captures: &[E],
+        self_evidence: impl FnMut() -> E,
+    ) -> Option<Vec<E>> {
+        self.project_entry_captures_with(
+            index,
+            |capture| captures.get(capture.as_index()).cloned(),
+            self_evidence,
+        )
+    }
+
+    /// As [`Self::project_entry_captures`], reading each projected capture with `capture`, for
+    /// callers whose captures are not a slice of evidence.
+    pub fn project_entry_captures_with<E>(
+        &self,
+        index: TraitDictionaryEntryIndex,
+        mut capture: impl FnMut(DictionaryCaptureIndex) -> Option<E>,
         mut self_evidence: impl FnMut() -> E,
     ) -> Option<Vec<E>> {
         self.entry_capture_mapping(index)
             .iter()
             .map(|mapping| match mapping {
-                DictionaryEntryEvidence::Capture(index) => captures.get(*index).cloned(),
+                DictionaryEntryEvidence::Capture(index) => capture(*index),
                 DictionaryEntryEvidence::SelfDictionary => Some(self_evidence()),
             })
             .collect()
@@ -942,8 +1045,10 @@ impl TraitImpls {
             },
         );
         let dictionary_type = Self::dictionary_ty(method_tys, associated_const_tys);
+        let parents = trait_def.parent_slots(&input_tys, &output_tys, &output_effs);
         let dictionary_value =
-            dictionary_with_default_entries(&methods, &associated_const_getters, &self_entries);
+            dictionary_with_default_entries(&methods, &associated_const_getters, &self_entries)
+                .with_parents(parents);
         let imp = TraitImpl::new(
             trait_id,
             input_tys.to_vec(),
@@ -1030,7 +1135,9 @@ impl TraitImpls {
             },
         );
         let dictionary_type = Self::dictionary_ty(method_tys, associated_const_tys);
-        let dictionary_value = build_dictionary_value(&methods, &associated_const_getters);
+        let parents = trait_def.parent_slots(&input_tys, &output_tys, &output_effs);
+        let dictionary_value =
+            build_dictionary_value(&methods, &associated_const_getters).with_parents(parents);
         let imp = TraitImpl::new(
             trait_id,
             input_tys.to_vec(),
@@ -1209,8 +1316,10 @@ impl TraitImpls {
             },
         );
         let dictionary_type = Self::dictionary_ty(method_tys, associated_const_tys);
+        let parents = trait_def.parent_slots(&sub_key.input_tys, &output_tys, &output_effs);
         let dictionary_value =
-            dictionary_with_default_entries(&methods, &associated_const_getters, &self_entries);
+            dictionary_with_default_entries(&methods, &associated_const_getters, &self_entries)
+                .with_parents(parents);
         let imp = TraitImpl::new(
             trait_id,
             sub_key.input_tys.to_vec(),

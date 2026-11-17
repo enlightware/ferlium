@@ -408,7 +408,10 @@ impl ValueRoles {
                 accessor: ty.clone(),
             });
         }
-        if matches!(operation.kind, OperationKind::BuildDictionary { .. }) {
+        if matches!(
+            operation.kind,
+            OperationKind::BuildDictionary { .. } | OperationKind::DictParent { .. }
+        ) {
             return Some(ValueRole::Dictionary);
         }
         if matches!(operation.kind, OperationKind::BuildSubscriptEvidence { .. }) {
@@ -785,6 +788,7 @@ pub(crate) fn check_operand_roles(
             }
         }
         OperationKind::DictEntry { .. }
+        | OperationKind::DictParent { .. }
         | OperationKind::SubscriptMember { .. }
         | OperationKind::BorrowSubscriptMember { .. } => evidence(0),
         OperationKind::BuildDictionary { .. } => {

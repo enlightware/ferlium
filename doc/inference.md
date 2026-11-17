@@ -143,7 +143,9 @@ So the same body under a partial clause and under a complete one listing what in
 Requirements on the structure of a type, such as a field, an element or a variant, are not trait requirements: they stay inferred and are published with the types they describe.
 
 A written requirement implies the parents and `where` constraints of its trait, transitively, as every impl of the trait satisfies them.
-The body may use these implied requirements, and they become parameters only when it does, which changes no caller.
+The body may use these implied requirements, which changes no caller.
+A dictionary gives the dictionaries of the requirements that its trait implies when the trait's application determines them, so the body reads these there and they never become parameters.
+An implied requirement that the trait's application does not determine, such as one whose effect each impl chooses, becomes a parameter when the body uses it.
 
 In a recursive group, a function with a complete clause shows the other functions, at each round, only its written, implied and structural requirements, and reduces the rest after the last round.
 A requirement that another function would add to its contract is an error.

@@ -26,7 +26,9 @@ use crate::{
     format::FormatWith,
     hir::{
         self, NodeArena,
-        dictionary::{LateFunctionInstData, ModuleInstData},
+        dictionary::{
+            DictionaryReq, InputMatching, LateFunctionInstData, ModuleInstData, ParentWalk, Reached,
+        },
         elaboration::elaborate_generated_functions,
         emit_hir::{
             ImplStubData, PendingModuleFunctions, PubTypeConstraintPtr,
@@ -651,15 +653,20 @@ struct CompleteClause {
     /// The requirements that reduction keeps: those that the clause writes and those that they
     /// imply.
     leaves: Vec<PubTypeConstraint>,
-    /// The implied requirements that the bodies may use, each with the given that supplies
+    /// The implied requirements that the dictionary of a written one holds, in its parent slots
+    /// or in theirs: the bodies read their evidence from it, so they are never published.
+    held: Vec<PubTypeConstraint>,
+    /// The other implied requirements that the bodies may use, each with the given that supplies
     /// it. One that a body uses is published with the written ones; the others are not.
     implied: Vec<(GivenId, PubTypeConstraint)>,
 }
 
 impl CompleteClause {
     /// Adds the requirements of a complete clause that writes `written` to `ty_inf`: those written,
-    /// which the item publishes, and the ones that they imply, which it publishes if it uses
-    /// them. With `implied_as_givens` false, the implied ones are published too.
+    /// which the item publishes, and the ones that they imply, which the bodies may use. The
+    /// evidence of an implied one that the dictionary of a written one holds is read from it;
+    /// another is published if a body uses it. With `implied_as_givens` false, the implied ones
+    /// are all published.
     fn declare(
         written: impl IntoIterator<Item = PubTypeConstraint>,
         implied_as_givens: bool,
@@ -699,12 +706,23 @@ impl CompleteClause {
         for constraint in &written {
             ty_inf.add_pub_constraint(constraint.clone());
         }
+        let held = if implied_as_givens {
+            held_by_dictionaries(&written, env)
+        } else {
+            Vec::new()
+        };
         let mut leaves = written;
         leaves.extend(implied.iter().cloned());
         let implied = if implied_as_givens {
             implied
                 .into_iter()
-                .map(|constraint| (ty_inf.add_given_constraint(constraint.clone()), constraint))
+                .filter_map(|constraint| {
+                    let in_slot = held
+                        .iter()
+                        .any(|held| same_trait_application(held, &constraint));
+                    let given = ty_inf.add_given_constraint(constraint.clone());
+                    (!in_slot).then_some((given, constraint))
+                })
                 .collect()
         } else {
             for constraint in implied {
@@ -712,10 +730,15 @@ impl CompleteClause {
             }
             Vec::new()
         };
-        Self { leaves, implied }
+        Self {
+            leaves,
+            held,
+            implied,
+        }
     }
 
-    /// The implied requirements that `function` uses, as they are now.
+    /// The implied requirements that `function` uses and that no dictionary of a written one
+    /// holds, as they are now.
     fn used_implied(
         &self,
         function: LocalFunctionId,
@@ -731,6 +754,72 @@ impl CompleteClause {
             .map(|constraint| ty_inf.substitute_in_constraint(constraint))
             .collect()
     }
+
+    /// `requirements` without those that the dictionaries of the written ones hold, as reduction
+    /// can reach them: their evidence is read from those dictionaries.
+    fn without_held(
+        &self,
+        requirements: Vec<PubTypeConstraint>,
+        ty_inf: &mut UnifiedTypeInference,
+    ) -> Vec<PubTypeConstraint> {
+        let held = self
+            .held
+            .iter()
+            .map(|held| ty_inf.substitute_in_constraint(held))
+            .collect::<Vec<_>>();
+        requirements
+            .into_iter()
+            .filter(|requirement| {
+                let requirement = ty_inf.substitute_in_constraint(requirement);
+                !held
+                    .iter()
+                    .any(|held| same_trait_application(held, &requirement))
+            })
+            .collect()
+    }
+}
+
+/// The requirements that the dictionaries of `written` hold, in their parent slots and in those
+/// of these, transitively, as elaboration finds them (with [`ParentWalk`]).
+fn held_by_dictionaries(
+    written: &[PubTypeConstraint],
+    env: ModuleEnv<'_>,
+) -> Vec<PubTypeConstraint> {
+    let roots = written
+        .iter()
+        .enumerate()
+        .filter_map(|(index, requirement)| Some((index, requirement.trait_requirement()?)));
+    let nodes =
+        ParentWalk::new(roots, |id| env.trait_def(id), InputMatching::Exact).into_all_nodes();
+    // A held requirement is reported where the written one that holds it is.
+    let mut roots = Vec::with_capacity(nodes.len());
+    let mut held = Vec::new();
+    for node in nodes {
+        let root = match node.reached {
+            Reached::Root(root) => root,
+            Reached::Slot { holder, .. } => roots[holder],
+        };
+        roots.push(root);
+        if let Reached::Slot { .. } = node.reached {
+            let DictionaryReq::TraitImpl {
+                trait_id,
+                input_tys,
+                output_tys,
+                output_effs,
+            } = node.requirement
+            else {
+                unreachable!("parent slots are trait dictionaries")
+            };
+            held.push(PubTypeConstraint::new_have_trait(
+                trait_id,
+                input_tys,
+                output_tys,
+                output_effs,
+                written[root].use_site(),
+            ));
+        }
+    }
+    held
 }
 
 /// The fixed signature of a function of a recursive group of functions.
@@ -3713,7 +3802,8 @@ where
             };
             ty_inf.normalize_remaining_constraints();
             let mut constraints = ty_inf.remaining_constraints().to_vec();
-            // The implied requirements that a method uses are requirements of the impl.
+            // The implied requirements that a method uses are requirements of the impl, but for
+            // those that the dictionaries of the written ones hold.
             if let Some(complete) = &complete_clause {
                 for id in &local_fns {
                     for constraint in complete.used_implied(*id, &mut ty_inf) {
@@ -3760,7 +3850,11 @@ where
                         .evidence_plan = trait_output.evidence_plan.clone();
                 }
             }
-            ty_inf.replace_remaining_constraints(constraints.requirements);
+            let requirements = match &complete_clause {
+                Some(complete) => complete.without_held(constraints.requirements, &mut ty_inf),
+                None => constraints.requirements,
+            };
+            ty_inf.replace_remaining_constraints(requirements);
             ty_inf.finalize_effects()?;
             let generated = solver.finish().commit(
                 &mut output.functions,
@@ -5080,7 +5174,8 @@ where
             (None, None) => continue,
         };
         let mut scheme = output.functions[id.as_index()].definition.ty_scheme.clone();
-        // The implied requirements that the function uses are requirements of the function.
+        // The implied requirements that the function uses are requirements of the function, but
+        // for those that the dictionaries of the written ones hold.
         if let Some(complete) = complete {
             for constraint in complete.used_implied(*id, ty_inf) {
                 if !scheme.constraints.contains(&constraint) {
@@ -5134,6 +5229,10 @@ where
         };
         let Some(constraints) = reduced else {
             continue;
+        };
+        let constraints = match complete {
+            Some(complete) => complete.without_held(constraints, ty_inf),
+            None => constraints,
         };
         // Beyond its trait's contract, a default method may need from implementations what any
         // function with a complete clause leaves to its callers: the `Value` of its types and

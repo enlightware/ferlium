@@ -16,6 +16,7 @@ use crate::{
     format::{FormatWith, write_with_separator_and_format_fn},
     hir::{
         NodeArena,
+        dictionary::DictionaryReq,
         function::{CallableDefinition, FunctionDisplayContext},
     },
     module::{FunctionId, ModuleEnv, TraitId, TraitImplId, id::Id},
@@ -84,6 +85,11 @@ define_id_type!(
 define_id_type!(
     /// Index into a runtime trait dictionary tuple.
     TraitDictionaryEntryIndex
+);
+
+define_id_type!(
+    /// Index of a parent slot among those of a trait, the same in all its dictionaries.
+    TraitParentSlotIndex
 );
 
 /// If the trait method is from code, this struct contains the spans of the method.
@@ -176,6 +182,11 @@ pub struct Trait {
     pub parent_constraints: Vec<PubTypeConstraint>,
     /// The constraints on the trait, for example related to the associated types.
     pub constraints: Vec<PubTypeConstraint>,
+    /// The parent slots of the dictionaries of this trait: the requirements, among its parent
+    /// constraints followed by its constraints, whose dictionaries these dictionaries give, on
+    /// the trait's own parameters. Set once, when the trait is defined, by
+    /// [`Trait::set_parent_slots`].
+    pub parent_slots: Vec<PubTypeConstraint>,
     /// The methods provided by the trait.
     pub methods: Vec<(Ustr, CallableDefinition)>,
     /// Compiled default bodies, in method order. Native traits have no defaults.
@@ -352,6 +363,7 @@ impl Trait {
             output_effect_names: Vec::new(),
             parent_constraints: Vec::new(),
             constraints: Vec::new(),
+            parent_slots: Vec::new(),
             default_methods: vec![None; methods.len()],
             methods,
             associated_consts: Vec::new(),
@@ -404,6 +416,7 @@ impl Trait {
             output_effect_names: Vec::new(),
             parent_constraints: Vec::new(),
             constraints: constraints.into(),
+            parent_slots: Vec::new(),
             default_methods: vec![None; methods.len()],
             methods,
             associated_consts: Vec::new(),
@@ -488,9 +501,69 @@ impl Trait {
         self.method_count() + self.associated_const_count()
     }
 
-    /// Return whether this trait needs a runtime dictionary.
-    pub fn has_runtime_dictionary_entries(&self) -> bool {
-        self.runtime_dictionary_entry_count() > 0
+    /// Return whether this trait needs a runtime dictionary: it has entries, or parent slots.
+    pub fn has_runtime_dictionary(&self) -> bool {
+        self.runtime_dictionary_entry_count() > 0 || !self.parent_slots.is_empty()
+    }
+
+    /// Compute the parent slots of this trait, once its requirements are known: those of its
+    /// parent constraints and constraints that are trait requirements whose types and effects
+    /// are all parameters of this trait, so that an application of the trait determines them,
+    /// and whose trait has a runtime dictionary. A requirement that leaves an output to the
+    /// implementations, as `D<Self>` for `D<Self |-> ! E>`, has none. `trait_def` gives the
+    /// traits that this one implies, which are defined before it; one that it does not give has
+    /// no slot.
+    pub fn set_parent_slots<'a>(&mut self, trait_def: impl Fn(TraitId) -> Option<&'a Trait>) {
+        let type_count = self.input_type_count() + self.output_type_count();
+        let effect_count = self.output_effect_count();
+        self.parent_slots = self
+            .parent_constraints
+            .iter()
+            .chain(&self.constraints)
+            .filter(|constraint| match constraint {
+                PubTypeConstraint::HaveTrait { trait_id, .. } => {
+                    constraint
+                        .inner_ty_vars()
+                        .iter()
+                        .all(|var| var.name() < type_count)
+                        && constraint
+                            .inner_effect_vars()
+                            .iter()
+                            .all(|var| var.name() < effect_count)
+                        && trait_def(*trait_id).is_some_and(Trait::has_runtime_dictionary)
+                }
+                _ => false,
+            })
+            .cloned()
+            .collect();
+    }
+
+    /// The parent slots of a dictionary of this trait for an application: the dictionaries of the
+    /// requirements in [`Trait::parent_slots`], at the application's types. A slot has the same
+    /// index in every dictionary of the trait.
+    pub(crate) fn parent_slots(
+        &self,
+        input_tys: &[Type],
+        output_tys: &[Type],
+        output_effs: &[EffType],
+    ) -> Vec<DictionaryReq> {
+        let subst = self.param_subst_for(input_tys, output_tys, output_effs);
+        self.parent_slots
+            .iter()
+            .map(|constraint| {
+                let PubTypeConstraint::HaveTrait {
+                    trait_id,
+                    input_tys,
+                    output_tys,
+                    output_effs,
+                    ..
+                } = constraint.instantiate_simple(&subst)
+                else {
+                    unreachable!("parent slots are trait requirements")
+                };
+                DictionaryReq::new_trait_impl(trait_id, input_tys, output_tys, output_effs)
+            })
+            .collect()
     }
 
     /// Return the runtime dictionary index for a method.

@@ -827,6 +827,7 @@ pub(super) fn may_leave_frame_storage(
         | OperationKind::AddressOffset { .. }
         | OperationKind::AddressOffsetPlace { .. }
         | OperationKind::BuildDictionary { .. }
+        | OperationKind::DictParent { .. }
         | OperationKind::BuildSubscriptEvidence { .. }
         | OperationKind::BuildSubscript { .. }
         | OperationKind::CloneSubscriptEnv { .. }
@@ -938,6 +939,7 @@ impl DceCensus {
                     operation.kind,
                     OperationKind::DictEntry { .. }
                         | OperationKind::BuildDictionary { .. }
+                        | OperationKind::DictParent { .. }
                         | OperationKind::BuildSubscriptEvidence { .. }
                         | OperationKind::Subfield { .. }
                         | OperationKind::AddressOffset { .. }

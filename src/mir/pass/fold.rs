@@ -1370,6 +1370,7 @@ impl ArithmeticNegations {
             }
             OperationKind::Alloca { .. }
             | OperationKind::DictEntry { .. }
+            | OperationKind::DictParent { .. }
             | OperationKind::Subfield { .. }
             | OperationKind::StackSave => {}
             _ => self.clear(),

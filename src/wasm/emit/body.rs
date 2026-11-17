@@ -687,7 +687,7 @@ impl<'a, 's> Body<'a, 's> {
                             this.capture_slots.insert(id, offset);
                             continue;
                         }
-                        OperationKind::DictEntry { .. } => {
+                        OperationKind::DictEntry { .. } | OperationKind::DictParent { .. } => {
                             this.slot(
                                 Value::Register(id),
                                 size_of::<DictionaryReference>() as u32,
@@ -795,9 +795,14 @@ impl<'a, 's> Body<'a, 's> {
         if !this.projection_frames.is_empty() {
             this.reserve_scratch(Type::unit())?;
         }
+        let reads_parents = body.blocks().any(|block| {
+            operations(body.block(block))
+                .any(|operation| matches!(operation.kind, OperationKind::DictParent { .. }))
+        });
         if !this.selections.is_empty()
             || !this.borrowed_subscripts.is_empty()
             || this.layout_slot.is_some()
+            || reads_parents
         {
             this.evidence_base = Some(this.local(ValType::I32));
         }
@@ -980,7 +985,7 @@ impl<'a, 's> Body<'a, 's> {
                         DynamicAlign,
                         AllocationEnd,
                     ]),
-                    BuildArray { .. } => require(&[Scratch]),
+                    BuildArray { .. } | DictParent { .. } => require(&[Scratch]),
                     BuildClosure {
                         num_hidden_dicts,
                         has_env_dict,
@@ -3815,6 +3820,55 @@ impl<'a, 's> Body<'a, 's> {
                 self.address(&result)?;
                 self.i(I::Call(
                     self.imports.function_index("build_evidence").as_u32(),
+                ));
+                return Ok(());
+            }
+            DictParent {
+                trait_id, index, ..
+            } => {
+                // The descriptor of every dictionary of the trait has the slot's accessor at the
+                // same distance before its entries: a capture, at an offset of the dictionary's
+                // environment, or a static dictionary, at an address. The result retains it, as
+                // a selected entry does.
+                let slots = self.env.trait_def(*trait_id).parent_slots.len();
+                let distance = 8 * (slots - index.as_index()) as i32;
+                let accessor = self.helper_locals().get(Scratch);
+                let result = Value::Register(op.result_id().unwrap());
+                self.release_evidence(&result)?;
+                self.address(&result)?;
+                self.value(&args[0])?;
+                self.dictionary_table();
+                self.i(I::I32Const(-distance));
+                self.i(I::I32Add);
+                self.i(I::LocalTee(accessor.as_u32()));
+                // A static dictionary's address.
+                self.i(I::I32Load(MemArg {
+                    offset: 4,
+                    ..memarg(2)
+                }));
+                // A capture's address.
+                self.value(&args[0])?;
+                self.i(I::I32Load(MemArg {
+                    offset: ENVIRONMENT_OFFSET,
+                    ..memarg(2)
+                }));
+                self.i(I::LocalGet(accessor.as_u32()));
+                self.i(I::I32Load(MemArg {
+                    offset: 4,
+                    ..memarg(2)
+                }));
+                self.i(I::I32Add);
+                self.i(I::LocalGet(accessor.as_u32()));
+                self.i(I::I32Load(memarg(2)));
+                self.i(I::Select);
+                self.i(I::I32Const(size_of::<DictionaryReference>() as i32));
+                self.i(I::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                });
+                self.address(&result)?;
+                self.i(I::Call(
+                    self.imports.function_index("retain_evidence").as_u32(),
                 ));
                 return Ok(());
             }

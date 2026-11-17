@@ -211,6 +211,45 @@ struct DefaultingProgressKey {
     retained_bound_count: usize,
 }
 
+/// Whether every type that implements `trait_id` implements `implied` too, as one of its parents
+/// or `where` requirements on the same `Self`, transitively.
+fn trait_implies_on_self(trait_id: TraitId, implied: TraitId, solver: &TraitSolver<'_>) -> bool {
+    if trait_id == implied {
+        return true;
+    }
+    let trait_def = solver.trait_def(trait_id);
+    if trait_def.parent_constraints.is_empty() && trait_def.constraints.is_empty() {
+        return false;
+    }
+    let mut pending = vec![trait_id];
+    let mut seen = FxHashSet::default();
+    while let Some(trait_id) = pending.pop() {
+        if trait_id == implied {
+            return true;
+        }
+        if !seen.insert(trait_id) {
+            continue;
+        }
+        let self_ty = Type::variable_id(0);
+        let trait_def = solver.trait_def(trait_id);
+        pending.extend(
+            trait_def
+                .parent_constraints
+                .iter()
+                .chain(&trait_def.constraints)
+                .filter_map(|parent| match parent {
+                    PubTypeConstraint::HaveTrait {
+                        trait_id,
+                        input_tys,
+                        ..
+                    } if input_tys.first() == Some(&self_ty) => Some(*trait_id),
+                    _ => None,
+                }),
+        );
+    }
+    false
+}
+
 impl UnifiedTypeInference {
     /// Signature reachability includes retained subtype relations as well as
     /// public obligations. Otherwise delaying publication makes a generic
@@ -677,11 +716,13 @@ impl UnifiedTypeInference {
             } = constraint
             {
                 assert!(!input_tys.is_empty());
-                if *trait_id == num_trait_id {
-                    let maybe_ty_var = input_tys[0].data().as_variable().cloned();
-                    if let Some(ty_var) = maybe_ty_var {
-                        num_ty_vars.insert(ty_var);
-                    }
+                // A trait that implies `Num` on its `Self`, as `Real`, makes a numeric variable
+                // too: its dictionaries give that of `Num`, which is not a requirement of its own.
+                let maybe_ty_var = input_tys[0].data().as_variable().cloned();
+                if let Some(ty_var) = maybe_ty_var
+                    && trait_implies_on_self(*trait_id, num_trait_id, trait_solver)
+                {
+                    num_ty_vars.insert(ty_var);
                 }
                 let input_ty_vars: FxHashSet<_> =
                     input_tys.iter().flat_map(|ty| ty.inner_ty_vars()).collect();
