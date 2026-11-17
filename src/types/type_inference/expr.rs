@@ -607,8 +607,8 @@ impl TypeInference {
 
     /// A reference to a function of the group takes the group's instance of its types, and is
     /// recorded with the type `fn_ty` that the function has there. Returns whether `function`
-    /// is of the group: its reference then records no instantiation, as what the function needs
-    /// is found when the group is emitted.
+    /// is of the group: its reference then records no instantiation here, as the group's contract
+    /// is settled later; elaboration gives it the instantiation and what the function needs.
     fn share_group_type_instance(
         &mut self,
         function: FunctionId,

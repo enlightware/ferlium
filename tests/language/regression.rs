@@ -1115,3 +1115,30 @@ fn a_call_in_a_recursive_group_passes_evidence_for_types_only_requirements_name(
         for Err in match for Err in a() + 0 == 0 {a} {a => 0} {a = a = a}
     " });
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_recursive_call_with_a_callback_of_other_effects_keeps_them() {
+    // The inner call instantiates `E1` with `fallible`, not with the caller's own `E1`: its
+    // specialization must call the callback as fallible, whether `r` is called directly or
+    // through a value. Found by fuzzing.
+    for call in [
+        "r(|z| idiv(1, z), n - 1)",
+        "{ let g = r; g(|z| idiv(1, z), n - 1) }",
+    ] {
+        assert_eq!(
+            TestSession::new().fail_run(&format!(
+                "fn r<! E1>(f1: (int) -> int ! E1, n: int) -> int {{
+                    if n > 0 {{
+                        {call} + r(f1, n - 1)
+                    }} else {{
+                        f1(n)
+                    }}
+                }}
+                r(|z| z + 2, 2)"
+            )),
+            SourceFailureKind::DivisionByZero,
+            "{call}"
+        );
+    }
+}

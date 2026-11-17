@@ -1193,15 +1193,30 @@ fn late_module_call_inst_data(
             })
             .collect::<EffectsInstSubst>()
     };
+    // A reference inside the group recorded no instantiation: it is the one of the callee's
+    // quantifiers here, in their canonical order, which need not be the identity, as when a
+    // recursive call passes a callback of other effects.
+    let (ty_args, eff_args) =
+        if call_inst_data.ty_args.is_empty() && call_inst_data.eff_args.is_empty() {
+            (
+                (0..callee.ty_origins.len() as u32)
+                    .map(|index| ty_subst[&TypeVar::new(index)])
+                    .collect(),
+                (0..callee.effect_origins.len() as u32)
+                    .map(|index| eff_subst[&EffectVar::new(index)].clone())
+                    .collect(),
+            )
+        } else {
+            (
+                call_inst_data.ty_args.clone(),
+                call_inst_data.eff_args.clone(),
+            )
+        };
     let subst = (ty_subst, eff_subst);
     let mut mapper = BitmapInstantiationMapper::new(&subst);
     let dicts_req =
         instantiate_dictionary_requirements(&callee.requirements.requirements, &mut mapper);
-    Ok(hir::FnInstData::new(
-        dicts_req,
-        call_inst_data.ty_args.clone(),
-        call_inst_data.eff_args.clone(),
-    ))
+    Ok(hir::FnInstData::new(dicts_req, ty_args, eff_args))
 }
 
 /// Bind the variables in a final callee type to the corresponding call-site types.
@@ -2810,7 +2825,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 let argument_names = app.argument_names.clone();
                 let argument_name_hint_policy = app.argument_name_hint_policy;
                 let ty = app.ty.clone();
-                let inst_data = app.inst_data.clone();
+                let mut inst_data = app.inst_data.clone();
                 let source_extra_arguments = app.extra_arguments.iter().copied();
                 let mut extra_arguments = if !inst_data.dicts_req.is_empty() {
                     self.elaborate_extra_args_from_inst_data(&inst_data, function_span)?
@@ -2828,6 +2843,9 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                         function_span,
                         node_span,
                     )?;
+                    // The call records the instantiation that the late data gives it.
+                    inst_data.ty_args = late_inst_data.ty_args.clone();
+                    inst_data.eff_args = late_inst_data.eff_args.clone();
                     self.elaborate_extra_args_from_inst_data(&late_inst_data, node_span)?
                         .0
                 } else {
@@ -2955,6 +2973,10 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             }
             GetFunction(get_fn) => {
                 let mut get_fn = (**get_fn).clone();
+                // A late reference to a generic function of the group carries its instantiation
+                // in a closure: a bare function value has none, and the types of the indirect
+                // call through it are those of a round of the group, not of its contract.
+                let mut carries_instantiation = false;
                 let captures = if !get_fn.inst_data.dicts_req.is_empty() {
                     let (captures, _) =
                         self.elaborate_extra_args_from_inst_data(&get_fn.inst_data, node_span)?;
@@ -2967,7 +2989,6 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                         .ctx
                         .module_inst_data
                         .and_then(|inst_data| inst_data.functions.get(&get_fn.function.function))
-                        .filter(|inst_data| !inst_data.requirements.is_empty())
                     {
                         let late_inst_data = late_module_call_inst_data(
                             requirements,
@@ -2976,15 +2997,36 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                             get_fn.function_span,
                             node_span,
                         )?;
-                        self.elaborate_extra_args_from_inst_data(&late_inst_data, node_span)?
-                            .0
+                        // The reference records the instantiation that the late data gives it.
+                        get_fn.inst_data.ty_args = late_inst_data.ty_args.clone();
+                        get_fn.inst_data.eff_args = late_inst_data.eff_args.clone();
+                        // A bare reference stands for the identity, as a lambda's does.
+                        let identity = get_fn
+                            .inst_data
+                            .ty_args
+                            .iter()
+                            .enumerate()
+                            .all(|(index, ty)| *ty == Type::variable(TypeVar::new(index as u32)))
+                            && get_fn.inst_data.eff_args.iter().enumerate().all(
+                                |(index, effects)| {
+                                    *effects
+                                        == EffType::single_variable(EffectVar::new(index as u32))
+                                },
+                            );
+                        carries_instantiation = !identity;
+                        if requirements.requirements.is_empty() {
+                            Vec::new()
+                        } else {
+                            self.elaborate_extra_args_from_inst_data(&late_inst_data, node_span)?
+                                .0
+                        }
                     } else {
                         Vec::new()
                     }
                 } else {
                     Vec::new()
                 };
-                if captures.is_empty() {
+                if captures.is_empty() && !carries_instantiation {
                     GetFunction(b(get_fn))
                 } else {
                     let function = self.alloc_elaborated_node(

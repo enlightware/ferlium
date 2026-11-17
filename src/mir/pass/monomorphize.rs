@@ -1271,23 +1271,21 @@ fn simplify_after_substitution(edit: &mut FunctionEdit, env: ModuleEnv<'_>) {
     elide_trivial_ownership_operations(edit, env);
 }
 
-/// Points a specialized body's recursive calls at the specialization rather than the original.
+/// Points a specialized body's recursive calls that record no instantiation at the specialization
+/// rather than the original.
 ///
-/// **A recursive call records no instantiation**, so nothing else can redirect it: type inference
-/// types a call within the defining group monomorphically, against the function's own variables,
-/// rather than instantiating its scheme — there is no `FnInstData` to carry down. Left alone, a
-/// specialization recurses into the generic original and every level below the first runs
-/// unspecialized, which for a recursive algorithm is nearly all of them.
-///
-/// The redirection is sound for the same reason the instantiation is missing: Hindley-Milner cannot
-/// infer polymorphic recursion, so a self-call is necessarily at the caller's own instantiation —
-/// the one this body was specialized at. Only calls carrying *no* instantiation are redirected; one
-/// that carries an explicit instantiation is an ordinary call site, and
-/// [`specialize_call_sites`] resolves it through the cache like any other.
+/// A call to a generic function records its instantiation, a call within a recursive group too:
+/// elaboration gives it the one of the group's settled contract, which need not be the identity
+/// (a recursive call may pass a callback of other effects). Substitution makes it concrete, and
+/// [`specialize_call_sites`] resolves it through the cache like any other call, to this
+/// specialization when it is the caller's own. A call that records none stands for the identity,
+/// the caller's own instantiation, which is the one this body was specialized at. Left alone, it
+/// would recurse into the original, and every level below the first would run unspecialized,
+/// which for a recursive algorithm is nearly all of them.
 ///
 /// A bound callback is an additional condition: only self-calls forwarding every bound parameter
-/// unchanged reuse `own`. Other self-calls record the containing body's monomorphic instantiation,
-/// allowing ordinary call-site specialization to retain types while selecting another callback.
+/// unchanged reuse `own`. Other self-calls record the containing body's instantiation, allowing
+/// ordinary call-site specialization to retain types while selecting another callback.
 ///
 /// The specialization still carries its original's signature at this point, so the operands need no
 /// adjustment; [`dead_evidence`](super::dead_evidence) narrows this call with every other.
@@ -1317,8 +1315,8 @@ fn resolve_recursion(edit: &mut FunctionEdit, key: &SpecializationKey, own: Func
                 }) {
                     operation.operands[0] = own.clone();
                 } else {
-                    // HM self-calls have the containing body's instantiation even when the
-                    // callback changes. Preserve that proof for type-only or new callback copies.
+                    // A self-call without instantiation is at the containing body's, even when
+                    // the callback changes. Preserve that proof for type-only or new callback copies.
                     let OperationKind::Call { metadata, .. } = &mut operation.kind else {
                         unreachable!()
                     };
@@ -4410,10 +4408,9 @@ fn use_it(x: int) { with_zero(x) }",
         );
     }
 
-    /// A recursive call records no instantiation — inference types a call within the defining group
-    /// monomorphically rather than instantiating the scheme — so nothing else can redirect it. Left
-    /// alone a specialization recurses into the generic original, and for a recursive algorithm
-    /// every level below the first runs unspecialized.
+    /// A recursive call at the caller's own instantiation reaches the specialization rather than the
+    /// generic original: otherwise, for a recursive algorithm, every level below the first would run
+    /// unspecialized.
     #[test]
     fn a_specialization_recurses_into_itself() {
         let mut session = CompilerSession::new();

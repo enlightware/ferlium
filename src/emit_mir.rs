@@ -1322,7 +1322,7 @@ impl<'a> Emitter<'a> {
     /// A lambda is generalized together with its enclosing function and takes that function's
     /// quantifiers as its own, so the body building it, the enclosing function or another of its
     /// lambdas, names them in its own type environment. Its reference therefore records no type
-    /// arguments, as a recursive call records none. `None` for any other function.
+    /// arguments. `None` for any other function.
     fn lambda_instantiation(&self, function: FunctionId) -> Option<Instantiation> {
         if function.module != self.env.current.module_id() {
             return None;
