@@ -1,7 +1,7 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{mem, slice::from_ref};
+use std::{borrow::Borrow, mem, slice::from_ref};
 
 use itertools::Itertools;
 
@@ -49,11 +49,18 @@ impl ConstraintBoundary {
         )
     }
 
-    fn accessible_constraint_indices(&self, constraints: &[PubTypeConstraint]) -> FxHashSet<usize> {
+    fn accessible_constraint_indices<C: Borrow<PubTypeConstraint>>(
+        &self,
+        constraints: &[C],
+    ) -> FxHashSet<usize> {
         if self.seed_ty_vars.is_empty() {
             return FxHashSet::default();
         }
 
+        let constraints = constraints
+            .iter()
+            .map(Borrow::borrow)
+            .collect::<Vec<&PubTypeConstraint>>();
         let mut ins: FxHashSet<_> = constraints
             .iter()
             .enumerate()
@@ -82,35 +89,35 @@ impl ConstraintBoundary {
         ins
     }
 
-    pub fn accessible_constraints<'a>(
+    pub fn accessible_constraints<'a, C: Borrow<PubTypeConstraint>>(
         &self,
-        constraints: &'a [PubTypeConstraint],
+        constraints: &'a [C],
     ) -> Vec<&'a PubTypeConstraint> {
         let indices = self.accessible_constraint_indices(constraints);
         constraints
             .iter()
             .enumerate()
             .filter(|(index, _)| indices.contains(index))
-            .map(|(_, constraint)| constraint)
+            .map(|(_, constraint)| Borrow::<PubTypeConstraint>::borrow(constraint))
             .collect()
     }
 
-    pub fn inaccessible_constraints<'a>(
+    pub fn inaccessible_constraints<'a, C: Borrow<PubTypeConstraint>>(
         &self,
-        constraints: &'a [PubTypeConstraint],
+        constraints: &'a [C],
     ) -> Vec<&'a PubTypeConstraint> {
         let indices = self.accessible_constraint_indices(constraints);
         constraints
             .iter()
             .enumerate()
             .filter(|(index, _)| !indices.contains(index))
-            .map(|(_, constraint)| constraint)
+            .map(|(_, constraint)| Borrow::<PubTypeConstraint>::borrow(constraint))
             .collect()
     }
 
-    fn owned_accessible_constraints(
+    fn owned_accessible_constraints<C: Borrow<PubTypeConstraint>>(
         &self,
-        constraints: &[PubTypeConstraint],
+        constraints: &[C],
     ) -> Vec<PubTypeConstraint> {
         self.accessible_constraints(constraints)
             .into_iter()
@@ -118,9 +125,9 @@ impl ConstraintBoundary {
             .collect()
     }
 
-    pub fn owned_inaccessible_constraints(
+    pub fn owned_inaccessible_constraints<C: Borrow<PubTypeConstraint>>(
         &self,
-        constraints: &[PubTypeConstraint],
+        constraints: &[C],
     ) -> Vec<PubTypeConstraint> {
         self.inaccessible_constraints(constraints)
             .into_iter()
@@ -172,15 +179,13 @@ impl DefaultingScope {
             .iter()
             .flat_map(|var| inference.lookup_type_var(*var).inner_ty_vars())
             .collect::<Vec<_>>();
-        inference
-            .constraint_boundary(seeds)
-            .owned_accessible_constraints(inference.remaining_constraints())
+        let boundary = inference.constraint_boundary(seeds);
+        boundary.owned_accessible_constraints(&inference.linking_constraints())
     }
 
     fn unit_default_constraints(
         &self,
         ty_inf: &mut UnifiedTypeInference,
-        remaining_constraints: &[PubTypeConstraint],
         boundary_constraints: &[PubTypeConstraint],
     ) -> Vec<PubTypeConstraint> {
         let unit_variant_seed_ty_vars: Vec<_> = self
@@ -194,12 +199,11 @@ impl DefaultingScope {
         }
 
         let unit_boundary = ty_inf.constraint_boundary(unit_variant_seed_ty_vars);
-        let source = if boundary_constraints.is_empty() {
-            remaining_constraints
+        if boundary_constraints.is_empty() {
+            unit_boundary.owned_accessible_constraints(&ty_inf.linking_constraints())
         } else {
-            boundary_constraints
-        };
-        unit_boundary.owned_accessible_constraints(source)
+            unit_boundary.owned_accessible_constraints(boundary_constraints)
+        }
     }
 }
 
@@ -209,6 +213,19 @@ struct DefaultingProgressKey {
     boundary_constraint_var_count: usize,
     variable_solutions: Vec<Type>,
     retained_bound_count: usize,
+}
+
+/// Whether `constraint` ties its type variables together for defaulting: it is not one of the
+/// `derived` `Value` applications, which hold whenever their leaves do.
+fn links(derived: &FxHashSet<(TraitId, Type)>, constraint: &PubTypeConstraint) -> bool {
+    match constraint {
+        PubTypeConstraint::HaveTrait {
+            trait_id,
+            input_tys,
+            ..
+        } if input_tys.len() == 1 => !derived.contains(&(*trait_id, input_tys[0])),
+        _ => true,
+    }
 }
 
 /// Whether every type that implements `trait_id` implements `implied` too, as one of its parents
@@ -254,14 +271,38 @@ impl UnifiedTypeInference {
     /// Signature reachability includes retained subtype relations as well as
     /// public obligations. Otherwise delaying publication makes a generic
     /// variable appear orphaned and eligible for numeric defaulting.
+    /// The remaining constraints that tie their type variables together for defaulting: all but
+    /// the compiler-derived `Value` applications whose leaves are requirements of their own, as
+    /// `Value<(T, B)>` beside `Value<T>` and `Value<B>`. Such an application holds whenever its
+    /// leaves do, so a variable that only it ties to another is free to default on its own.
+    pub(crate) fn linking_constraints(&mut self) -> Vec<&PubTypeConstraint> {
+        let derived = self.derived_value_applications();
+        self.remaining_ty_constraints
+            .iter()
+            .filter(|constraint| links(&derived, constraint))
+            .collect()
+    }
+
+    /// The derived `Value` applications of [`Self::linking_constraints`], as they are now.
+    fn derived_value_applications(&mut self) -> FxHashSet<(TraitId, Type)> {
+        (0..self.derived_value_applications.len())
+            .map(|index| {
+                let (trait_id, ty) = self.derived_value_applications[index];
+                (trait_id, self.normalize_type(ty))
+            })
+            .collect()
+    }
+
     pub(crate) fn constraint_boundary(
         &mut self,
         seeds: impl IntoIterator<Item = TypeVar>,
     ) -> ConstraintBoundary {
         let mut neighbors = FxHashMap::<TypeVar, Vec<TypeVar>>::default();
+        let derived = self.derived_value_applications();
         let groups = self
             .remaining_ty_constraints
             .iter()
+            .filter(|constraint| links(&derived, constraint))
             .map(|c| c.inner_ty_vars())
             .chain(self.bounds.relations().map(|bound| {
                 bound
@@ -358,6 +399,7 @@ impl UnifiedTypeInference {
             let ty = self.substitute_in_type(input_tys[0]);
             if generated_value_evidence_types(ty, &env).is_some() {
                 self.add_activated_value_constraint(value_trait_id, ty, span.use_site, env);
+                self.derived_value_applications.push((value_trait_id, ty));
             }
         }
     }
@@ -1146,9 +1188,8 @@ impl UnifiedTypeInference {
             self.default_num_types_once(&boundary_constraints, trait_solver, arena)?;
             self.propagate_type_bounds()?;
 
-            let remaining_constraints = self.remaining_constraints().to_vec();
             let unit_default_constraints =
-                scope.unit_default_constraints(self, &remaining_constraints, &boundary_constraints);
+                scope.unit_default_constraints(self, &boundary_constraints);
             if !unit_default_constraints.is_empty() {
                 self.default_unit_variant_trait_inputs_to_unit(
                     &unit_default_constraints,

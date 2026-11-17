@@ -3678,7 +3678,7 @@ where
         ty_inf.normalize_remaining_constraints();
         let head_boundary = ty_inf.constraint_boundary(head_quantifiers.iter().copied());
         let orphan_constraints =
-            head_boundary.owned_inaccessible_constraints(ty_inf.remaining_constraints());
+            head_boundary.owned_inaccessible_constraints(&ty_inf.linking_constraints());
         let scope = DefaultingScope::from_constraints(&orphan_constraints);
         let mut solver = trait_solver_from_module!(output, others);
         ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, solver_arena)?;
@@ -5572,7 +5572,7 @@ fn function_defaulting_scope(
     ty_inf.normalize_remaining_constraints();
     let sig_boundary = ty_inf.constraint_boundary(sig_ty_vars.iter().copied());
     let orphan_constraints =
-        sig_boundary.owned_inaccessible_constraints(ty_inf.remaining_constraints());
+        sig_boundary.owned_inaccessible_constraints(&ty_inf.linking_constraints());
     // If the signature still exposes type variables, it defines the boundary for
     // defaulting and body-local `None`/unit evidence must not bias it.
     // Only functions with no remaining signature boundary can use their body root

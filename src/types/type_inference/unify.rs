@@ -103,6 +103,10 @@ pub struct UnifiedTypeInference {
     pub(super) ty_unification_table: RevisionedTable<TyVarKey>,
     /// Remaining constraints that cannot be solved, will be part of the resulting type scheme
     pub(super) remaining_ty_constraints: RevisionedConstraints,
+    /// The compiler-derived `Value` applications whose leaves are requirements of their own: such
+    /// an application holds whenever its leaves do, so it ties none of its variables to another
+    /// for defaulting.
+    pub(super) derived_value_applications: Vec<(TraitId, Type)>,
     pub(super) mut_unification_table: RevisionedTable<MutVarKey>,
     pub(super) effects: EffectSolver,
     /// Constraints of the implementations that resolved trait applications, still to solve.
@@ -514,6 +518,7 @@ impl UnifiedTypeInference {
             evidence_uses,
             ty_unification_table: ty_unification_table.into(),
             remaining_ty_constraints: RevisionedConstraints::default(),
+            derived_value_applications: Vec::new(),
             mut_unification_table: mut_unification_table.into(),
             effects,
             obligations: vec![],

@@ -9,7 +9,7 @@ use test_log::test;
 use ferlium::compiler::error::{CompilationErrorImpl, InvalidTraitConstraintKind};
 use indoc::indoc;
 
-use crate::harness::{TestSession, expected_tuple, int, signature, string};
+use crate::harness::{TestSession, bool, expected_tuple, float, int, signature, string};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -505,4 +505,32 @@ fn a_written_ground_requirement_is_checked_and_not_published() {
     TestSession::new()
         .fail_compilation("fn g() -> int where string: Num { 1 }")
         .expect_trait_impl_not_found("Num", &["Self = string"]);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_literal_beside_a_generic_value_defaults_under_a_complete_clause() {
+    // The `Value` of the tuple, or of the struct, holds whenever those of its elements do, so it
+    // does not tie the literal's type to `T`: that type defaults, and `T` stays generic.
+    let src = indoc! { r#"
+        struct W<A, B>(A, B)
+        fn first<T>(x: T) -> T where nothing { let p = (x, 1); p.0 }
+        fn wrapped<T>(x: T) -> T where nothing { let p = W(x, 1.5); p.0 }
+        fn second<T>(x: T) -> int where nothing { let p = (x, 1); p.1 + 2 }
+        fn sum<T>(x: T) -> T where T: Num { let p = (x, 1); x + p.0 }
+    "# };
+    assert_eq!(
+        signature(&mut TestSession::new(), src, "first"),
+        "fn first<T>(x: T) -> T where T: Value"
+    );
+    assert_eq!(
+        signature(&mut TestSession::new(), src, "sum"),
+        "fn sum<T>(x: T) -> T where T: Num + Value"
+    );
+    assert_val_eq!(
+        TestSession::new().run(&format!(
+            "{src}(first(true), wrapped(\"a\"), second(true), sum(2.5))"
+        )),
+        expected_tuple([bool(true), string("a"), int(3), float(5.0)])
+    );
 }
