@@ -4466,3 +4466,28 @@ fn caller_rooted_clones_preserve_nested_values_and_failure_cleanup() {
         int(3)
     );
 }
+
+/// The call result is owned while a field is read within one of its members.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_field_read_within_a_member_of_a_temporary_drops_the_temporary() {
+    let mut session = TestSession::new();
+    let src = r#"
+        struct P { a: int, b: string }
+        fn twice(x: P) -> (P, P) { (x, x) }
+    "#;
+    assert_val_eq!(
+        session.run(&format!("{src}twice(P {{ a: 1, b: \"s\" }}).1.a")),
+        int(1)
+    );
+    assert_val_eq!(
+        session.run(&format!("{src}len(twice(P {{ a: 1, b: \"st\" }}).0.b)")),
+        int(2)
+    );
+    assert_val_eq!(
+        session.run(&format!(
+            "{src}fn second(x: P) -> ((P, P), int) {{ (twice(x), 3) }}\nsecond(P {{ a: 4, b: \"s\" }}).0.1.a"
+        )),
+        int(4)
+    );
+}

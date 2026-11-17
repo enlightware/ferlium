@@ -3910,17 +3910,23 @@ impl TypeInference {
                 // must therefore be a place even when an earlier access-chain
                 // step produced an owned value (for example `array[i].field`).
                 // Keep that value in an explicit owned temporary for the
-                // dynamic extent of the remaining chain.
-                let projection_receiver_needs_temp =
-                    matches!(&*place_ty.data(), TypeKind::Variable(_))
-                        && !node_is_place_reference(env.ir_arena, place_node);
+                // dynamic extent of the remaining chain. A receiver that is a
+                // place within an owned value (for example `call().0.field`)
+                // keeps that value the same way: nothing else would own it.
+                let receiver_is_open = matches!(&*place_ty.data(), TypeKind::Variable(_));
                 let temp_start_index = env.cur_locals.len();
                 let mut temp_stores = Vec::new();
-                let place_node = if projection_receiver_needs_temp {
+                let place_node = if !receiver_is_open {
+                    place_node
+                } else if !node_is_place_reference(env.ir_arena, place_node) {
                     let (store, load) =
                         self.store_owned_temp(env, place_node, place_ty, expr_span, ustr("$place"));
                     temp_stores.push(store);
                     load
+                } else if place_resolution_may_create_temp(env.ir_arena, place_node) {
+                    let prepared = self.prepare_place_for_consumer(env, place_node, expr_span);
+                    temp_stores.extend(prepared.prefix);
+                    prepared.place
                 } else {
                     place_node
                 };
@@ -3976,7 +3982,10 @@ impl TypeInference {
                 if temp_stores.is_empty() {
                     return Ok(result);
                 }
+                // The temporary ends with this chain: what the chain gives is a value of its
+                // own, not a place within the temporary.
                 let (node, _) = result;
+                let node = self.materialize_owned_value(env, node, expr_span);
                 let ty = env.ir_arena[node].ty;
                 let effects = env.ir_arena[node].effects.clone();
                 let node = self.wrap_owned_value_with_temp_drops(
