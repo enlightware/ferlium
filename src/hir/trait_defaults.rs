@@ -107,7 +107,6 @@ pub(crate) fn register_value_ne(module: &mut Module, trait_id: TraitId) {
     module.traits[trait_id.index.as_index()].default_methods[VALUE_NE_METHOD_INDEX.as_index()] =
         Some(TraitDefaultMethod {
             function: FunctionId::new(module.module_id(), id),
-            requires_extra_evidence: false,
         });
 }
 
@@ -250,10 +249,6 @@ pub(crate) fn complete_pending_methods(
         let default = trait_def.default_methods[index]
             .as_ref()
             .expect("missing required generated impl method");
-        assert!(
-            !default.requires_extra_evidence,
-            "a compiler-generated default completion uses only the trait's evidence"
-        );
         assert!(
             trait_def.parent_constraints.is_empty() && trait_def.constraints.is_empty(),
             "compiler-generated default completion requires a self-only default contract"

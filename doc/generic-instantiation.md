@@ -171,21 +171,20 @@ cache.
 
 A default method is checked and compiled once in the trait's module, even if no impl uses it.
 Its contract is its declared signature together with the enclosing trait, parent and `where`
-constraints, which is complete as a written `where` clause is: the body must preserve the
-generality of the declared types and effects, and may need beyond that contract what a written
-clause leaves to callers: the `Value` of its type variables and their fields, which the
-implementations that use the default supply. Names resolve in
-the trait's module.
+constraints. The body must preserve the generality of the declared types and effects, and needs
+nothing beyond that contract, not even the `Value` of its type variables or their fields, which a
+written `where` clause leaves to callers: so every implementation may keep the default. Names
+resolve in the trait's module.
 
 An omitted method gets a forwarding function in its dictionary slot. The forwarder instantiates
 the checked default and supplies the implementation's own dictionary, so sibling calls use that
-implementation's overrides; it solves the default's other requirements as any call does. Written methods use the same enclosing-impl evidence. This works for
+implementation's overrides. Written methods use the same enclosing-impl evidence. This works for
 concrete, header-less and generic impls without requiring the impl to be globally selectable while
 its methods are checked.
 
 Compiler-defined `Value` has a Rust-built HIR default for `ne`, available before source std is
 compiled. Native and derived implementations complete omitted defaulted slots with calls to the
-same default, if it needs nothing beyond its contract; explicit implementations take precedence. Existing required methods retain their
+same default; explicit implementations take precedence. Existing required methods retain their
 calling conventions, while forwarding entries receive the evidence they need.
 
 Self evidence is a body assumption, not an implementation prerequisite. An impl's parent and

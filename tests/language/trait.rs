@@ -5,8 +5,8 @@ use test_log::test;
 
 use ferlium::{
     compiler::error::{
-        CompilationErrorImpl, FieldAccessSite, InvalidDefaultMethodKind,
-        InvalidTraitAssociatedConstImplKind, InvalidTraitDefinitionKind, MissingRequirement,
+        CompilationErrorImpl, InvalidDefaultMethodKind, InvalidTraitAssociatedConstImplKind,
+        InvalidTraitDefinitionKind, MissingRequirement,
     },
     format::FormatWith,
     hir::{
@@ -28,7 +28,7 @@ use ferlium::{
 use indoc::indoc;
 use ustr::ustr;
 
-use crate::harness::{TestSession, expected_tuple, int, string};
+use crate::harness::{TestSession, int, string};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -1842,102 +1842,55 @@ fn trait_default_unbound_parent_effect() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn a_trait_default_has_the_implicit_value_of_its_types() {
-    // `Value` of the trait's types need not be declared: the body copies `Self`.
-    let replace = "trait Replace<Self> { fn replace(x: &mut Self, y: Self) { x = y; } }";
-    assert_val_eq!(
-        TestSession::new().run(&format!(
-            "{replace}
-            impl Replace for int {{}}
-            let mut x = 0;
-            replace(x, 42);
-            x"
-        )),
-        int(42)
+fn a_trait_default_needs_the_value_that_its_trait_declares() {
+    // A default uses only its trait's contract, so that every implementation may keep it: copying
+    // `Self` needs a `Value` that the trait declares, and the error is at the default.
+    let source = "trait Replace<Self> { fn replace(x: &mut Self, y: Self) { x = y; } }";
+    let error = TestSession::new().fail_compilation(source).into_inner();
+    let CompilationErrorImpl::InvalidTraitDefinition {
+        kind:
+            InvalidTraitDefinitionKind::InvalidDefaultMethod {
+                reason: InvalidDefaultMethodKind::UndeclaredConstraint,
+                ..
+            },
+        span,
+        ..
+    } = error
+    else {
+        panic!("unexpected diagnostic: {error:?}")
+    };
+    assert_eq!(
+        span.as_range(),
+        source.find("fn replace").unwrap()..source.len() - 2
     );
-    // A declared `Value` serves as before.
-    assert_val_eq!(
-        TestSession::new().run(indoc! {r#"
-            trait Replace<Self>: Value<Self> { fn replace(x: &mut Self, y: Self) { x = y; } }
-            impl Replace for int {}
-            let mut x = 0;
-            replace(x, 42);
-            x
-        "#}),
-        int(42)
-    );
-    // A requirement that reduces to it, here through the `Value` of arrays, is accepted too.
-    assert_val_eq!(
-        TestSession::new().run(indoc! {r#"
-            trait Show<Self> { fn show(x: Self) -> string { to_string([x]) } }
-            impl Show for int {}
-            show(3)
-        "#}),
-        string("[3]")
-    );
-    // The `Value` of an output type of the trait is implicit too.
-    assert_val_eq!(
-        TestSession::new().run(indoc! {r#"
-            trait Src<Self |-> Item> {
-                fn get(x: Self) -> Item;
-                fn twice(x: Self) -> [Item] { [get(x), get(x)] }
-            }
-            impl Src for <Self = int |-> Item = string> { fn get(x: int) -> string { to_string(x) } }
-            twice(3)[1]
-        "#}),
-        string("3")
-    );
-    // A generic implementation gives it from the `Value` of its own type variables.
-    assert_val_eq!(
-        TestSession::new().run(indoc! {r#"
-            trait Twice<Self> { fn twice(x: Self) -> (Self, Self) { (x, x) } }
-            struct Wrap<T>(T)
-            impl<T> Twice for Wrap<T> where nothing {}
-            fn both<T>(x: T) -> (Wrap<T>, Wrap<T>) where nothing { twice(Wrap(x)) }
-            both("a").1.0
-        "#}),
-        string("a")
-    );
+    for header in [
+        "trait Replace<Self> where Self: Value",
+        "trait Replace<Self>: Value<Self>",
+    ] {
+        assert_val_eq!(
+            TestSession::new().run(&format!(
+                "{header} {{ fn replace(x: &mut Self, y: Self) {{ x = y; }} }}
+                impl Replace for int {{}}
+                let mut x = 0;
+                replace(x, 42);
+                x"
+            )),
+            int(42)
+        );
+    }
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn an_impl_that_uses_a_default_supplies_the_value_that_it_needs() {
-    // A host type is a `Value` only if its host says so: an impl for one that keeps the
-    // default that copies `Self` is refused, and one that writes the method is accepted.
-    struct Opaque;
-    let session = || {
-        let mut session = TestSession::new();
-        let path = Path::single_str("host");
-        let mut host = Module::new(session.session().modules().next_id(), path.clone());
-        host.add_native_type::<Opaque>("Opaque", "A host type without `Value`.");
-        session.session_mut().register_module(path, host);
-        session
-    };
-    let source = |method: &str| {
-        format!(
-            "use host::*;
-            trait Twice<Self> {{ fn twice(x: Self) -> int {{ len([x, x]) }} }}
-            impl Twice for Opaque {{ {method} }}"
-        )
-    };
-    session()
-        .fail_compilation(&source(""))
-        .expect_trait_impl_not_found("Value", &["Self = Opaque"]);
-    session().compile(&source("fn twice(x: Opaque) -> int { 1 }"));
-}
-
-#[test]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn a_default_that_needs_value_serves_impls_of_other_modules() {
-    // `size` calls `twice` through the implementation, and drops the array that it gets, so
-    // both need the `Value` of the type; generic implementations get it from their variables.
+fn a_default_that_uses_a_declared_value_serves_impls_of_other_modules() {
+    // `size` calls `twice` through the implementation, and drops the array that it gets;
+    // generic implementations get the `Value` of their type from their variables.
     let mut session = TestSession::new();
     session
         .try_compile_module(
             "shape",
             indoc! {r#"
-        pub trait Twice<Self> {
+        pub trait Twice<Self> where Self: Value {
             fn twice(x: Self) -> [Self] { [x, x] }
             fn size(x: Self) -> int { len(twice(x)) }
         }
@@ -1960,75 +1913,29 @@ fn a_default_that_needs_value_serves_impls_of_other_modules() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn a_trait_default_may_read_fields_of_its_types() {
-    // `Self` is a type variable as any other: as a function with a `where` clause, a default may
-    // read one of its fields, and an implementation that keeps the default gives that field.
-    let src = indoc! {r#"
-        trait Weigh<Self> {
-            fn weight(x: Self) -> int;
-            fn total(x: Self) -> int { weight(x) + x.mass }
-        }
-        struct Rock { mass: int }
-        impl Weigh for Rock { fn weight(x: Rock) -> int { 2 * x.mass } }
-        struct Pair<T> { mass: int, inner: T }
-        impl<T> Weigh for Pair<T> where nothing { fn weight(x: Pair<T>) -> int { 1 } }
-        fn total_of<T>(x: T) -> int where nothing { total(Pair { mass: 7, inner: x }) }
-    "#};
-    assert_val_eq!(
-        TestSession::new().run(&format!(
-            "{src}\n(total(Rock {{ mass: 3 }}), total(Pair {{ mass: 4, inner: \"a\" }}), total_of(true))"
-        )),
-        expected_tuple([int(9), int(5), int(8)])
-    );
-}
-
-#[test]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn an_impl_that_uses_a_default_needs_the_fields_that_it_reads() {
-    // The error names the field that the default reads, and is at the implementation that lacks
-    // it; writing the method instead is accepted.
-    let source = |method: &str| {
-        format!(
-            "trait Weigh<Self> {{ fn total(x: Self) -> int {{ x.mass }} }}
-            struct Feather {{ grams: int }}
-            impl Weigh for Feather {{ {method} }}"
-        )
-    };
-    let src = source("");
-    match TestSession::new().fail_compilation(&src).into_inner() {
-        CompilationErrorImpl::InvalidRecordField {
-            field,
-            site: FieldAccessSite::RequiredBy(span),
-            ..
-        } => {
-            assert_eq!(field, "mass");
-            assert_eq!(span.start_usize(), src.find("impl Weigh").unwrap());
-        }
-        other => panic!("expected a missing field at the impl, got {other:?}"),
-    }
-    TestSession::new().compile(&source("fn total(x: Feather) -> int { x.grams }"));
-}
-
-#[test]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn a_default_that_reads_a_field_serves_impls_of_other_modules() {
-    let mut session = TestSession::new();
-    session
-        .try_compile_module(
-            "shape",
-            indoc! {r#"
-        pub trait Weigh<Self> { fn total(x: Self) -> int { x.mass + 1 } }
-    "#},
-        )
-        .unwrap();
-    assert_val_eq!(
-        session.run(indoc! {r#"
-        use shape::Weigh;
-        struct Rock { mass: int }
-        impl Weigh for Rock {}
-        Weigh::total(Rock { mass: 2 })
-    "#}),
-        int(3)
+fn a_trait_default_cannot_read_fields_of_its_types() {
+    // No trait requires a field of its implementations, so a default cannot read one: the trait
+    // declares a method for it instead.
+    let error = TestSession::new()
+        .fail_compilation(indoc! {r#"
+            trait Weigh<Self> {
+                fn weight(x: Self) -> int;
+                fn total(x: Self) -> int { weight(x) + x.mass }
+            }
+        "#})
+        .into_inner();
+    assert!(
+        matches!(
+            error,
+            CompilationErrorImpl::InvalidTraitDefinition {
+                kind: InvalidTraitDefinitionKind::InvalidDefaultMethod {
+                    reason: InvalidDefaultMethodKind::UndeclaredConstraint,
+                    ..
+                },
+                ..
+            }
+        ),
+        "unexpected diagnostic: {error:?}"
     );
 }
 
@@ -2833,6 +2740,11 @@ fn invalid_default_method_suggests_a_where_clause_that_works() {
             "fn go(s: Self, o: Out) -> Out { o + o }",
             "Out: Num",
         ),
+        (
+            "trait Tr<Self>",
+            "fn go(x: Self) -> (Self, Self) { (x, x) }",
+            "Self: Value",
+        ),
     ] {
         assert_eq!(
             missing_requirement_of_default_method(&format!("{header} {{ {method} }}")),
@@ -2851,6 +2763,11 @@ fn invalid_default_method_does_not_suggest_a_clause_without_source_syntax() {
             trait Other<Self |-> ! F> { fn o(x: Self) -> int ! F; }
             trait Tr<Self |-> ! E> { fn go(x: Self) -> int ! E { o(x) } }
         "#}),
+        Some(MissingRequirement::Description(_))
+    ));
+    // A field has no `where` syntax.
+    assert!(matches!(
+        missing_requirement_of_default_method("trait Tr<Self> { fn go(x: Self) -> int { x.foo } }"),
         Some(MissingRequirement::Description(_))
     ));
 }

@@ -3103,7 +3103,6 @@ where
             output.traits[trait_id.index.as_index()].default_methods[index.as_index()] =
                 Some(TraitDefaultMethod {
                     function: FunctionId::new(output.module_id(), id),
-                    requires_extra_evidence: false,
                 });
             output.name_function_with_visibility(id, name.0, *visibility);
         }
@@ -5234,22 +5233,26 @@ where
             Some(complete) => complete.without_held(constraints, ty_inf),
             None => constraints,
         };
-        // Beyond its trait's contract, a default method may need from implementations what any
-        // function with a complete clause leaves to its callers: the `Value` of its types and
-        // their structure.
-        if let (Some(declared), Some((trait_id, index))) = (declared, input.trait_default) {
+        // A default method needs nothing beyond its trait's contract, so that every
+        // implementation may keep it: not even what a complete clause leaves to callers, the
+        // `Value` of its types and their fields.
+        if let Some(declared) = declared
+            && input.trait_default.is_some()
+        {
             let contract = declared
                 .constraints
                 .iter()
                 .map(|constraint| ty_inf.substitute_in_constraint(constraint))
                 .collect::<Vec<_>>();
-            let requires_extra_evidence = constraints
+            if let Some(extra) = constraints
                 .iter()
-                .any(|constraint| !contract.contains(constraint));
-            output.traits[trait_id.index.as_index()].default_methods[index.as_index()]
-                .as_mut()
-                .expect("a default method is registered with its trait")
-                .requires_extra_evidence = requires_extra_evidence;
+                .find(|constraint| !contract.contains(constraint))
+            {
+                let extra = extra.clone();
+                return Err(undeclared_default_requirement(
+                    &extra, declared, input, output, others, ty_inf,
+                ));
+            }
         }
         published_requirements_changed = true;
         for function_id in function_and_associated_lambdas(id, associated_lambdas) {
