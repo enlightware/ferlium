@@ -4491,3 +4491,20 @@ fn a_field_read_within_a_member_of_a_temporary_drops_the_temporary() {
         int(4)
     );
 }
+
+/// So it is when the field is read two members deep, through two accessors: the field is read
+/// within the innermost one, while the temporary lives.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_field_read_two_members_deep_in_a_temporary_drops_the_temporary() {
+    let mut session = TestSession::new();
+    let src = r#"
+        struct Inner { b: string }
+        struct Outer { inner: Inner }
+        fn make() -> (Outer, int) { (Outer { inner: Inner { b: "st" } }, 1) }
+        fn length(s: string) -> int { len(s) }
+    "#;
+    for read in ["len(make().0.inner.b)", "length(make().0.inner.b)"] {
+        assert_val_eq!(session.run(&format!("{src}{read}")), int(2));
+    }
+}

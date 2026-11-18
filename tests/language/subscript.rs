@@ -6600,3 +6600,36 @@ fn a_mutable_accessor_of_a_member_sees_the_write() {
         ))
         .expect_mutability_must_be(MutabilityMustBeWhat::Mutable);
 }
+
+/// A projection subscript on a temporary keeps the temporary while a call reads the place it
+/// gives, also when that place is reached through another accessor.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_projection_subscript_on_a_temporary_keeps_it_for_the_call() {
+    let mut session = TestSession::new();
+    let declarations = indoc! { r#"
+        struct Inner { b: string }
+        struct Outer { inner: Inner }
+        struct Box { item: Outer }
+        subscript Box.view(self) -> Outer { ref { self.item } }
+        fn make() -> Box { Box { item: Outer { inner: Inner { b: "hello" } } } }
+        struct Label { s: string }
+        subscript Label.text(self) -> string { ref { self.s } }
+        fn label() -> Label { Label { s: "hello" } }
+        fn id(s: string) -> string { s }
+        fn inner_len(o: Outer) -> int { len(o.inner.b) }
+        fn both(x: string, y: string) -> int { len(x) + len(y) }
+    "# };
+    for (call, expected) in [
+        ("len(make().view.inner.b)", 5),
+        ("len(label().text)", 5),
+        ("inner_len(make().view)", 5),
+        ("both(label().text, make().view.inner.b)", 10),
+    ] {
+        assert_val_eq!(session.run(&format!("{declarations}{call}")), int(expected));
+    }
+    assert_val_eq!(
+        session.run(&format!("{declarations}id(label().text)")),
+        string("hello")
+    );
+}

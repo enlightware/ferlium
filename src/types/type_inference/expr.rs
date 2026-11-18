@@ -3844,10 +3844,38 @@ impl TypeInference {
                 base_span,
                 expr_span: step_span,
             } => {
-                if let Some(subscript_id) =
-                    self.explicit_projection_subscript(env, place_ty, name.0)
-                {
-                    return self.infer_projection_subscript_with_yielded_body(
+                // An explicit projection subscript is an accessor, and so is projection evidence
+                // once lowered. Its receiver must therefore be a place even when an earlier
+                // access-chain step produced an owned value (for example `array[i].field`).
+                // Keep that value in an explicit owned temporary for the dynamic extent of the
+                // remaining chain. A receiver that is a place within an owned value (for example
+                // `call().0.field`) keeps that value the same way: nothing else would own it.
+                let explicit_subscript = self.explicit_projection_subscript(env, place_ty, name.0);
+                let receiver_is_open = matches!(&*place_ty.data(), TypeKind::Variable(_));
+                let receiver_span = env.ir_arena[place_node].span;
+                let temp_start_index = env.cur_locals.len();
+                let mut temp_stores = Vec::new();
+                let place_node = if explicit_subscript.is_none() && !receiver_is_open {
+                    place_node
+                } else if !node_is_place_reference(env.ir_arena, place_node) {
+                    let (store, load) = self.store_owned_temp(
+                        env,
+                        place_node,
+                        place_ty,
+                        receiver_span,
+                        ustr("$place"),
+                    );
+                    temp_stores.push(store);
+                    load
+                } else if place_resolution_may_create_temp(env.ir_arena, place_node) {
+                    let prepared = self.prepare_place_for_consumer(env, place_node, expr_span);
+                    temp_stores.extend(prepared.prefix);
+                    prepared.place
+                } else {
+                    place_node
+                };
+                let result = if let Some(subscript_id) = explicit_subscript {
+                    self.infer_projection_subscript_with_yielded_body(
                         env,
                         subscript_id,
                         *name,
@@ -3876,91 +3904,68 @@ impl TypeInference {
                             )?;
                             Ok((node, env.ir_arena[node].ty))
                         }),
-                    );
-                }
-                // Projection evidence is lowered to an accessor. Its receiver
-                // must therefore be a place even when an earlier access-chain
-                // step produced an owned value (for example `array[i].field`).
-                // Keep that value in an explicit owned temporary for the
-                // dynamic extent of the remaining chain. A receiver that is a
-                // place within an owned value (for example `call().0.field`)
-                // keeps that value the same way: nothing else would own it.
-                let receiver_is_open = matches!(&*place_ty.data(), TypeKind::Variable(_));
-                let receiver_span = env.ir_arena[place_node].span;
-                let temp_start_index = env.cur_locals.len();
-                let mut temp_stores = Vec::new();
-                let place_node = if !receiver_is_open {
-                    place_node
-                } else if !node_is_place_reference(env.ir_arena, place_node) {
-                    let (store, load) =
-                        self.store_owned_temp(env, place_node, place_ty, expr_span, ustr("$place"));
-                    temp_stores.push(store);
-                    load
-                } else if place_resolution_may_create_temp(env.ir_arena, place_node) {
-                    let prepared = self.prepare_place_for_consumer(env, place_node, expr_span);
-                    temp_stores.extend(prepared.prefix);
-                    prepared.place
+                    )
                 } else {
-                    place_node
-                };
-                let (next_node, next_ty, next_mut, uses_projection_evidence) = self
-                    .infer_field_from_record_node(
-                        env, place_node, place_ty, place_mut, mode, *base_span, *name, *step_span,
-                    )?;
-                let result = if uses_projection_evidence {
-                    // The accessor's mutable member needs a mutable receiver, as a structural
-                    // field does.
-                    if matches!(mode, SubscriptMemberKind::Mut) {
-                        self.add_mut_be_at_least_constraint(
+                    let (next_node, next_ty, next_mut, uses_projection_evidence) = self
+                        .infer_field_from_record_node(
+                            env, place_node, place_ty, place_mut, mode, *base_span, *name,
+                            *step_span,
+                        )?;
+                    if !uses_projection_evidence {
+                        self.infer_access_chain_steps_with_body(
+                            env,
+                            steps,
+                            step_index + 1,
+                            next_node,
+                            next_ty,
                             next_mut,
-                            receiver_span,
-                            MutType::mutable(),
+                            mode,
+                            access,
+                            inside_yielded,
                             expr_span,
-                        );
-                    }
-                    self.infer_prepared_accessor_with_body(
-                        env,
-                        NamedSubscriptCall {
-                            node: next_node,
-                            ty: next_ty,
-                            effects: env.ir_arena[next_node].effects.clone(),
-                            provenance: YieldProvenance::YieldedOnce,
-                        },
-                        mode,
-                        access,
-                        inside_yielded,
-                        expr_span,
-                        Box::new(move |this, env, place, place_ty, inside_yielded| {
-                            let (node, _) = this.infer_access_chain_steps_with_body(
-                                env,
-                                steps,
-                                step_index + 1,
-                                place,
-                                place_ty,
+                            build_body,
+                        )
+                    } else {
+                        // The accessor's mutable member needs a mutable receiver, as a
+                        // structural field does.
+                        if matches!(mode, SubscriptMemberKind::Mut) {
+                            self.add_mut_be_at_least_constraint(
+                                next_mut,
+                                receiver_span,
                                 MutType::mutable(),
-                                mode,
-                                access,
-                                inside_yielded,
                                 expr_span,
-                                build_body,
-                            )?;
-                            Ok((node, env.ir_arena[node].ty))
-                        }),
-                    )
-                } else {
-                    self.infer_access_chain_steps_with_body(
-                        env,
-                        steps,
-                        step_index + 1,
-                        next_node,
-                        next_ty,
-                        next_mut,
-                        mode,
-                        access,
-                        inside_yielded,
-                        expr_span,
-                        build_body,
-                    )
+                            );
+                        }
+                        self.infer_prepared_accessor_with_body(
+                            env,
+                            NamedSubscriptCall {
+                                node: next_node,
+                                ty: next_ty,
+                                effects: env.ir_arena[next_node].effects.clone(),
+                                provenance: YieldProvenance::YieldedOnce,
+                            },
+                            mode,
+                            access,
+                            inside_yielded,
+                            expr_span,
+                            Box::new(move |this, env, place, place_ty, inside_yielded| {
+                                let (node, _) = this.infer_access_chain_steps_with_body(
+                                    env,
+                                    steps,
+                                    step_index + 1,
+                                    place,
+                                    place_ty,
+                                    MutType::mutable(),
+                                    mode,
+                                    access,
+                                    inside_yielded,
+                                    expr_span,
+                                    build_body,
+                                )?;
+                                Ok((node, env.ir_arena[node].ty))
+                            }),
+                        )
+                    }
                 }?;
                 if temp_stores.is_empty() {
                     return Ok(result);
@@ -5486,20 +5491,39 @@ impl TypeInference {
         value: NodeId,
         span: Location,
     ) -> NodeId {
-        if let NodeKind::WithYielded(mut node) = env.ir_arena[value].kind.clone()
-            && node_is_place_reference(env.ir_arena, node.body)
-        {
-            node.body = self.materialize_owned_value(env, node.body, span);
-            let ty = env.ir_arena[value].ty;
-            let accessor_effects = env.ir_arena[node.accessor].effects.clone();
-            let body_effects = env.ir_arena[node.body].effects.clone();
-            let effects = self.make_dependent_effect([&accessor_effects, &body_effects]);
-            return env.ir_arena.alloc(hir::Node::new(
-                NodeKind::WithYielded(node),
-                ty,
-                effects,
-                span,
-            ));
+        // A place an accessor yields, at any depth, is read while that accessor's owner lives.
+        // So is one reached through an addressor's place, unless that is a place itself.
+        match env.ir_arena[value].kind.clone() {
+            NodeKind::WithYielded(mut node) if Self::yields_place(env.ir_arena, node.body) => {
+                node.body = self.materialize_owned_value(env, node.body, span);
+                let ty = env.ir_arena[value].ty;
+                let accessor_effects = env.ir_arena[node.accessor].effects.clone();
+                let body_effects = env.ir_arena[node.body].effects.clone();
+                let effects = self.make_dependent_effect([&accessor_effects, &body_effects]);
+                return env.ir_arena.alloc(hir::Node::new(
+                    NodeKind::WithYielded(node),
+                    ty,
+                    effects,
+                    span,
+                ));
+            }
+            NodeKind::WithPlace(mut node)
+                if !node_is_place_reference(env.ir_arena, node.body)
+                    && Self::yields_place(env.ir_arena, node.body) =>
+            {
+                node.body = self.materialize_owned_value(env, node.body, span);
+                let ty = env.ir_arena[value].ty;
+                let place_effects = env.ir_arena[node.place].effects.clone();
+                let body_effects = env.ir_arena[node.body].effects.clone();
+                let effects = self.make_dependent_effect([&place_effects, &body_effects]);
+                return env.ir_arena.alloc(hir::Node::new(
+                    NodeKind::WithPlace(node),
+                    ty,
+                    effects,
+                    span,
+                ));
+            }
+            _ => {}
         }
 
         if !node_is_place_reference(env.ir_arena, value) {
@@ -5524,6 +5548,15 @@ impl TypeInference {
         }
 
         self.materialize_owned_stable_place(env, value, span)
+    }
+
+    /// Whether `node_id` gives a place: a place reference, or accessors and addressors around one.
+    fn yields_place(arena: &NodeArena, node_id: NodeId) -> bool {
+        match &arena[node_id].kind {
+            NodeKind::WithYielded(node) => Self::yields_place(arena, node.body),
+            NodeKind::WithPlace(node) => Self::yields_place(arena, node.body),
+            _ => node_is_place_reference(arena, node_id),
+        }
     }
 
     fn node_is_scoped_place_value(arena: &NodeArena, node_id: NodeId) -> bool {
