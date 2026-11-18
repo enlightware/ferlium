@@ -131,17 +131,7 @@ fn eval_script_call(
             let error = interpreter.cleanup_after_error(error, |interpreter| {
                 drop_frame_owned_locals_on_error(interpreter, &metadata.locals, span)
             });
-            // A source failure escaping a function whose type says it cannot fail, which only
-            // `effects_unsafe` makes possible, poisons execution, as MIR's `effect_violation`.
-            Err(
-                if matches!(error, RuntimeError::SourceFailure(_))
-                    && metadata.definition.ty_scheme.ty.effects.cannot_fail()
-                {
-                    interpreter.runtime.poison_effect_violation(error)
-                } else {
-                    error
-                },
-            )
+            Err(escaping_error(interpreter.runtime, metadata, error))
         }
     };
     interpreter.runtime.call_depth -= 1;
@@ -158,6 +148,23 @@ fn eval_script_call(
     }
     interpreter.runtime.truncate_environment_storage(base);
     result.map(ControlFlow::into_value)
+}
+
+/// The error escaping a call of `function`. A source failure escaping a function whose type says it
+/// cannot fail, which only `effects_unsafe` makes possible, poisons execution, as MIR's
+/// `effect_violation`.
+fn escaping_error(
+    runtime: &mut EvalCtx,
+    function: &ModuleFunction,
+    error: RuntimeError,
+) -> RuntimeError {
+    if matches!(error, RuntimeError::SourceFailure(_))
+        && function.definition.ty_scheme.ty.effects.cannot_fail()
+    {
+        runtime.poison_effect_violation(error)
+    } else {
+        error
+    }
 }
 
 struct HirInterpreter<'run, 'session> {
@@ -373,6 +380,7 @@ impl<'run, 'session> HirInterpreter<'run, 'session> {
                         arena[script.entry_node_id].span,
                     )
                 });
+                let error = escaping_error(callee.runtime, metadata, error);
                 callee.runtime.call_depth -= 1;
                 callee.runtime.truncate_environment_storage(base);
                 Err(error)
@@ -431,9 +439,12 @@ impl<'run, 'session> HirInterpreter<'run, 'session> {
             locals,
         ) {
             Ok(flow) => Ok(flow),
-            Err(error) => Err(callee.cleanup_after_error(error, |callee| {
-                drop_frame_owned_locals_on_error(callee, locals, arena[yield_node].span)
-            })),
+            Err(error) => {
+                let error = callee.cleanup_after_error(error, |callee| {
+                    drop_frame_owned_locals_on_error(callee, locals, arena[yield_node].span)
+                });
+                Err(escaping_error(callee.runtime, metadata, error))
+            }
         };
         self.runtime.call_depth -= 1;
         self.runtime.truncate_environment_storage(base);
@@ -2399,7 +2410,19 @@ fn eval_block_accessor_until_yield(
         }
     }
 
-    match eval_accessor_until_yield(arena, tail, span, ctx, locals)? {
+    // An accessor that fails before it yields leaves no epilogue to run the cleanup of this
+    // block, which holds what its call was given.
+    let accessed = match eval_accessor_until_yield(arena, tail, span, ctx, locals) {
+        Ok(accessed) => accessed,
+        Err(err) => {
+            let err = ctx.cleanup_after_error(err, |ctx| {
+                drop_cleanup_locals(ctx, locals, &block.cleanup, arena[tail].span)
+            });
+            ctx.runtime.truncate_environment_storage(env_size);
+            return Err(err);
+        }
+    };
+    match accessed {
         ControlFlow::Continue((mut epilogue, place)) => {
             epilogue.push_cleanup_scope(&block.cleanup);
             Ok(ControlFlow::Continue((epilogue, place)))

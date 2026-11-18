@@ -2237,38 +2237,42 @@ impl<'a> Emitter<'a> {
     /// the exposed place, and opens the dedicated scope whose `end_project` runs the accessor slide on
     /// exit. The caller then lowers `n.body` and `exit_scope`s. Mirrors `eval_with_yielded`.
     fn lower_with_yielded_enter(&mut self, n: &hir::WithYielded<Elaborated>) {
-        // Unwrap block accessors: lower their leading statements now and defer their cleanup
-        // locals into the projection scope, so they are dropped after the accessor slide runs
+        // Unwrap block accessors: lower their leading statements now and keep their cleanup
+        // locals in the projection scope, so they are dropped after the accessor slide runs
         // (mirroring `eval_block_accessor_until_yield`, which pushes the block cleanup onto the
-        // epilogue). Nested blocks defer outermost-first; the scope's reverse-order exit then
-        // drops innermost-first.
+        // epilogue). As for an ordinary block, the scope holds a block's locals from its first
+        // statement on, so that a statement or an argument failing before the accessor is entered
+        // drops what the earlier ones initialized. Nested blocks add theirs outermost-first; the
+        // scope's reverse-order exit then drops innermost-first.
+        self.enter_scope(&[]);
         let mut accessor = &self.hir_arena[n.accessor];
-        let mut deferred_cleanup: Vec<LocalDeclId> = vec![];
         while let hir::NodeKind::Block(block) = &accessor.kind {
             let (tail, prefix) = block
                 .body
                 .split_last()
                 .expect("a WithYielded accessor block must contain an accessor call");
+            for action in self.drop_actions(&block.cleanup) {
+                self.context
+                    .scopes
+                    .last_mut()
+                    .expect("the accessor scope is open")
+                    .push_action(action);
+            }
             for s in prefix {
                 if self.current_block_is_terminated() {
                     break;
                 }
                 self.lower_value_into(&self.hir_arena[*s], None);
             }
-            deferred_cleanup.extend(block.cleanup.iter().copied());
             accessor = &self.hir_arena[*tail];
         }
 
         // Dead code: a leading statement terminated the block, so the accessor is never entered.
-        // Bind the binding to an arbitrary valid place (never consumed) and push the scope the
-        // caller's `exit_scope` expects; its cleanup no-ops on the terminated path.
+        // Bind the binding to an arbitrary valid place (never consumed); the caller's `exit_scope`
+        // pops the open scope, whose cleanup no-ops on the terminated path.
         if self.current_block_is_terminated() {
             let dummy = self.return_destination();
             self.context.locals.insert(n.binding, dummy.clone());
-            self.context.scopes.push(Scope {
-                actions: Vec::new(),
-                pad: None,
-            });
             return;
         }
 
@@ -2297,10 +2301,9 @@ impl<'a> Emitter<'a> {
             arguments.push(self.lower_extra_argument(&self.hir_arena[*x]));
         }
         arguments.extend(self.lower_arguments(visible_arguments, &call_ty));
-        // Accessor-expression temporaries are already live while the ramp runs. Give `project` an
-        // error pad that drops them if the ramp fails. On success this scope is promoted below to
-        // the projection scope, where the same temporaries remain live until after the slide.
-        self.enter_scope(&deferred_cleanup);
+        // Accessor-expression temporaries are live while the ramp runs: the open scope gives
+        // `project` an error pad that drops them if the ramp fails. On success it becomes the
+        // projection scope, where the same temporaries remain live until after the slide.
         // The exposed place's pointee type is the binding's (element) type. `project` runs the ramp
         // to the yield and binds the yielded place to its result register.
         //

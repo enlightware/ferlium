@@ -1,14 +1,14 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-use super::harness::{TestSession, expected_array_infer, expected_tuple, int, string};
+use super::harness::{RunMode, TestSession, expected_array_infer, expected_tuple, int, string};
 use ferlium::{
     SourceId,
     ast::{ModuleDisplay, PExprKind, SubscriptMemberMode},
     compiler::error::{
         CompilationErrorImpl, FieldAccessSite, InvalidRecordFieldContext,
-        InvalidSubscriptDefinitionKind, InvalidYieldKind, MutabilityMustBeWhat, SourceFailureKind,
-        SubscriptDefinitionSubject, UnsupportedSubscriptFeatureKind,
+        InvalidSubscriptDefinitionKind, InvalidYieldKind, MutabilityMustBeWhat, RuntimeErrorKind,
+        SourceFailureKind, SubscriptDefinitionSubject, UnsupportedSubscriptFeatureKind,
     },
     format::FormatWith,
     hir::{ENodeArena, ENodeId, NodeKind},
@@ -6632,4 +6632,156 @@ fn a_projection_subscript_on_a_temporary_keeps_it_for_the_call() {
         session.run(&format!("{declarations}id(label().text)")),
         string("hello")
     );
+}
+
+/// The accessor fails before it yields: what its call was given is dropped all the same.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_accessor_failing_before_its_yield_drops_its_arguments() {
+    let error = experimental_session().fail_run(indoc! {r#"
+        subscript cell(slot: &mut int, f: (int) -> int, n: int) -> int {
+            ref {
+                let local = f(n);
+                yield local
+            }
+        }
+        fn main() -> int {
+            let mut slot = 1;
+            slot->[cell](|z| idiv(1, z), 0)
+        }
+        main()
+    "#});
+    assert_eq!(error, SourceFailureKind::DivisionByZero);
+}
+
+/// A probe whose drops the tests count, as `testing::tracked_drop_log` shows them.
+const PROBE: &str = indoc! { r#"
+    struct Probe(int)
+
+    impl Value for Probe {
+        fn eq(left: Probe, right: Probe) -> bool { left.0 == right.0 }
+        fn to_string(value: Probe) -> string { to_string(value.0) }
+        fn hash(value: Probe, state: &mut hasher) { hash(value.0, state) }
+        fn clone(source: Probe) -> Probe { Probe(source.0) }
+        fn drop(target: &mut Probe) { testing::record_tracked_drop(target.0) }
+    }
+"# };
+
+/// What an accessor's call was given is dropped once on every backend when the call fails before
+/// the accessor yields, whether a later argument fails or the accessor's prologue does.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_failure_before_an_accessor_yields_drops_what_its_call_was_given() {
+    for (prologue, call) in [
+        ("let local = n;", "slot->[cell](Probe(7), idiv(1, x))"),
+        ("let local = idiv(1, n);", "slot->[cell](Probe(7), x)"),
+    ] {
+        let source = formatdoc! { r#"
+            {PROBE}
+            subscript cell(slot: &mut int, probe: Probe, n: int) -> int {{
+                ref {{
+                    {prologue}
+                    yield local
+                }}
+            }}
+
+            testing::reset_tracked_drops();
+            let x = 0;
+            let mut slot = 1;
+            {call}
+        "# };
+        for mode in RunMode::ALL {
+            let mut session = experimental_session();
+            session.allow_unsafe();
+            session.run_modes([mode]);
+            assert_eq!(
+                session.fail_run(&source),
+                SourceFailureKind::DivisionByZero,
+                "{mode:?}: {call}"
+            );
+            assert_val_eq!(
+                session.run("testing::tracked_drop_log()"),
+                int(7),
+                "{mode:?}: {call}"
+            );
+        }
+    }
+}
+
+/// A failure escaping an accessor that cannot fail, which only `effects_unsafe` allows, before or
+/// after its yield, is an effect violation: it poisons execution, and nothing of the caller is
+/// dropped, on every backend.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_failure_escaping_an_infallible_accessor_is_an_effect_violation() {
+    for member in [
+        "let local = effects_unsafe { idiv(1, slot) };\n        yield local",
+        "let local = slot;\n        yield local;\n        let ignored = effects_unsafe { idiv(1, slot) };",
+    ] {
+        let source = formatdoc! { r#"
+            {PROBE}
+            subscript cell(slot: &mut int, probe: Probe) -> int {{
+                ref {{
+                    {member}
+                }}
+            }}
+
+            fn main(x: int) -> int {{
+                let mut slot = 0;
+                let fallible = idiv(1, x);
+                slot->[cell](Probe(7)) + fallible
+            }}
+
+            testing::reset_tracked_drops();
+            main(1)
+        "# };
+        for mode in RunMode::ALL {
+            let mut session = experimental_session();
+            session.allow_unsafe();
+            session.run_modes([mode]);
+            let error = session.try_run(&source).expect_err("the division fails");
+            assert_eq!(
+                error.kind(),
+                RuntimeErrorKind::EffectViolation,
+                "{mode:?}: {member}"
+            );
+            assert_val_eq!(
+                session.run("testing::tracked_drop_log()"),
+                int(0),
+                "{mode:?}: {member}"
+            );
+        }
+    }
+}
+
+/// As a recursive call does: the inner access instantiates `E1` with `fallible`, not with the
+/// caller's own `E1`, whether the subscript is named or held in a value.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_recursive_subscript_with_a_callback_of_other_effects_keeps_them() {
+    for access in [
+        "slot->[cell](|z| idiv(1, z), n - 1)",
+        "{ let accessor = cell; slot->[accessor](|z| idiv(1, z), n - 1) }",
+    ] {
+        let error = experimental_session().fail_run(&formatdoc! {r#"
+            subscript cell<! E1>(slot: &mut int, f1: (int) -> int ! E1, n: int) -> int {{
+                ref {{
+                    let local = if n > 0 {{
+                        let a = {access};
+                        let b = slot->[cell](f1, n - 1);
+                        a + b
+                    }} else {{
+                        f1(n)
+                    }};
+                    yield local
+                }}
+            }}
+            fn main() -> int {{
+                let mut slot = 1;
+                slot->[cell](|z| z + 2, 2)
+            }}
+            main()
+        "#});
+        assert_eq!(error, SourceFailureKind::DivisionByZero, "{access}");
+    }
 }
