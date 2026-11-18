@@ -3914,6 +3914,7 @@ impl TypeInference {
                 // place within an owned value (for example `call().0.field`)
                 // keeps that value the same way: nothing else would own it.
                 let receiver_is_open = matches!(&*place_ty.data(), TypeKind::Variable(_));
+                let receiver_span = env.ir_arena[place_node].span;
                 let temp_start_index = env.cur_locals.len();
                 let mut temp_stores = Vec::new();
                 let place_node = if !receiver_is_open {
@@ -3935,6 +3936,16 @@ impl TypeInference {
                         env, place_node, place_ty, place_mut, mode, *base_span, *name, *step_span,
                     )?;
                 let result = if uses_projection_evidence {
+                    // The accessor's mutable member needs a mutable receiver, as a structural
+                    // field does.
+                    if matches!(mode, SubscriptMemberKind::Mut) {
+                        self.add_mut_be_at_least_constraint(
+                            next_mut,
+                            receiver_span,
+                            MutType::mutable(),
+                            expr_span,
+                        );
+                    }
                     self.infer_prepared_accessor_with_body(
                         env,
                         NamedSubscriptCall {

@@ -6422,3 +6422,71 @@ fn an_implementation_outputs_the_type_of_a_declared_field() {
         .fail_compilation(&format!("{declarations}get(Wrapper(Box(1.5)))"))
         .expect_trait_impl_not_found("Get", &["Self = Wrapper<Box<float>>"]);
 }
+
+/// A field whose receiver's type is not yet known is as mutable as its receiver, as a structural
+/// field is: writing it needs a mutable receiver.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn writing_a_field_of_a_member_needs_a_mutable_receiver() {
+    let mut session = TestSession::new();
+    let declarations = indoc! { r#"
+        struct C { v: int }
+        fn make() -> (C, int) { (C { v: 1 }, 2) }
+    "# };
+    for (body, receiver) in [
+        ("let p = make(); p.0.v = 5; p.0.v", "p.0"),
+        ("make().0.v = 5; 0", "make().0"),
+    ] {
+        let source = format!("{declarations}fn f() -> int {{ {body} }}\nf()");
+        let error = session.fail_compilation(&source);
+        let (source_span, _, what, _) = error.as_mutability_must_be().unwrap();
+        assert_eq!(*what, MutabilityMustBeWhat::Mutable);
+        assert_eq!(&source[source_span.as_range()], receiver);
+    }
+    session
+        .fail_compilation(&format!(
+            "{declarations}fn f(p: (C, int)) -> int {{ p.0.v = 5; 0 }}\nf(make())"
+        ))
+        .expect_mutability_must_be(MutabilityMustBeWhat::Mutable);
+    // A parameter written this way is inferred mutable, so the caller's value changes.
+    let source = format!(
+        "{declarations}fn set(p) {{ p.0.v = 5 }}\nfn f() -> int {{ let mut q = make(); set(q); q.0.v }}\nf()"
+    );
+    assert_val_eq!(session.run(&source), int(5));
+    let source = format!(
+        "{declarations}fn set(p) {{ p.0.v = 5 }}\nfn f() -> int {{ let q = make(); set(q); q.0.v }}\nf()"
+    );
+    session
+        .fail_compilation(&source)
+        .expect_mutability_must_be(MutabilityMustBeWhat::Mutable);
+}
+
+/// The same holds through an accessor's mutable member, whose code after its yield sees the
+/// write.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_mutable_accessor_of_a_member_sees_the_write() {
+    let mut session = TestSession::new();
+    let declarations = indoc! { r#"
+        struct C { v: int }
+        subscript C.checked(self) -> int {
+            mut {
+                let mut x = 3;
+                yield x;
+                let d = idiv(1, x);
+            }
+        }
+        fn make() -> (C, int) { (C { v: 1 }, 2) }
+    "# };
+    assert_eq!(
+        session.fail_run(&format!(
+            "{declarations}fn f() -> int {{ let mut p = make(); p.0.checked = 0; 7 }}\nf()"
+        )),
+        SourceFailureKind::DivisionByZero
+    );
+    session
+        .fail_compilation(&format!(
+            "{declarations}fn f() -> int {{ make().0.checked = 0; 7 }}\nf()"
+        ))
+        .expect_mutability_must_be(MutabilityMustBeWhat::Mutable);
+}
