@@ -8,8 +8,12 @@ use ustr::{Ustr, ustr};
 use crate::{
     FxHashMap, FxHashSet, Location, Modules,
     ast::Path,
-    compiler::{diagnostics::CompilationWarning, error::InternalCompilationError},
+    compiler::{
+        diagnostics::CompilationWarning,
+        error::{InternalCompilationError, UnsupportedSubscriptFeatureKind},
+    },
     hir::{
+        DrivenArgument,
         borrow_checker::BorrowContext,
         dictionary::{
             DictElaborationCtx, DictionaryReq, EvidenceBindingSource, ExtraParameters,
@@ -1612,6 +1616,9 @@ struct HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
     loops: FxHashMap<LoopId, ElaboratedLoop>,
     /// The next label of an elaborated loop, source loops and generated ones alike.
     next_loop_id: LoopId,
+    /// For each call built within the accessors of its arguments, those of its arguments found
+    /// with a yielded accessor suspended around it.
+    suspended_arguments: FxHashMap<u32, Vec<DrivenArgument>>,
 }
 
 /// An elaborated source loop.
@@ -1691,7 +1698,28 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             failing_projections: Vec::new(),
             loops: FxHashMap::default(),
             next_loop_id: LoopId::from_index(0),
+            suspended_arguments: FxHashMap::default(),
         }
+    }
+
+    /// Counts `argument` as suspended around its call. Only one suspended accessor can be
+    /// resumed per call, so a call may hold several suspended arguments only if none is mutable.
+    fn count_suspended_argument(
+        &mut self,
+        argument: DrivenArgument,
+    ) -> Result<(), InternalCompilationError> {
+        let counted = self.suspended_arguments.entry(argument.call).or_default();
+        if counted.iter().any(|other| other.index == argument.index) {
+            return Ok(());
+        }
+        if !counted.is_empty() && (argument.mutable || counted.iter().any(|other| other.mutable)) {
+            return Err(internal_compilation_error!(UnsupportedSubscriptFeature {
+                kind: UnsupportedSubscriptFeatureKind::MultipleMutableSubscriptArguments,
+                span: argument.span,
+            }));
+        }
+        counted.push(argument);
+        Ok(())
     }
 
     /// Make the closed `Value<ty>` evidence needed by physical layout available to MIR lowering.
@@ -3520,10 +3548,17 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             Yield(node) => Yield(self.elaborate_node(src, *node)?),
             WithYielded(node) => {
                 let accessor = self.elaborate_node(src, node.accessor)?;
+                let yields = !elaborated_node_is_place_reference(self.dst, accessor);
+                // An accessor that still yields once resolved stays suspended around what its
+                // body computes, the call of a driven argument included.
+                if yields
+                    && let Some(argument) = self.locals[node.binding.as_index()].driven_argument
+                {
+                    self.count_suspended_argument(argument)?;
+                }
                 // The accessor's slide runs after the body. If it can fail, values leaving the
                 // body, as its result or through a transfer, stay owned until it has run.
-                let slide_may_fail = !elaborated_node_is_place_reference(self.dst, accessor)
-                    && !self.dst[accessor].effects.cannot_fail();
+                let slide_may_fail = yields && !self.dst[accessor].effects.cannot_fail();
                 if slide_may_fail {
                     self.failing_projections.push(FailingProjection::default());
                 }

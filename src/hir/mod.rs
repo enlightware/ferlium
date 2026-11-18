@@ -87,6 +87,9 @@ pub trait HirPhase: Sized + fmt::Debug + Clone {
     type CallArgConvention: fmt::Debug + Clone + Copy + CallArgConventionMetadata;
     /// Deferred local-storage payload carried by local declarations in this phase.
     type DeferredLocalStorage: fmt::Debug + Clone + Copy;
+    /// The argument whose call is built within a yielded binding's accessor, carried by local
+    /// declarations until elaboration knows whether that accessor yields.
+    type DrivenArgument: fmt::Debug + Clone + Copy + Default;
 }
 
 /// HIR before dictionary passing and final ownership/call elaboration.
@@ -109,6 +112,7 @@ impl HirPhase for Unelaborated {
     type TakeLocalValueMode = PendingTakeLocalValueMode;
     type CallArgConvention = ArgConvention;
     type DeferredLocalStorage = DeferredLocalStorage;
+    type DrivenArgument = Option<DrivenArgument>;
 }
 
 impl HirPhase for Elaborated {
@@ -123,6 +127,7 @@ impl HirPhase for Elaborated {
     type TakeLocalValueMode = ResolvedTakeLocalValueMode;
     type CallArgConvention = ArgConvention;
     type DeferredLocalStorage = Never;
+    type DrivenArgument = ();
 }
 
 /// An index to a node in the HIR arena.
@@ -870,6 +875,20 @@ pub struct Case<P: HirPhase = Unelaborated> {
     pub value: NodeId<P>,
     pub alternatives: Vec<(LiteralValue, NodeId<P>)>,
     pub default: NodeId<P>,
+}
+
+/// An argument of a call that is built within the accessors of that argument's access chain.
+/// A yielded one among them stays suspended around the call, which may hold only one such
+/// argument if one of them is mutable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrivenArgument {
+    /// The call, distinct from the other calls of its function.
+    pub call: u32,
+    /// The argument's position in the call.
+    pub index: usize,
+    /// Whether the argument is passed mutably.
+    pub mutable: bool,
+    pub span: Location,
 }
 
 /// Caller-side driver for a scoped yielded place.

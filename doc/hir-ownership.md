@@ -59,6 +59,7 @@ It does not suspend an accessor and has no epilogue.
 Its access mode is `Alias` for an implementation alias or `Exclusive` for an opened mutable
 destination whose body must not access overlapping storage through another path.
 Suspended yielded accessors also retain exclusive access to their other mutable arguments.
+A call built within the accessors of its arguments may have only one argument whose accessor stays suspended around it when one of them is mutable; elaboration decides this once projections are resolved, so a field that resolves to a plain projection or an addressor does not count.
 Std `array_index` is a source subscript with `AddressorPlace` provenance, backed by the private native `buffer_slot` subscript; source array-index syntax resolves `array_index` and lowers through the addressor path.
 
 `LocalDecl` is the ownership metadata for a local:

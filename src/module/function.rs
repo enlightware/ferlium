@@ -122,6 +122,9 @@ pub struct LocalDecl<P: HirPhase = Unelaborated> {
     /// Clone dispatch used when initializing owned mutable-binding storage.
     #[new(default)]
     pub clone: Option<P::LocalClone>,
+    /// For the binding of a yielded accessor, the argument whose call is built within it.
+    #[new(default)]
+    pub driven_argument: P::DrivenArgument,
 }
 
 /// A local declaration before local ownership/value elaboration.
@@ -206,6 +209,7 @@ impl LocalDecl<Unelaborated> {
             slot: self.slot,
             assignment_mode: self.assignment_mode,
             clone: self.clone.map(PendingLocalClone::into_elaborated),
+            driven_argument: (),
         }
     }
 }

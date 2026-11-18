@@ -29,8 +29,8 @@ use crate::{
     containers::{SVec2, b, continuous_hashmap_to_vec},
     format::FormatWith,
     hir::{
-        self, CallArgument, FieldAccess as HirFieldAccess, LoopId, NodeArena, NodeId, NodeKind,
-        Project as HirProject, StoreLocal, Variant as HirVariant,
+        self, CallArgument, DrivenArgument, FieldAccess as HirFieldAccess, LoopId, NodeArena,
+        NodeId, NodeKind, Project as HirProject, StoreLocal, Variant as HirVariant,
         addressor_place_base_argument_index,
         borrow_checker::{
             BorrowContext, let_arguments_overlapping_later_argument_writes,
@@ -175,19 +175,11 @@ pub struct TypeInference {
     trivial_copy_cache: FxHashMap<Type, bool>,
     projection_subscript_miss_cache: FxHashSet<ProjectionKey>,
     next_loop_id: LoopId,
-    /// Suspension tally for the access-chain arguments currently driven around one static call.
-    /// Addressor-place drivers nest freely; yielded drivers count only when their outermost
-    /// accessor stays suspended around the call. Materialized sub-expressions do not count.
-    call_arg_suspension: Option<CallArgSuspensionState>,
-}
-
-/// Running tally of driven arguments left suspended around one static call.
-#[derive(Default, Debug, Clone, Copy)]
-struct CallArgSuspensionState {
-    /// Number of driven arguments whose outermost accessor is suspended around the call.
-    suspended: usize,
-    /// Whether any of those suspended arguments is a mutable consumer.
-    saw_mut: bool,
+    /// The bindings of the yielded accessors whose bodies are being inferred, innermost last.
+    yielded_bindings: Vec<LocalDeclId>,
+    /// The number of the next call whose access-chain arguments are built within their
+    /// accessors, as `DrivenArgument` names it.
+    next_driven_call: u32,
 }
 
 struct PreparedPlace {
@@ -3517,7 +3509,9 @@ impl TypeInference {
         // The extra `Value` requirements are sound and, in std, never reach a published scheme.
         let slide_may_fail = !accessor.effects.cannot_fail();
         env.failing_projections += usize::from(slide_may_fail);
+        self.yielded_bindings.push(binding);
         let result = build_body(self, env, place, accessor.ty, true);
+        self.yielded_bindings.pop();
         env.failing_projections -= usize::from(slide_may_fail);
         if let Some(previous) = previous {
             env.place_aliases.insert(binding, previous);
@@ -3541,28 +3535,6 @@ impl TypeInference {
             .ir_arena
             .alloc(hir::Node::new(node, result_ty, effects, expr_span));
         Ok((node, MutType::constant()))
-    }
-
-    /// Record one driven argument whose outermost accessor is suspended around the call.
-    /// Called once per driver after its node is built; materialized sub-expression accessors must
-    /// not call this.
-    fn record_driven_suspended_accessor(
-        &mut self,
-        is_mut: bool,
-        span: Location,
-    ) -> Result<(), InternalCompilationError> {
-        let Some(state) = self.call_arg_suspension.as_mut() else {
-            return Ok(());
-        };
-        if state.suspended >= 1 && (state.saw_mut || is_mut) {
-            return Err(internal_compilation_error!(UnsupportedSubscriptFeature {
-                kind: UnsupportedSubscriptFeatureKind::MultipleMutableSubscriptArguments,
-                span,
-            }));
-        }
-        state.suspended += 1;
-        state.saw_mut |= is_mut;
-        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4836,12 +4808,11 @@ impl TypeInference {
         path_span: Location,
         expr_span: Location,
     ) -> Result<(NodeKind, Type, MutType, EffType), InternalCompilationError> {
-        // Nested calls get their own tally; restore the enclosing call afterwards.
-        let saved_suspension = self
-            .call_arg_suspension
-            .replace(CallArgSuspensionState::default());
+        let call = self.next_driven_call;
+        self.next_driven_call += 1;
         let result = self.infer_static_apply_with_driven_access_chain_args_at(
             env,
+            call,
             target,
             args,
             &drivers,
@@ -4849,7 +4820,6 @@ impl TypeInference {
             path_span,
             expr_span,
         );
-        self.call_arg_suspension = saved_suspension;
         let (node_id, mut_ty) = result?;
         let node = env.ir_arena[node_id].clone();
         Ok((node.kind, node.ty, mut_ty, node.effects))
@@ -4859,6 +4829,7 @@ impl TypeInference {
     fn infer_static_apply_with_driven_access_chain_args_at(
         &mut self,
         env: &mut TypingEnv,
+        call: u32,
         target: PreparedStaticCallTarget,
         args: &[DExprId],
         drivers: &[DrivenAccessChainArg],
@@ -4880,6 +4851,7 @@ impl TypeInference {
         let driver_mode = driver.mode;
         let access_chain = driver.access_chain.clone();
         let arg_span = env.ast_arena[args[driver_index]].span;
+        let first_binding = self.yielded_bindings.len();
         let (node, mut_ty) = self.infer_access_chain_with_body(
             env,
             access_chain,
@@ -4900,6 +4872,7 @@ impl TypeInference {
                     });
                     let (node, _) = this.infer_static_apply_with_driven_access_chain_args_at(
                         env,
+                        call,
                         target,
                         args,
                         remaining_drivers,
@@ -4907,18 +4880,23 @@ impl TypeInference {
                         path_span,
                         expr_span,
                     )?;
+                    // The call is built here, within the accessors of this argument's chain.
+                    // Whether one of the yielded ones stays suspended around it is known only
+                    // once projections are resolved: mark their bindings for elaboration to
+                    // decide. Yielded accessors of sub-expressions are done by now.
+                    let argument = DrivenArgument {
+                        call,
+                        index: driver_index,
+                        mutable: driver_mode == SubscriptMemberKind::Mut,
+                        span: arg_span,
+                    };
+                    for binding in &this.yielded_bindings[first_binding..] {
+                        env.all_locals[binding.as_index()].driven_argument = Some(argument);
+                    }
                     Ok((node, env.ir_arena[node].ty))
                 },
             ),
         )?;
-        // Only an outer `WithYielded` leaves this driver suspended around the call. Yielded
-        // accessors inside sub-expressions stay nested in `node` and finish before the call.
-        if matches!(env.ir_arena[node].kind, NodeKind::WithYielded(_)) {
-            self.record_driven_suspended_accessor(
-                driver_mode == SubscriptMemberKind::Mut,
-                arg_span,
-            )?;
-        }
         Ok((node, mut_ty))
     }
 

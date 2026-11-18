@@ -3972,6 +3972,116 @@ fn multiple_mutable_addressor_projections_are_allowed_as_arguments() {
     assert_val_eq!(value, expected_tuple([int(2), int(3)]));
 }
 
+/// A driven argument counts once as suspended around the call if one of its accessors yields
+/// there, whether that accessor is under an addressor and whether its receiver is a temporary.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_driven_argument_counts_once_if_one_of_its_accessors_yields_around_the_call() {
+    let declarations = indoc! { r#"
+        struct B { t: (int, int) }
+
+        subscript B.view(self) -> (int, int) {
+            ref {
+                let local = self.t;
+                yield local
+            }
+        }
+
+        subscript B.addr(self) -> (int, int) {
+            ref {
+                self.t
+            }
+        }
+
+        subscript first(t: (int, int)) -> int {
+            ref {
+                t.0
+            }
+        }
+
+        subscript first_y(t: (int, int)) -> int {
+            ref {
+                let local = t.0;
+                yield local
+            }
+        }
+
+        subscript cell(slot: &mut int) -> int {
+            ref mut {
+                let mut local = slot;
+                yield local;
+                slot = local
+            }
+        }
+
+        fn set(src: int, dst: &mut int) {
+            dst = src
+        }
+
+        fn assign(dst: &mut int, src: int) {
+            dst = src
+        }
+
+        fn make() -> B { B { t: (5, 6) } }
+    "# };
+    for source in [
+        "let mut dst = 0; set(make().view->[first], dst->[cell]); dst",
+        "let b = make(); let mut dst = 0; set(b.view->[first], dst->[cell]); dst",
+        "let mut dst = 0; set(make().addr->[first_y], dst->[cell]); dst",
+        "let b = make(); let mut dst = 0; set(b.addr->[first_y], dst->[cell]); dst",
+    ] {
+        assert_unsupported_subscript_feature(
+            &format!("{declarations}{source}"),
+            UnsupportedSubscriptFeatureKind::MultipleMutableSubscriptArguments,
+        );
+    }
+    for source in [
+        "let mut dst = 0; set(make().view->[first], dst); dst",
+        "let mut p = (0, 1); assign(p.0, make().view->[first]); p.0",
+        "let b = make(); let mut p = (0, 1); assign(p.0, b.view->[first]); p.0",
+    ] {
+        let value = run_experimental_subscript_source(&format!("{declarations}{source}"));
+        assert_val_eq!(value, int(5));
+    }
+}
+
+/// A field whose receiver's type is not yet known when the call is inferred is read through an
+/// accessor that may yield. Once it resolves to a plain field, it does not count as suspended
+/// around the call, under an addressor or not.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_field_resolved_to_a_plain_one_is_not_suspended_around_the_call() {
+    let mut session = TestSession::new();
+    let declarations = indoc! { r#"
+        struct Cell { n: int }
+        struct Box { pair: (Cell, int) }
+        subscript Box.view(self) -> (Cell, int) { ref mut { self.pair } }
+        fn set(src: int, dst: &mut int) { dst = src }
+    "# };
+    for source in [
+        indoc! { r#"
+            fn copy(x: Box, y: &mut Box) { set(x.view.0.n, y.view.0.n) }
+            fn f() -> int {
+                let mut b = Box { pair: (Cell { n: 0 }, 0) };
+                copy(Box { pair: (Cell { n: 7 }, 1) }, b);
+                b.pair.0.n
+            }
+            f()
+        "# },
+        indoc! { r#"
+            fn f() -> int {
+                let x = (Cell { n: 7 }, 1);
+                let mut y = (Cell { n: 0 }, 0);
+                set(x.0.n, y.0.n);
+                y.0.n
+            }
+            f()
+        "# },
+    ] {
+        assert_val_eq!(session.run(&format!("{declarations}{source}")), int(7));
+    }
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn rejects_multiple_mutable_yielded_projections_as_arguments() {
