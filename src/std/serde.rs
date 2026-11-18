@@ -31,7 +31,7 @@ use crate::{
     },
     types::effects::{EffType, PrimitiveEffect},
     types::mutability::MutVal,
-    types::r#trait::{Deriver, Trait, TraitMethodIndex, structural_members},
+    types::r#trait::{DerivedRequirements, Deriver, Trait, TraitMethodIndex, structural_members},
     types::trait_solver::TraitSolver,
     types::r#type::{
         CallImplType, CallResultConvention, FnArgType, FnType, Type, TypeKind, tuple_type,
@@ -133,6 +133,42 @@ fn derived_structure(
     Ok(Some(DerivedStructure::Delegated(impl_id)))
 }
 
+/// What the derivation of `ty` by [`derived_structure`] requires: the shape's impl for one
+/// delegated to it, else its members' impls, after its own impl is reserved.
+fn derived_structure_requirements(ty: Type, solver: &TraitSolver) -> Option<DerivedRequirements> {
+    let mut ty_data = ty.data().clone();
+    if let TypeKind::Named(named) = &ty_data {
+        let shape = solver
+            .type_def(named.def)
+            .instantiated_shape_with_effects(&named.params, &named.effect_params);
+        ty_data = shape.data().clone();
+        if !matches!(
+            ty_data,
+            TypeKind::Tuple(_) | TypeKind::Record(_) | TypeKind::Variant(_)
+        ) {
+            return Some(DerivedRequirements {
+                members: vec![shape],
+                reserves: false,
+            });
+        }
+    }
+    let members = match ty_data {
+        TypeKind::Tuple(members) => members,
+        TypeKind::Record(fields) => fields.into_iter().map(|(_, ty)| ty).collect(),
+        // A variant without payload is (de)serialized by its tag alone.
+        TypeKind::Variant(variants) => variants
+            .into_iter()
+            .map(|(_, ty)| ty)
+            .filter(|ty| *ty != Type::unit())
+            .collect(),
+        _ => return None,
+    };
+    Some(DerivedRequirements {
+        members,
+        reserves: true,
+    })
+}
+
 fn record_payload_type() -> Type {
     cached_ty!(|| {
         let element_ty = tuple_type([string_type(), data_value_type()]);
@@ -145,6 +181,15 @@ struct AlgebraicTypeSerializeDeriver;
 impl Deriver for AlgebraicTypeSerializeDeriver {
     fn derived_members(&self, ty: Type, solver: &TraitSolver) -> Vec<Type> {
         structural_members(ty, solver)
+    }
+
+    fn requirements(
+        &self,
+        _trait_id: TraitId,
+        input_types: &[Type],
+        solver: &TraitSolver,
+    ) -> Option<DerivedRequirements> {
+        derived_structure_requirements(input_types[0], solver)
     }
 
     fn derive_impl(
@@ -396,6 +441,15 @@ struct AlgebraicTypeDeserializeDeriver;
 impl Deriver for AlgebraicTypeDeserializeDeriver {
     fn derived_members(&self, ty: Type, solver: &TraitSolver) -> Vec<Type> {
         structural_members(ty, solver)
+    }
+
+    fn requirements(
+        &self,
+        _trait_id: TraitId,
+        input_types: &[Type],
+        solver: &TraitSolver,
+    ) -> Option<DerivedRequirements> {
+        derived_structure_requirements(input_types[0], solver)
     }
 
     fn derive_impl(

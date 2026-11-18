@@ -1667,6 +1667,9 @@ impl Module {
         trait_def: Trait,
         visibility: Visibility,
     ) -> LocalTraitId {
+        // Native code may build a trait field by field: what the compiler relies on is checked
+        // where every trait is registered.
+        trait_def.validate();
         let id = LocalTraitId::from_index(self.traits.len());
         let trait_name = trait_def.name;
         self.traits.push(trait_def);

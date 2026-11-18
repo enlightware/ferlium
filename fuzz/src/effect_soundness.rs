@@ -23,12 +23,14 @@
 //! - a wrapper with a custom `Value` impl whose methods call a method that a prerequisite
 //!   requires to be pure, used through containers, derivation and generic functions;
 //! - an entry expression summing calls on concrete values, with callbacks that are pure, fail,
-//!   read or write.
+//!   read or write;
+//! - a web of impls, checked as a program of its own in several orders, see `impl_web`.
 //!
 //! `effects::write()` counts and `effects::read()` returns the count, so the result of a program
 //! depends on which effects ran and in which order. Every program computes an `int`, so outcomes
 //! compare as plain values or failure kinds.
 
+use crate::impl_web::ImplWeb;
 use arbitrary::{Result, Unstructured};
 use ferlium::types::effects::{
     EffType, Effect, EffectRow, PrimitiveEffect, effect, effect_read, effect_write, no_effects,
@@ -276,6 +278,18 @@ pub struct ValueUse {
     /// Comparing, printing, copying, or only dropping.
     pub operation: u8,
     pub through: Through,
+    /// Whether the second wrapper `U<T>` holds the value, where impls make a circle.
+    pub outer: bool,
+}
+
+/// How impls of the wrappers `V<T>` and `U<T>` require one another in a circle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Circle {
+    None,
+    /// Their `Value` impls do.
+    Value,
+    /// Their impls of `Lp`, a trait without outputs, do; that of `V<T>` calls the method.
+    Trait,
 }
 
 /// A wrapper `V<T>` with a custom `Value` impl whose methods call a method of `kind`, which a
@@ -284,6 +298,9 @@ pub struct ValueUse {
 pub struct ValueWrapper {
     pub kind: TraitKind,
     pub uses: Vec<ValueUse>,
+    pub circle: Circle,
+    /// Whether the prerequisite that closes the circle is written before the others.
+    pub circle_first: bool,
 }
 
 /// A generated program.
@@ -295,6 +312,8 @@ pub struct EffectProgram {
     pub cycles: Vec<Cycle>,
     pub defaults: Vec<DefaultTrait>,
     pub value_wrapper: Option<ValueWrapper>,
+    /// A web of impls checked as a program of its own, in several orders.
+    pub impl_web: Option<ImplWeb>,
 }
 
 /// One of the two callback parameters, `f0` and `f1`, of a function of a recursive cycle.
@@ -514,6 +533,7 @@ impl EffectProgram {
             cycles: Vec::new(),
             defaults: Vec::new(),
             value_wrapper: None,
+            impl_web: None,
         };
 
         let caller_count = u.int_in_range(0..=4)?;
@@ -643,6 +663,9 @@ impl EffectProgram {
         // An exhausted input answers yes to `ratio`: ask for the absence of the wrapper.
         if !u.ratio(2, 3)? {
             program.value_wrapper = program.arbitrary_value_wrapper(u)?;
+        }
+        if !u.ratio(1, 2)? {
+            program.impl_web = Some(ImplWeb::generate(u)?);
         }
         Ok(program)
     }
@@ -798,11 +821,29 @@ impl EffectProgram {
                     container: u.int_in_range(0..=4)?,
                     operation: u.int_in_range(0..=3)?,
                     through,
+                    outer: false,
                 });
                 break;
             }
         }
-        Ok(Some(ValueWrapper { kind, uses }))
+        // Chosen last, so that earlier inputs keep their programs: an exhausted input has none.
+        let circle = match u.int_in_range(0..=5)? {
+            0..=2 => Circle::None,
+            3 | 4 => Circle::Value,
+            _ => Circle::Trait,
+        };
+        let circle_first = u.int_in_range(0..=1)? == 1;
+        if circle != Circle::None {
+            for value_use in &mut uses {
+                value_use.outer = u.int_in_range(0..=1)? == 1;
+            }
+        }
+        Ok(Some(ValueWrapper {
+            kind,
+            uses,
+            circle,
+            circle_first,
+        }))
     }
 
     /// A self value without callback carrier, so that its type can be an impl's input.
@@ -933,8 +974,14 @@ impl EffectProgram {
         out.push_str(
             "fn total(a: [int]) -> int {\n\tlet mut t = 0;\n\tfor v in a {\n\t\tt = t + v\n\t};\n\tt\n}\n",
         );
-        if self.value_wrapper.is_some() {
+        if let Some(wrapper) = &self.value_wrapper {
             out.push_str("struct V<T>(T)\nstruct N<T> { member: T }\n");
+            if wrapper.circle != Circle::None {
+                out.push_str("struct U<T>(T)\n");
+            }
+            if wrapper.circle == Circle::Trait {
+                out.push_str("trait Lp<Self> {\n\tfn lp(x: Self) -> int;\n}\n");
+            }
             out.push_str("fn same(a, b) {\n\tif a == b {\n\t\t1\n\t} else {\n\t\t0\n\t}\n}\n");
         }
 
@@ -943,7 +990,7 @@ impl EffectProgram {
             render_impls(implementation, e, &mut impls);
         }
         if let Some(wrapper) = &self.value_wrapper {
-            impls.push(render_value_impl(wrapper.kind, e));
+            impls.extend(render_value_impls(wrapper, e));
         }
         if variant.reverse {
             impls.reverse();
@@ -972,7 +1019,7 @@ impl EffectProgram {
         }
         if let Some(wrapper) = &self.value_wrapper {
             for (index, value_use) in wrapper.uses.iter().enumerate() {
-                out.push_str(&value_use.render_function(index, wrapper.kind, e));
+                out.push_str(&value_use.render_function(index, wrapper, e));
             }
         }
 
@@ -1013,7 +1060,7 @@ impl EffectProgram {
                     .uses
                     .iter()
                     .enumerate()
-                    .map(|(index, value_use)| value_use.render_term(index)),
+                    .map(|(index, value_use)| value_use.render_term(index, wrapper.circle)),
             );
         }
         if terms.is_empty() {
@@ -1192,43 +1239,75 @@ fn bounded_parts(
 }
 
 impl ValueUse {
+    /// The wrapper that holds the value.
+    fn wrapper(&self, circle: Circle) -> &'static str {
+        if self.outer && circle != Circle::None {
+            "U"
+        } else {
+            "V"
+        }
+    }
+
+    /// Whether the use calls the method of `Lp` on the wrapper.
+    fn calls_lp(&self, circle: Circle) -> bool {
+        circle == Circle::Trait && self.container == 0 && self.operation == 3
+    }
+
     /// The use of the wrapper around the value `s`.
-    fn body(&self, s: &str) -> String {
+    fn body(&self, s: &str, circle: Circle) -> String {
+        let w = self.wrapper(circle);
         let made = match self.container {
-            0 => format!("V({s})"),
-            1 => format!("(V({s}), 1)"),
-            2 => format!("[V({s})]"),
-            3 => format!("N {{ member: V({s}) }}"),
-            _ => format!("Some(V({s}))"),
+            0 => format!("{w}({s})"),
+            1 => format!("({w}({s}), 1)"),
+            2 => format!("[{w}({s})]"),
+            3 => format!("N {{ member: {w}({s}) }}"),
+            _ => format!("Some({w}({s}))"),
         };
         let used = match self.operation {
             0 => "same(v, v)",
             1 => "len(to_string(v))",
             2 => "let w = [v, v];\n\tsame(w, w)",
+            _ if self.calls_lp(circle) => "lp(v)",
             _ => "1",
         };
         format!("let v = {made};\n\t{used}")
     }
 
-    fn render_function(&self, index: usize, kind: TraitKind, e: &str) -> String {
-        let i = kind.index();
+    fn render_function(&self, index: usize, wrapper: &ValueWrapper, e: &str) -> String {
+        let i = wrapper.kind.index();
+        let circle = wrapper.circle;
         match self.through {
             Through::Inline => String::new(),
-            Through::Inferred => format!("fn u{index}(s) {{\n\t{}\n}}\n", self.body("s")),
-            Through::Declared => format!(
-                "fn u{index}<T>(s: T) -> int\nwhere\n\tT: Value,\n\tT: Tr{i}<! {e} = ()>\n{{\n\t{}\n}}\n",
-                self.body("s")
-            ),
+            Through::Inferred => {
+                format!("fn u{index}(s) {{\n\t{}\n}}\n", self.body("s", circle))
+            }
+            Through::Declared => {
+                // A definition does not build a circle of impls for generic types: its caller
+                // gives what the circle serves.
+                let w = self.wrapper(circle);
+                let given = match circle {
+                    Circle::None => String::new(),
+                    Circle::Value => format!(",\n\t{w}<T>: Value"),
+                    Circle::Trait if self.calls_lp(circle) => format!(",\n\t{w}<T>: Lp"),
+                    Circle::Trait => String::new(),
+                };
+                format!(
+                    "fn u{index}<T>(s: T) -> int\nwhere\n\tT: Value,\n\tT: Tr{i}<! {e} = ()>{given}\n{{\n\t{}\n}}\n",
+                    self.body("s", circle)
+                )
+            }
             Through::Generic => format!(
                 "fn u{index}<! {e}>(f: (int) -> int ! {e}) -> int {{\n\t{}\n}}\n",
-                self.body("C { f: f }")
+                self.body("C { f: f }", circle)
             ),
         }
     }
 
-    fn render_term(&self, index: usize) -> String {
+    fn render_term(&self, index: usize, circle: Circle) -> String {
         match (&self.through, &self.value) {
-            (Through::Inline, value) => format!("{{\n\t{}\n}}", self.body(&render_value(value))),
+            (Through::Inline, value) => {
+                format!("{{\n\t{}\n}}", self.body(&render_value(value), circle))
+            }
             (Through::Generic, SelfValue::C(callback)) => {
                 format!("u{index}({})", callback.render("w"))
             }
@@ -1237,20 +1316,55 @@ impl ValueUse {
     }
 }
 
-/// The custom `Value` impl of the wrapper `V<T>`, whose methods call a method of `kind`.
-fn render_value_impl(kind: TraitKind, e: &str) -> String {
+/// The impls of the wrappers: the custom `Value` impl of `V<T>`, whose methods call a method
+/// of the wrapper's kind, and those that make a circle with it, if any.
+fn render_value_impls(wrapper: &ValueWrapper, e: &str) -> Vec<String> {
+    let kind = wrapper.kind;
     let i = kind.index();
     let probe = |x: &str| match kind {
         TraitKind::Returned => format!("{{ let h = m{i}({x}.0); h(0) }}"),
         _ => method_call(kind, &format!("{x}.0"), "0", "|z| z + 1"),
     };
-    format!(
-        "impl<T> Value for V<T>\nwhere\n\tT: Value,\n\tT: Tr{i}<! {e} = ()>\n{{\n\tfn eq(x: V<T>, y: V<T>) -> bool {{ {} == {} }}\n\tfn to_string(x: V<T>) -> string {{ to_string({}) }}\n\tfn hash(x: V<T>, state: &mut hasher) {{ hash({}, state) }}\n\tfn clone(x: V<T>) -> V<T> {{ V(x.0) }}\n\tfn drop(x: &mut V<T>) {{}}\n}}\n",
+    // The prerequisites of an impl of `V<T>`, with the one that closes a circle, if any.
+    let prerequisites = |closing: Option<&str>| {
+        let mut clauses = vec!["\tT: Value".to_string(), format!("\tT: Tr{i}<! {e} = ()>")];
+        if let Some(closing) = closing {
+            let at = if wrapper.circle_first {
+                0
+            } else {
+                clauses.len()
+            };
+            clauses.insert(at, format!("\t{closing}"));
+        }
+        clauses.join(",\n")
+    };
+    let mut impls = vec![format!(
+        "impl<T> Value for V<T>\nwhere\n{}\n{{\n\tfn eq(x: V<T>, y: V<T>) -> bool {{ {} == {} }}\n\tfn to_string(x: V<T>) -> string {{ to_string({}) }}\n\tfn hash(x: V<T>, state: &mut hasher) {{ hash({}, state) }}\n\tfn clone(x: V<T>) -> V<T> {{ V(x.0) }}\n\tfn drop(x: &mut V<T>) {{}}\n}}\n",
+        prerequisites((wrapper.circle == Circle::Value).then_some("U<T>: Value")),
         probe("x"),
         probe("y"),
         probe("x"),
         probe("x"),
-    )
+    )];
+    match wrapper.circle {
+        Circle::None => {}
+        Circle::Value => impls.push(
+            "impl<T> Value for U<T>\nwhere\n\tT: Value,\n\tV<T>: Value\n{\n\tfn eq(x: U<T>, y: U<T>) -> bool { V(x.0) == V(y.0) }\n\tfn to_string(x: U<T>) -> string { to_string(V(x.0)) }\n\tfn hash(x: U<T>, state: &mut hasher) { hash(V(x.0), state) }\n\tfn clone(x: U<T>) -> U<T> { U(x.0) }\n\tfn drop(x: &mut U<T>) {}\n}\n"
+                .to_string(),
+        ),
+        Circle::Trait => {
+            impls.push(format!(
+                "impl<T> Lp for V<T>\nwhere\n{}\n{{\n\tfn lp(x: V<T>) -> int {{ {} }}\n}}\n",
+                prerequisites(Some("U<T>: Lp")),
+                probe("x"),
+            ));
+            impls.push(
+                "impl<T> Lp for U<T>\nwhere\n\tT: Value,\n\tV<T>: Value,\n\tV<T>: Lp\n{\n\tfn lp(x: U<T>) -> int { lp(V(x.0)) }\n}\n"
+                    .to_string(),
+            );
+        }
+    }
+    impls
 }
 
 fn arbitrary_callback(u: &mut Unstructured) -> Result<Callback> {

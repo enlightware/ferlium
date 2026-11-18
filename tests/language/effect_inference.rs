@@ -3045,6 +3045,67 @@ fn a_failed_effect_requirement_is_an_error_not_an_absent_impl() {
     );
 }
 
+/// Effects never select an impl: whether a written impl's head claims an application does not
+/// depend on the effects of its callbacks, even where its head uses a parameter twice.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn the_effects_of_callbacks_do_not_decide_which_impl_claims_an_application() {
+    let src = indoc! { r#"
+        trait Missing<Self> {}
+        struct Duo<T, U>(T, U)
+        impl<T> Inspect for Duo<T, T> where T: Missing {
+            fn inspect(x: Duo<T, T>) -> string { "written" }
+        }
+        fn pure() -> int { 0 }
+        fn risky() -> int { idiv(10, 2) }
+    "# };
+    for call in [
+        "inspect(Duo(pure, pure))",
+        "inspect(Duo(risky, risky))",
+        "inspect(Duo(pure, risky))",
+        "inspect(Duo(risky, pure))",
+    ] {
+        let mut session = TestSession::new();
+        let error = session
+            .fail_compilation(&format!("{src}{call}"))
+            .into_inner();
+        assert!(
+            matches!(error, CompilationErrorImpl::TraitImplNotFound { .. }),
+            "{call}: {error:?}"
+        );
+    }
+}
+
+/// The impls apply by structure, circle included: only their effects are wrong.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_failed_effect_requirement_in_a_circle_of_impls_is_an_effect_error() {
+    for subject in ["V", "U"] {
+        let error = TestSession::new().fail_compilation(&formatdoc! {r#"
+            trait Run<Self |-> ! E> {{ fn run(x: Self) -> int ! E; }}
+            struct F(int)
+            impl Run for <Self = F |-> ! E = fallible> {{ fn run(x) {{ idiv(1, x.0) }} }}
+            trait Show<Self> {{ fn show(x: Self) -> string; }}
+            struct V<T>(T)
+            struct U<T>(T)
+            impl<T> Show for V<T> where T: Run<! E = ()>, U<T>: Show {{
+                fn show(x: V<T>) -> string {{ "v" }}
+            }}
+            impl<T> Show for U<T> where V<T>: Show {{
+                fn show(x: U<T>) -> string {{ "u" }}
+            }}
+            show({subject}(F(1)))
+        "#});
+        assert!(
+            matches!(
+                &*error,
+                CompilationErrorImpl::TraitImplEffectsMismatch { .. }
+            ),
+            "{subject}: {error:?}"
+        );
+    }
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn a_missing_impl_stays_an_error_when_a_member_has_one() {
@@ -3992,6 +4053,31 @@ fn a_failing_prerequisite_fails_a_cycle_of_custom_value_impls_with_an_inferred_e
             other => panic!("expected no Value impl, got {other:?}"),
         }
     }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn impls_requiring_one_another_restrict_effects_across_the_circle() {
+    // As for `Value`: the restriction is on the far side of the circle from the call.
+    let src = format!(
+        "{RUN_PRELUDE}trait Show<Self> {{ fn show(x: Self) -> string; }}
+        struct L<T>(T)
+        struct R<T>(T)
+        impl<T> Show for L<T> where R<T>: Show {{ fn show(x: L<T>) -> string {{ \"L\" }} }}
+        impl<T> Show for R<T> where T: Run<! E = ()>, L<T>: Show {{
+            fn show(x: R<T>) -> string {{ \"R\" }}
+        }}
+        fn f(g: () -> int) -> string {{ show(L(Cb(g))) }}\n"
+    );
+    let mut session = TestSession::new();
+    assert_eq!(
+        signature(&mut session, &src, "f"),
+        "fn f(g: () -> int) -> string"
+    );
+    let mut session = TestSession::new();
+    assert_val_eq!(session.run(&format!("{src}f(|| 5)")), string("L"));
+    let mut session = TestSession::new();
+    session.fail_compilation(&format!("{src}f(|| idiv(1, 0))"));
 }
 
 #[test]

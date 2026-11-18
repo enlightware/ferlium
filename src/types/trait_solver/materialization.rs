@@ -49,7 +49,7 @@ use crate::{
 use super::{
     DerivedImplSnapshot, TraitSolver,
     canonical::{alpha_canonicalize_types, application_key},
-    matching::BlanketCandidate,
+    solve::{SelectedBlanket, Selection},
     trait_def_from_parts,
 };
 
@@ -253,6 +253,27 @@ impl<'a> TraitSolver<'a> {
         output_effs: &[EffType],
         associated_const_values: impl Into<Vec<LiteralValue>>,
     ) -> LocalImplId {
+        let imp = self.reserved_impl_from_code_entries(
+            trait_id,
+            input_types,
+            output_types,
+            output_effs,
+            associated_const_values,
+        );
+        let key = ConcreteTraitImplKey::new(trait_id, input_types.to_vec());
+        self.impls.add_concrete_struct(key, imp)
+    }
+
+    /// An impl of this application whose methods are reserved, to be given their code once
+    /// what they need is known. The impl is not added.
+    fn reserved_impl_from_code_entries(
+        &mut self,
+        trait_id: TraitId,
+        input_types: &[Type],
+        output_types: &[Type],
+        output_effs: &[EffType],
+        associated_const_values: impl Into<Vec<LiteralValue>>,
+    ) -> TraitImpl {
         let associated_const_values = associated_const_values.into();
         let trait_def = trait_def_from_parts(self.current_type_items, self.others, trait_id);
         trait_def.validate_impl_shape(
@@ -314,7 +335,7 @@ impl<'a> TraitSolver<'a> {
         let parents = self.parent_slots(trait_id, input_types, output_types, output_effs);
         let dictionary_value =
             build_dictionary_value(&methods, &associated_const_getters).with_parents(parents);
-        let imp = TraitImpl::new(
+        TraitImpl::new(
             trait_id,
             input_types.to_vec(),
             output_types.to_vec(),
@@ -326,9 +347,47 @@ impl<'a> TraitSolver<'a> {
             None,
         )
         .with_associated_const_values(associated_const_values)
-        .with_associated_const_getters(associated_const_getters);
-        let key = ConcreteTraitImplKey::new(trait_id, input_types.to_vec());
-        self.impls.add_concrete_struct(key, imp)
+        .with_associated_const_getters(associated_const_getters)
+    }
+
+    /// Add the dictionary that a blanket impl gives for an application, and index it.
+    ///
+    /// A generated dictionary denotes its full application, outputs included: it is indexed by
+    /// its request and by the outputs it has, so that a later request naming either finds it,
+    /// and never serves another application. When its implementation's inputs determine its
+    /// outputs, it is the application of these inputs, also indexed by them alone: a request
+    /// naming its outputs otherwise, or not at all, finds it if they match.
+    fn add_generated_dictionary(
+        &mut self,
+        imp: TraitImpl,
+        (source_module, source_impl): (Option<ModuleId>, LocalImplId),
+        requested_output_tys: Option<&[Type]>,
+        requested_output_effs: Option<&[EffType]>,
+        determined: bool,
+    ) -> LocalImplId {
+        let requested_key = application_key(
+            imp.trait_id,
+            &imp.input_tys,
+            requested_output_tys,
+            requested_output_effs,
+        );
+        let resulting_key = application_key(
+            imp.trait_id,
+            &imp.input_tys,
+            Some(&imp.output_tys),
+            Some(&imp.output_effs),
+        );
+        let inputs_key = application_key(imp.trait_id, &imp.input_tys, None, None);
+        let local_impl_id = self.impls.add_anonymous_dictionary_struct(imp);
+        self.record_generated_source(local_impl_id, source_module, source_impl);
+        let keys = Rc::make_mut(&mut self.impls.application_key_to_id);
+        for key in [requested_key, resulting_key] {
+            keys.insert(key, local_impl_id);
+        }
+        if determined {
+            keys.entry(inputs_key).or_insert(local_impl_id);
+        }
+        local_impl_id
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -375,7 +434,7 @@ impl<'a> TraitSolver<'a> {
         }
     }
 
-    /// Whether `requirement` is closed and its application is being solved.
+    /// Whether `requirement` is closed and its application is being selected or built.
     fn closes_a_cycle(&self, requirement: &DictionaryReq) -> bool {
         let DictionaryReq::TraitImpl {
             trait_id,
@@ -385,8 +444,9 @@ impl<'a> TraitSolver<'a> {
         else {
             return false;
         };
+        let key = (*trait_id, input_tys.clone());
         requirement.is_ground_trait_impl()
-            && self.solving_stack.contains(&(*trait_id, input_tys.clone()))
+            && (self.is_being_selected(*trait_id, input_tys) || self.building.contains(&key))
     }
 
     fn blanket_method_requirements(
@@ -833,59 +893,52 @@ impl<'a> TraitSolver<'a> {
         Ok((get_dictionary(impl_id, ty_args), dictionary_ty))
     }
 
-    /// Accept a blanket candidate for `solve_impl_actual` by materializing its dictionary, or
-    /// return `None` when its runtime requirements fail, to go on to the next candidate.
+    /// Build the dictionary of an application that a blanket impl was selected for.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn materialize_blanket_candidate(
+    pub(super) fn materialize_selected_blanket(
         &mut self,
         trait_id: TraitId,
         input_tys: &[Type],
         requested_output_tys: Option<&[Type]>,
         requested_output_effs: Option<&[EffType]>,
-        candidate: BlanketCandidate<'_>,
+        selection: &Selection,
+        blanket: &SelectedBlanket,
         fn_span: Location,
         arena: &mut NodeArena,
-    ) -> Result<Option<TraitImplId>, InternalCompilationError> {
+    ) -> Result<TraitImplId, InternalCompilationError> {
         let value_trait_id = self.std_trait_id(VALUE_TRAIT_NAME);
-        let BlanketCandidate {
+        let output_tys = selection.output_tys.clone();
+        let output_effs = selection.output_effs.clone();
+        let SelectedBlanket {
             module: imp_module_id,
             impl_id,
             sub_key,
-            output_tys,
-            output_effs,
-            runtime_requirements: resolved_runtime_requirements,
+            requirements: resolved_runtime_requirements,
             instantiation: blanket_instantiation,
-            ..
-        } = candidate;
+        } = blanket;
+        let (imp_module_id, impl_id) = (*imp_module_id, *impl_id);
         let imp_constraints = &sub_key.constraints;
         let imp_ty_var_count = sub_key.ty_var_count;
         let imp_eff_var_count = sub_key.eff_var_count;
         let defaulted_output_effect_vars = FxHashSet::default();
 
-        // Non-Value blanket impls can materialize all constraint dictionaries up front.
-        if trait_id != value_trait_id {
-            let mut runtime_requirements = self.runtime_requirements_from_resolved(
-                &resolved_runtime_requirements,
-                imp_constraints,
-            );
+        // Where impls may require one another in a circle, the dictionary is reserved before
+        // its prerequisites are built, so that one of them asking for this application finds
+        // it. The dictionaries of `Value` are impls of their own, reserved in any case.
+        let is_value = trait_id == value_trait_id;
+        let reserve_first = is_value
+            || (self.trait_def(trait_id).allows_recursive_impls()
+                && !resolved_runtime_requirements.is_empty());
+
+        // Otherwise, the constraint dictionaries are built first.
+        if !reserve_first {
+            let mut runtime_requirements = self
+                .runtime_requirements_from_resolved(resolved_runtime_requirements, imp_constraints);
             Self::close_defaulted_requirement_effect_rows(
                 &mut runtime_requirements,
                 &defaulted_output_effect_vars,
             );
-            if !self.validate_runtime_requirements(
-                &resolved_runtime_requirements,
-                fn_span,
-                arena,
-                false,
-            )? {
-                let rejected = self.reject_if_requirements_fail_on_effects(
-                    &resolved_runtime_requirements,
-                    input_tys,
-                    fn_span,
-                );
-                rejected?;
-                return Ok(None);
-            }
+            self.build_requirements(resolved_runtime_requirements, fn_span, arena)?;
 
             // Succeeded? First get the blanket implementation data and compute the output types.
             let impls = if let Some(module_id) = imp_module_id {
@@ -947,7 +1000,7 @@ impl<'a> TraitSolver<'a> {
                         &def,
                         imp_ty_var_count,
                         imp_eff_var_count,
-                        &blanket_instantiation,
+                        blanket_instantiation,
                         requirements,
                         fn_span,
                     )?;
@@ -1020,38 +1073,18 @@ impl<'a> TraitSolver<'a> {
             )
             .with_associated_const_values(associated_const_values)
             .with_associated_const_getters(associated_const_getters);
-            // A generated dictionary denotes its full application, outputs included: it is
-            // indexed by its request and by the outputs it has, so that a later request
-            // naming either finds it, and never serves another application. When its
-            // implementation's inputs determine its outputs, it is the application of these
-            // inputs, also indexed by them alone: a request naming its outputs otherwise, or not
-            // at all, finds it if they match.
-            let local_impl_id = self.impls.add_anonymous_dictionary_struct(imp);
-            let requested_key = application_key(
-                trait_id,
-                input_tys,
+            let local_impl_id = self.add_generated_dictionary(
+                imp,
+                (imp_module_id, impl_id),
                 requested_output_tys,
                 requested_output_effs,
+                determined,
             );
-            let resulting_key =
-                application_key(trait_id, input_tys, Some(&output_tys), Some(&output_effs));
-            self.record_generated_source(local_impl_id, imp_module_id, impl_id);
-            let keys = Rc::make_mut(&mut self.impls.application_key_to_id);
-            for key in [requested_key, resulting_key] {
-                keys.insert(key, local_impl_id);
-            }
-            if determined {
-                keys.entry(application_key(trait_id, input_tys, None, None))
-                    .or_insert(local_impl_id);
-            }
 
-            return Ok(Some(
-                self.impl_id(self.current_type_items.module.id, local_impl_id),
-            ));
+            return Ok(self.impl_id(self.current_type_items.module.id, local_impl_id));
         }
 
-        // Value blanket impls may be recursive, so reserve the concrete impl before
-        // materializing any deferred constraint dictionaries.
+        // Reserve the impl before building the dictionaries of its requirements.
         let imp = if let Some(module_id) = imp_module_id {
             &self
                 .others
@@ -1064,6 +1097,7 @@ impl<'a> TraitSolver<'a> {
         } else {
             &self.impls.data[impl_id.as_index()]
         };
+        let determined = declared_outputs_follow_from_inputs(imp);
         let imp_associated_const_values = imp.associated_const_values.clone();
         let gen_functions = imp.methods.clone();
         let source_dictionary = imp.dictionary_value.clone();
@@ -1079,19 +1113,37 @@ impl<'a> TraitSolver<'a> {
             )?
         };
         let materialization_snapshot = self.snapshot_derived_impl_state();
-        let local_impl_id = self.reserve_concrete_impl_from_code_entries(
-            trait_id,
-            input_tys,
-            &output_tys,
-            &output_effs,
-            associated_const_values,
-        );
-        self.record_generated_source(local_impl_id, imp_module_id, impl_id);
+        let local_impl_id = if is_value {
+            let local_impl_id = self.reserve_concrete_impl_from_code_entries(
+                trait_id,
+                input_tys,
+                &output_tys,
+                &output_effs,
+                associated_const_values,
+            );
+            self.record_generated_source(local_impl_id, imp_module_id, impl_id);
+            local_impl_id
+        } else {
+            let reserved = self.reserved_impl_from_code_entries(
+                trait_id,
+                input_tys,
+                &output_tys,
+                &output_effs,
+                associated_const_values,
+            );
+            self.add_generated_dictionary(
+                reserved,
+                (imp_module_id, impl_id),
+                requested_output_tys,
+                requested_output_effs,
+                determined,
+            )
+        };
 
-        // Now that recursive self-references can resolve to the reserved impl,
-        // materialize the deferred constraint dictionaries.
-        let mut runtime_requirements = self
-            .runtime_requirements_from_resolved(&resolved_runtime_requirements, imp_constraints);
+        // Now that a requirement asking for this application finds the reserved impl, build
+        // the dictionaries of the requirements.
+        let mut runtime_requirements =
+            self.runtime_requirements_from_resolved(resolved_runtime_requirements, imp_constraints);
         Self::close_defaulted_requirement_effect_rows(
             &mut runtime_requirements,
             &defaulted_output_effect_vars,
@@ -1107,20 +1159,10 @@ impl<'a> TraitSolver<'a> {
                 output_effs.clone(),
             ),
         );
-        if !self.validate_runtime_requirements(
-            &resolved_runtime_requirements,
-            fn_span,
-            arena,
-            true,
-        )? {
+        // Nothing made while the impl was reserved is kept if it cannot be completed.
+        if let Err(error) = self.build_requirements(resolved_runtime_requirements, fn_span, arena) {
             self.rollback_derived_impl_state(materialization_snapshot);
-            let rejected = self.reject_if_requirements_fail_on_effects(
-                &resolved_runtime_requirements,
-                input_tys,
-                fn_span,
-            );
-            rejected?;
-            return Ok(None);
+            return Err(error);
         }
 
         // Then, for every function in the blanket implementation, if needed create a thunk function
@@ -1138,12 +1180,19 @@ impl<'a> TraitSolver<'a> {
                     &def,
                     imp_ty_var_count,
                     imp_eff_var_count,
-                    &blanket_instantiation,
+                    blanket_instantiation,
                     requirements,
                     fn_span,
                 )
             })
-            .collect::<Result<Vec<_>, InternalCompilationError>>()?;
+            .collect::<Result<Vec<_>, InternalCompilationError>>();
+        let functions = match functions {
+            Ok(functions) => functions,
+            Err(error) => {
+                self.rollback_derived_impl_state(materialization_snapshot);
+                return Err(error);
+            }
+        };
         let methods = self.impls.data[local_impl_id.as_index()].methods.clone();
         assert_eq!(methods.len(), functions.len());
         for (id, function) in methods.iter().copied().zip(functions) {
@@ -1163,8 +1212,6 @@ impl<'a> TraitSolver<'a> {
                 &method_requirements,
             );
 
-        Ok(Some(
-            self.impl_id(self.current_type_items.module.id, local_impl_id),
-        ))
+        Ok(self.impl_id(self.current_type_items.module.id, local_impl_id))
     }
 }

@@ -10,7 +10,7 @@ use crate::{
         LocalDeclId, Module, PendingFunctionBody, PendingLocalClone, TraitId, TraitImplId, id::Id,
     },
     types::effects::{EffType, PrimitiveEffect},
-    types::r#trait::{Deriver, Trait},
+    types::r#trait::{DerivedRequirements, Deriver, Trait},
     types::trait_solver::TraitSolver,
     types::r#type::{FnType, Type},
     types::type_like::TypeLike,
@@ -24,6 +24,16 @@ struct SelfCastDeriver;
 impl Deriver for SelfCastDeriver {
     fn derived_members(&self, _ty: Type, _solver: &TraitSolver) -> Vec<Type> {
         vec![]
+    }
+
+    fn requirements(
+        &self,
+        _trait_id: TraitId,
+        input_types: &[Type],
+        _solver: &TraitSolver,
+    ) -> Option<DerivedRequirements> {
+        (input_types[0] == input_types[1] && input_types[0].is_constant())
+            .then(DerivedRequirements::none)
     }
 
     fn derive_impl(

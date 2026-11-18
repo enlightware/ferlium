@@ -8,7 +8,7 @@ use crate::{
     hir::{self, NodeArena, NodeId, value_dispatch::trait_apply_generated_with_locals},
     module::{LocalDecl, PendingFunctionBody, TraitId, TraitImplId},
     types::effects::EffType,
-    types::r#trait::{Deriver, TraitMethodIndex, structural_members},
+    types::r#trait::{DerivedRequirements, Deriver, TraitMethodIndex, structural_members},
     types::trait_solver::TraitSolver,
     types::r#type::{Type, TypeKind},
     types::type_like::TypeLike,
@@ -28,6 +28,25 @@ impl Deriver for ProductValueDeriver {
             return vec![];
         }
         structural_members(ty, solver)
+    }
+
+    fn requirements(
+        &self,
+        _trait_id: TraitId,
+        input_types: &[Type],
+        solver: &TraitSolver,
+    ) -> Option<DerivedRequirements> {
+        let ty = input_types[0];
+        let applies = matches!(
+            &*ty.data(),
+            TypeKind::Tuple(_) | TypeKind::Record(_) | TypeKind::Named(_)
+        );
+        // The value is built from its members', and a named type is served by its shape's impl:
+        // neither exists before its members' do.
+        applies.then(|| DerivedRequirements {
+            members: structural_members(ty, solver),
+            reserves: false,
+        })
     }
 
     fn derive_impl(

@@ -34,9 +34,42 @@ use crate::{
     },
 };
 
+/// What the derivation of an application requires, as selection checks it before building.
+#[derive(Debug)]
+pub struct DerivedRequirements {
+    /// The types whose impls of the same trait the derivation asks for while it builds.
+    pub members: Vec<Type>,
+    /// Whether the derivation installs its impl before asking for those of its members, so that
+    /// a member may require the application itself, in a circle.
+    pub reserves: bool,
+}
+
+impl DerivedRequirements {
+    /// A derivation that asks for no impl while it builds.
+    pub fn none() -> Self {
+        Self {
+            members: Vec::new(),
+            reserves: true,
+        }
+    }
+}
+
 /// Help deriving implementations of traits.
+///
+/// Deriving is in two steps, as for any impl: [`Self::requirements`] tells whether the deriver
+/// serves an application, building nothing, and [`Self::derive_impl`] builds the impl of an
+/// application that it serves, once the requirements hold.
 pub trait Deriver: Debug + DynClone + Sync + Send {
-    /// Derive an implementation of a trait for the given input types, if possible.
+    /// Whether this deriver serves the application of `trait_id` to `input_types`, which are
+    /// constant, and what its derivation requires; `None` if it does not serve it.
+    fn requirements(
+        &self,
+        trait_id: TraitId,
+        input_types: &[Type],
+        solver: &TraitSolver,
+    ) -> Option<DerivedRequirements>;
+
+    /// Build the implementation of an application that [`Self::requirements`] serves.
     fn derive_impl(
         &self,
         trait_id: TraitId,
@@ -434,13 +467,17 @@ impl Trait {
         self
     }
 
+    /// Add a deriver. Only a trait without outputs has derivers, see [`Self::try_validate`].
     pub fn with_deriver(mut self, deriver: impl Deriver + 'static) -> Self {
         self.derivers.push(Box::new(deriver));
+        self.validate();
         self
     }
 
+    /// Set the derivers, see [`Self::with_deriver`].
     pub fn with_derivers(mut self, derivers: Vec<Box<dyn Deriver + 'static>>) -> Self {
         self.derivers = derivers;
+        self.validate();
         self
     }
 
@@ -497,6 +534,14 @@ impl Trait {
     /// Return whether this trait needs a runtime dictionary: it has entries, or parent slots.
     pub fn has_runtime_dictionary(&self) -> bool {
         self.runtime_dictionary_entry_count() > 0 || !self.parent_slots.is_empty()
+    }
+
+    /// Whether impls of this trait may require one another in a circle. A prerequisite that asks
+    /// for an application already being selected then holds if that selection does, which is all
+    /// there is to know of it: the trait has no outputs that the circle would have to give, and
+    /// a dictionary is only used once all of the circle exist, by its methods.
+    pub fn allows_recursive_impls(&self) -> bool {
+        self.output_type_names.is_empty() && self.output_effect_names.is_empty()
     }
 
     /// Compute the parent slots of this trait, once its requirements are known: those of its
@@ -613,6 +658,17 @@ impl Trait {
 
     /// Validate the trait and return a descriptive error instead of panicking.
     pub fn try_validate(&self) -> Result<(), TraitValidationError> {
+        // Selection takes a derived application to have no outputs, and the effect checks through
+        // a derivation rely on it.
+        if !self.derivers.is_empty()
+            && (!self.output_type_names.is_empty() || !self.output_effect_names.is_empty())
+        {
+            return Err(TraitValidationError::Unsupported {
+                trait_name: self.name,
+                kind: UnsupportedTraitDefinitionKind::DerivedOutputs,
+            });
+        }
+
         let mut item_names = FxHashSet::default();
         for name in self
             .methods

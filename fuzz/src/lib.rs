@@ -11,6 +11,7 @@
 pub mod effect_oracle;
 pub mod effect_selection;
 pub mod effect_soundness;
+pub mod impl_web;
 
 use barkus_core::generate::decode;
 use barkus_core::ir::grammar::GrammarIr;

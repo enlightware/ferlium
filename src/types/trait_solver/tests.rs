@@ -620,8 +620,8 @@ fn unmaterialized_output_cache_does_not_reuse_constrained_effects() {
         )
         .unwrap();
     assert_eq!(output_effs, vec![EffType::empty()]);
-    let cached = solver
-        .cached_unmaterialized_outputs(trait_id, &[int_type()])
-        .expect("the unconstrained query must populate the output cache");
-    assert_eq!(cached.output_effs, vec![EffType::empty()]);
+    let kept = solver
+        .kept_selection(trait_id, &[int_type()], None, None)
+        .expect("the unconstrained query must keep its selection");
+    assert_eq!(kept.output_effs, vec![EffType::empty()]);
 }

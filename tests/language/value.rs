@@ -474,6 +474,66 @@ fn a_custom_value_impl_that_does_not_apply_is_not_replaced_by_a_derived_one() {
     }
 }
 
+/// Each level solves its prerequisite once, also when the types hold an effect variable.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn nested_custom_value_impls_are_solved_once() {
+    const DEPTH: usize = 24;
+    let nested = "V(".repeat(DEPTH) + "Cb(g)" + &")".repeat(DEPTH);
+    let src = format!(
+        r#"
+        struct Cb<T>(T)
+        struct V<T>(T)
+        impl<T> Value for V<T> where T: Value {{
+            fn eq(x: V<T>, y: V<T>) -> bool {{ true }}
+            fn to_string(x: V<T>) -> string {{ "V" }}
+            fn hash(x: V<T>, state: &mut hasher) {{}}
+            fn clone(x: V<T>) -> V<T> {{ V(x.0) }}
+            fn drop(x: &mut V<T>) {{}}
+        }}
+        fn f(g: () -> int) -> string {{ to_string({nested}) }}
+        f(|| 1)
+        "#
+    );
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    assert_val_eq!(session.run(&src), string("V"));
+}
+
+/// A prerequisite on a trait without methods has no evidence to build, and must hold all the same.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_custom_value_impl_requires_its_prerequisites_without_methods() {
+    let src = r#"
+        trait Mark<Self> {}
+        struct S(int)
+        impl Mark for S {}
+        struct V<T>(T)
+        impl<T> Value for V<T> where T: Value, T: Mark {
+            fn eq(x: V<T>, y: V<T>) -> bool { true }
+            fn to_string(x: V<T>) -> string { "V" }
+            fn hash(x: V<T>, state: &mut hasher) {}
+            fn clone(x: V<T>) -> V<T> { V(x.0) }
+            fn drop(x: &mut V<T>) {}
+        }
+    "#;
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    assert_val_eq!(
+        session.run(&format!("{src}to_string(V(S(1)))")),
+        string("V")
+    );
+    match session
+        .fail_compilation(&format!("{src}to_string(V(1))"))
+        .into_inner()
+    {
+        CompilationErrorImpl::TraitImplNotFound { input_tys, .. } => {
+            assert_eq!(input_tys, ["Self = V<int>"])
+        }
+        other => panic!("expected no Value impl for V<int>, got {other:?}"),
+    }
+}
+
 /// A cycle of custom `Value` impls holds as a whole: a prerequisite failing anywhere in it fails
 /// each of its impls.
 #[test]

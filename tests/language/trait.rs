@@ -28,7 +28,7 @@ use ferlium::{
 use indoc::indoc;
 use ustr::ustr;
 
-use crate::harness::{TestSession, int, string};
+use crate::harness::{TestSession, bool, int, string};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -2770,4 +2770,505 @@ fn invalid_default_method_does_not_suggest_a_clause_without_source_syntax() {
         missing_requirement_of_default_method("trait Tr<Self> { fn go(x: Self) -> int { x.foo } }"),
         Some(MissingRequirement::Description(_))
     ));
+}
+
+/// Two types whose impls of `Show` require one another, `R` having `prerequisites`.
+fn show_circle(prerequisites: &str) -> String {
+    format!(
+        "trait Show<Self> {{ fn show(x: Self) -> string; }}
+        trait Tag<Self> {{ fn tag(x: Self) -> int; }}
+        struct S(int)
+        impl Tag for S {{ fn tag(x) {{ 0 }} }}
+        struct L<T>(T)
+        struct R<T>(T)
+        impl<T> Show for L<T> where R<T>: Show {{ fn show(x: L<T>) -> string {{ \"L\" }} }}
+        impl<T> Show for R<T> where {prerequisites} {{
+            fn show(x: R<T>) -> string {{ \"R\" }}
+        }}\n"
+    )
+}
+
+fn expect_impl_not_found(session: &mut TestSession, src: &str, trait_name: &str, input: &str) {
+    match session.fail_compilation(src).into_inner() {
+        CompilationErrorImpl::TraitImplNotFound {
+            trait_ref,
+            input_tys,
+            ..
+        } => {
+            assert_eq!(trait_ref, trait_name, "{src}");
+            assert_eq!(input_tys, [input], "{src}");
+        }
+        other => panic!("expected no {trait_name} impl for {input}, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn impls_of_a_trait_without_outputs_may_require_one_another() {
+    let mut session = TestSession::new();
+    let src = show_circle("L<T>: Show");
+    for (expr, expected) in [
+        ("show(L(1))", "L"),
+        ("show(R(1))", "R"),
+        ("fn f(x) { show(L(x)) } f(true)", "L"),
+    ] {
+        assert_val_eq!(session.run(&format!("{src}{expr}")), string(expected));
+    }
+    // The methods of the circle call one another.
+    assert_val_eq!(
+        session.run(indoc! {r#"
+            trait Steps<Self> { fn steps(x: Self) -> int; }
+            struct Even<T>(int, T)
+            struct Odd<T>(int, T)
+            impl<T> Steps for Even<T> where Odd<T>: Steps {
+                fn steps(x: Even<T>) -> int {
+                    if x.0 == 0 {
+                        0
+                    } else {
+                        let next: Odd<T> = Odd(x.0 - 1, x.1);
+                        1 + steps(next)
+                    }
+                }
+            }
+            impl<T> Steps for Odd<T> where Even<T>: Steps {
+                fn steps(x: Odd<T>) -> int {
+                    let next: Even<T> = Even(x.0 - 1, x.1);
+                    1 + steps(next)
+                }
+            }
+            steps(Even(4, ()))
+        "#}),
+        int(4)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_failing_prerequisite_fails_a_circle_of_impls() {
+    let mut session = TestSession::new();
+    // The failing prerequisite is solved before the one that closes the circle, or after it:
+    // asking again for what the circle made wait does not hide the failure.
+    for prerequisites in ["T: Tag, L<T>: Show", "L<T>: Show, T: Tag"] {
+        let src = show_circle(prerequisites);
+        assert_val_eq!(session.run(&format!("{src}show(L(S(1)))")), string("L"));
+        assert_val_eq!(session.run(&format!("{src}show(R(S(1)))")), string("R"));
+        expect_impl_not_found(
+            &mut session,
+            &format!("{src}show(L(1))"),
+            "Show",
+            "Self = L<int>",
+        );
+        expect_impl_not_found(
+            &mut session,
+            &format!("{src}show(R(1))"),
+            "Show",
+            "Self = R<int>",
+        );
+    }
+    // Also for a trait without methods, which has no evidence to build.
+    let src = indoc! {r#"
+        trait Mark<Self> {}
+        trait Tag<Self> { fn tag(x: Self) -> int; }
+        struct S(int)
+        impl Tag for S { fn tag(x) { 0 } }
+        struct L<T>(T)
+        struct R<T>(T)
+        impl<T> Mark for L<T> where R<T>: Mark {}
+        impl<T> Mark for R<T> where T: Tag, L<T>: Mark {}
+        fn need<T>(x: T) -> int where T: Mark { 1 }
+    "#};
+    assert_val_eq!(session.run(&format!("{src}need(L(S(1)))")), int(1));
+    expect_impl_not_found(
+        &mut session,
+        &format!("{src}need(L(1))"),
+        "Mark",
+        "Self = L<int>",
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn impls_of_a_trait_with_outputs_may_not_require_one_another() {
+    // The circle would have to give the outputs that it needs.
+    let mut session = TestSession::new();
+    expect_impl_not_found(
+        &mut session,
+        indoc! {r#"
+            trait Conv<Self |-> Out> { fn conv(x: Self) -> Out; }
+            struct L<T>(T)
+            struct R<T>(T)
+            impl<T> Conv for <Self = L<T> |-> Out = int> where R<T>: Conv<Out = int> {
+                fn conv(x: L<T>) -> int { 1 }
+            }
+            impl<T> Conv for <Self = R<T> |-> Out = int> where L<T>: Conv<Out = int> {
+                fn conv(x: R<T>) -> int { 2 }
+            }
+            conv(L(1))
+        "#},
+        "Conv",
+        "Self = L<int>",
+    );
+}
+
+/// Requesting the application with outputs first, or the one without, must not change the
+/// outcome: the first request would otherwise decide for the second.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_circle_through_a_trait_with_outputs_holds_in_no_order() {
+    let src = indoc! {r#"
+        trait Show<Self> { fn show(x: Self) -> int; }
+        trait Conv<Self |-> Out> { fn conv(x: Self) -> Out; }
+        struct L<T>(T)
+        struct R<T>(T)
+        impl<T> Show for L<T> where R<T>: Conv<Out = int> { fn show(x: L<T>) -> int { 1 } }
+        impl<T> Conv for <Self = R<T> |-> Out = int> where L<T>: Show {
+            fn conv(x: R<T>) -> int { 2 }
+        }
+    "#};
+    for expr in [
+        "show(L(1))",
+        "conv(R(1))",
+        "show(L(1)) + conv(R(1))",
+        "conv(R(1)) + show(L(1))",
+    ] {
+        let mut session = TestSession::new();
+        let error = session
+            .fail_compilation(&format!("{src}{expr}"))
+            .into_inner();
+        assert!(
+            matches!(error, CompilationErrorImpl::TraitImplNotFound { .. }),
+            "{expr}: {error:?}"
+        );
+    }
+}
+
+/// A selection kept while the circle it rests on was still open holds elsewhere only if the path
+/// back to that circle may close one: otherwise the order of the fields would decide.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_kept_selection_does_not_hide_a_longer_circle_through_outputs() {
+    let src = |fields: [&str; 2]| {
+        format!(
+            "trait Conv<Self |-> Out> {{ fn conv(x: Self) -> Out; }}
+            struct B<T>(T, () -> int)
+            struct C<T>(T, () -> int)
+            struct D<T>(T)
+            struct A<T> {{ {0}: B<T>, {1}: C<T> }}
+            impl<T> Serialize for B<T> where A<T>: Serialize {{
+                fn serialize(x: B<T>) -> DataValue {{ serialize(2) }}
+            }}
+            impl<T> Serialize for C<T> where D<T>: Conv<Out = int> {{
+                fn serialize(x: C<T>) -> DataValue {{ serialize(3) }}
+            }}
+            impl<T> Conv for <Self = D<T> |-> Out = int> where B<T>: Serialize {{
+                fn conv(x: D<T>) -> int {{ 5 }}
+            }}
+            fn cb() -> int {{ 0 }}
+            ",
+            fields[0], fields[1]
+        )
+    };
+    for (fields, expr) in [
+        (["b", "c"], "serialize(A { b: B(1, cb), c: C(1, cb) })"),
+        (["b", "a"], "serialize(A { b: B(1, cb), a: C(1, cb) })"),
+        (["b", "c"], "conv(D(1))"),
+    ] {
+        let mut session = TestSession::new();
+        let error = session
+            .fail_compilation(&format!("{}{expr}", src(fields)))
+            .into_inner();
+        assert!(
+            matches!(error, CompilationErrorImpl::TraitImplNotFound { .. }),
+            "{expr}: {error:?}"
+        );
+    }
+}
+
+/// Which impl serves an application, and whether it holds, does not depend on which call is
+/// compiled first: here the circle through `Conv` is rejected in both orders.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_circle_through_outputs_is_rejected_whichever_call_comes_first() {
+    let src = indoc! {r#"
+        trait Conv<Self |-> Out> { fn conv(x: Self) -> Out; }
+        struct B<T>(T)
+        struct C<T>(T, () -> int)
+        struct D<T>(T)
+        struct A<T> { b: B<T>, c: C<T> }
+        impl<T> Serialize for B<T> where A<T>: Serialize {
+            fn serialize(x: B<T>) -> DataValue { serialize(2) }
+        }
+        impl<T> Serialize for C<T> where D<T>: Conv<Out = int> {
+            fn serialize(x: C<T>) -> DataValue { serialize(3) }
+        }
+        impl<T> Conv for <Self = D<T> |-> Out = int> where B<T>: Serialize {
+            fn conv(x: D<T>) -> int { 5 }
+        }
+        fn cb() -> int { 0 }
+    "#};
+    for expr in [
+        "(serialize(A { b: B(1), c: C(1, cb) }), serialize(B(1)))",
+        "(serialize(B(1)), serialize(A { b: B(1), c: C(1, cb) }))",
+    ] {
+        let mut session = TestSession::new();
+        let error = session
+            .fail_compilation(&format!("{src}{expr}"))
+            .into_inner();
+        assert!(
+            matches!(error, CompilationErrorImpl::TraitImplNotFound { .. }),
+            "{expr}: {error:?}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_circle_of_impls_may_have_prerequisites_with_outputs_outside_it() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+            trait Show<Self> { fn show(x: Self) -> int; }
+            trait Conv<Self |-> Out> { fn conv(x: Self) -> Out; }
+            impl Conv for <Self = int |-> Out = int> { fn conv(x: int) -> int { x } }
+            struct L<T>(T)
+            struct R<T>(T)
+            impl<T> Show for L<T> where T: Conv<Out = int>, R<T>: Show {
+                fn show(x: L<T>) -> int { conv(x.0) }
+            }
+            impl<T> Show for R<T> where L<T>: Show { fn show(x: R<T>) -> int { 2 } }
+            show(L(1)) + show(R(3))
+        "#}),
+        int(3)
+    );
+}
+
+/// A derived default is built from its payload's before it exists: one that needs itself is a
+/// cycle, even in a function that is never called.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_derived_default_that_needs_itself_is_a_cycle() {
+    let mut session = TestSession::new();
+    let error = session
+        .fail_compilation(indoc! {r#"
+            enum Tree { Leaf, #[default] Node(Tree) }
+            fn f() -> Tree { default() }
+            1
+        "#})
+        .into_inner();
+    assert!(
+        matches!(error, CompilationErrorImpl::TraitSolverCycleDetected { .. }),
+        "{error:?}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_circle_of_impls_through_a_derived_impl_keeps_associated_constants() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+            trait Show<Self> { const C: int; fn show(x: Self) -> int; }
+            struct W<T>(T)
+            struct M<T>(T)
+            struct D<T> { m: M<T> }
+            impl<T> Show for W<T> where D<T>: Serialize, T: Serialize {
+                const C = 3;
+                fn show(x: W<T>) -> int { 4 }
+            }
+            impl<T> Serialize for M<T> where W<T>: Show, T: Serialize {
+                fn serialize(x: M<T>) -> DataValue { serialize(x.0) }
+            }
+            show(W(1)) + Show::<W<int>>::C
+                + if serialize(D { m: M(5) }) == serialize({ m: 5 }) { 0 } else { 100 }
+        "#}),
+        int(7)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn impls_requiring_one_another_give_their_parents() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+            trait Named<Self> { fn name(x: Self) -> string; }
+            trait Show<Self>: Named<Self> { fn show(x: Self) -> string; }
+            struct L<T>(T)
+            struct R<T>(T)
+            impl<T> Named for L<T> { fn name(x: L<T>) -> string { "l" } }
+            impl<T> Named for R<T> { fn name(x: R<T>) -> string { "r" } }
+            impl<T> Show for L<T> where R<T>: Show { fn show(x: L<T>) -> string { "L" } }
+            impl<T> Show for R<T> where L<T>: Show { fn show(x: R<T>) -> string { "R" } }
+            fn both<T>(x: T) -> string where T: Show {
+                let named = name(x);
+                let shown = show(x);
+                f"{named}{shown}"
+            }
+            let left = both(L(1));
+            let right = both(R(1));
+            f"{left} {right}"
+        "#}),
+        string("lL rR")
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_circle_of_impls_may_pass_through_a_derived_value() {
+    // `Show` of `W<D>` needs `Value` of `D`, which is derived from the custom `Value` of
+    // `M<W<D>>`, which needs `Show` of `W<D>`.
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+            trait Show<Self> { fn show(x: Self) -> string; }
+            struct W<T>(T)
+            struct M<T>(T)
+            enum D { Leaf, Node([M<W<D>>]) }
+            impl<T> Value for M<T> where T: Value, T: Show {
+                fn eq(x: M<T>, y: M<T>) -> bool { true }
+                fn to_string(x: M<T>) -> string { show(x.0) }
+                fn hash(x: M<T>, state: &mut hasher) {}
+                fn clone(x: M<T>) -> M<T> { M(x.0) }
+                fn drop(x: &mut M<T>) {}
+            }
+            impl<T> Show for W<T> where T: Value { fn show(x: W<T>) -> string { to_string(x.0) } }
+            show(W(Node([M(W(Leaf))])))
+        "#}),
+        string("Node ([Leaf])")
+    );
+}
+
+/// Each type has its own impl, whichever is asked for first: none is replaced by a derived one
+/// because it was asked for while the other was being selected.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn impls_requiring_one_another_are_not_replaced_by_derived_ones() {
+    let impls = indoc! {r#"
+        struct L<T>(T)
+        struct R<T>(T)
+        impl<T> Serialize for L<T> where R<T>: Serialize, T: Serialize {
+            fn serialize(x: L<T>) -> DataValue { serialize(1) }
+        }
+        impl<T> Serialize for R<T> where L<T>: Serialize, T: Serialize {
+            fn serialize(x: R<T>) -> DataValue { serialize(2) }
+        }
+    "#};
+    for uses in [
+        "serialize(L(0)) == serialize(1) and serialize(R(0)) == serialize(2)",
+        "serialize(R(0)) == serialize(2) and serialize(L(0)) == serialize(1)",
+    ] {
+        let mut session = TestSession::new();
+        assert_val_eq!(session.run(&format!("{impls}{uses}")), bool(true), "{uses}");
+    }
+}
+
+/// The derived impl of `D` asks for the impl of `L` while that one is being selected.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_circle_of_impls_may_pass_through_a_derived_impl() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+            struct L<T>(T)
+            struct D<T> { l: L<T> }
+            impl<T> Serialize for L<T> where D<T>: Serialize, T: Serialize {
+                fn serialize(x: L<T>) -> DataValue { serialize(x.0) }
+            }
+            struct Plain { l: int }
+            serialize(L(1)) == serialize(1)
+                and serialize(D { l: L(2) }) == serialize(Plain { l: 2 })
+        "#}),
+        bool(true)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_definition_does_not_build_a_circle_of_impls_for_generic_types() {
+    let src = show_circle("L<T>: Show");
+    // The requirement is left to the callers, which know the types.
+    for f in [
+        "fn f(x) { show(L(x)) }",
+        "fn f<T>(x: T) -> string where .. { show(L(x)) }",
+        "fn f<T>(x: T) -> string where L<T>: Show { show(L(x)) }",
+    ] {
+        let mut session = TestSession::new();
+        assert_val_eq!(session.run(&format!("{src}{f} f(1)")), string("L"));
+    }
+    // The definition has to build the evidence itself, for any `T`.
+    let mut session = TestSession::new();
+    assert!(matches!(
+        session
+            .fail_compilation(&format!(
+                "{src}fn f<T>(x: T) -> string where nothing {{ show(L(x)) }}"
+            ))
+            .into_inner(),
+        CompilationErrorImpl::UndeclaredRequirement { .. }
+    ));
+    assert!(matches!(
+        session
+            .fail_compilation(&format!("{src}pub fn f(x) {{ show(L(x)) }}"))
+            .into_inner(),
+        CompilationErrorImpl::PrivateRequirementInPublicContract { .. }
+    ));
+}
+
+/// Each level solves its prerequisite once: solving it again per level doubles the work.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn nested_prerequisites_are_solved_once() {
+    const DEPTH: usize = 24;
+    let mut session = TestSession::new();
+    let nested = "W(".repeat(DEPTH) + "1" + &")".repeat(DEPTH);
+    let src = format!(
+        "trait Show<Self> {{ fn show(x: Self) -> string; }}
+        impl Show for int {{ fn show(x: int) -> string {{ \"int\" }} }}
+        struct W<T>(T)
+        impl<T> Show for W<T> where T: Show {{ fn show(x: W<T>) -> string {{ show(x.0) }} }}
+        show({nested})"
+    );
+    assert_val_eq!(session.run(&src), string("int"));
+
+    // A circle of as many impls.
+    let mut src = String::from("trait Show<Self> { fn show(x: Self) -> string; }\n");
+    for i in 0..DEPTH {
+        let next = (i + 1) % DEPTH;
+        src += &format!(
+            "struct A{i}<T>(T)
+            impl<T> Show for A{i}<T> where A{next}<T>: Show {{
+                fn show(x: A{i}<T>) -> string {{ \"A{i}\" }}
+            }}\n"
+        );
+    }
+    assert_val_eq!(session.run(&(src + "show(A0(1))")), string("A0"));
+}
+
+/// So do nested applications of a trait with outputs, when inferring types as when building
+/// dictionaries.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn nested_applications_with_outputs_are_solved_once() {
+    const DEPTH: usize = 24;
+    let mut session = TestSession::new();
+    let nested = "W(".repeat(DEPTH) + "1" + &")".repeat(DEPTH);
+    let src = format!(
+        "trait Conv<Self |-> Out> {{ fn conv(x: Self) -> Out; }}
+        impl Conv for <Self = int |-> Out = int> {{ fn conv(x: int) -> int {{ x }} }}
+        struct W<T>(T)
+        impl<T, O> Conv for <Self = W<T> |-> Out = W<O>> where T: Conv<Out = O> {{
+            fn conv(x: W<T>) -> W<O> {{ W(conv(x.0)) }}
+        }}
+        let converted = conv({nested});
+        1"
+    );
+    assert_val_eq!(session.run(&src), int(1));
+
+    // A lazy chain of iterator adaptors, each a type around the one before.
+    let adaptors = " |> skip(1) |> take(100)".repeat(4);
+    let src = format!(
+        "fn f(values: [int]) -> [int] {{ values |> iter(){adaptors} |> collect() }}
+        f([1, 2, 3, 4, 5, 6])"
+    );
+    assert_val_eq!(session.run(&src), int_a![5, 6]);
 }

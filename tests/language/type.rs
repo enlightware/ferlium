@@ -661,6 +661,28 @@ fn trait_impl_for_specified() {
     );
 }
 
+/// A written impl claims the applications its head matches, and only these: a cast between two
+/// types leaves the identity cast of each.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_written_cast_leaves_the_identity_casts_of_its_types() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            struct Celsius(float)
+            struct Fahrenheit(float)
+            impl Cast for <To = Celsius, From = Fahrenheit> {
+                fn cast(f: Fahrenheit) -> Celsius { Celsius((f.0 - 32.0) * 5.0 / 9.0) }
+            }
+            let c = Celsius(1.5) as Celsius;
+            let f = Fahrenheit(2.5) as Fahrenheit;
+            let d = Fahrenheit(212.0) as Celsius;
+            c.0 + f.0 + d.0
+        "# }),
+        float(104.0)
+    );
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn trait_impl_where_clause_is_used_for_selection() {
@@ -905,6 +927,37 @@ fn constraints_on_type_variables_do_not_make_impls_disjoint() {
     expect_overlap(&format!("{header}\n{r_impls}\n{p_q_impls}"));
     expect_overlap(&format!("{header}\n{p_q_impls}\n{r_impls}"));
     expect_overlap(&format!("{header}\n{r_impls}"));
+}
+
+/// `Repr` has no impl: selection gives it from the type's head, and so must coherence. Otherwise
+/// two impls that both apply to `B<X, int>` would be accepted, and which one runs could depend on
+/// the order of the calls.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn representation_prerequisites_overlap_as_selection_decides_them() {
+    expect_overlap(indoc! { r#"
+        trait Pick<Self> { fn pick(x: Self) -> int; }
+        struct X(int)
+        struct B<T, U>(T, U)
+        impl<T> Pick for B<T, int> where T: Repr<Is = (int,)> { fn pick(x: B<T, int>) -> int { 2 } }
+        impl<U> Pick for B<X, U> { fn pick(x: B<X, U>) -> int { 4 } }
+    "# });
+    // A representation that differs keeps them apart.
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            trait Pick<Self> { fn pick(x: Self) -> int; }
+            struct X(int)
+            struct Y(bool)
+            struct B<T, U>(T, U)
+            impl<T> Pick for B<T, int> where T: Repr<Is = (int,)> {
+                fn pick(x: B<T, int>) -> int { 2 }
+            }
+            impl<U> Pick for B<Y, U> { fn pick(x: B<Y, U>) -> int { 4 } }
+            pick(B(X(1), 1)) * 10 + pick(B(Y(true), 1))
+        "# }),
+        int(24)
+    );
 }
 
 #[test]

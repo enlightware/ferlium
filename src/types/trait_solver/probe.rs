@@ -208,6 +208,12 @@ impl<'solver, 'a> LazyTraitSolverProbe<'solver, 'a> {
         }
         self.probe.as_mut().unwrap()
     }
+
+    /// The modules that the queries depended on, including those of the solver; `None` if
+    /// there was no query.
+    pub(super) fn into_deps(self) -> Option<FxHashSet<ModuleId>> {
+        self.probe.map(|probe| probe.deps)
+    }
 }
 
 impl TraitOutputQuery for LazyTraitSolverProbe<'_, '_> {

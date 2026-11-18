@@ -12,7 +12,7 @@ use crate::{
     module::{Module, PendingFunctionBody, TraitId, TraitImplId},
     std::product_value_deriver::ProductValueDeriver,
     types::effects::EffType,
-    types::r#trait::{Deriver, Trait, TraitMethodIndex},
+    types::r#trait::{DerivedRequirements, Deriver, Trait, TraitMethodIndex},
     types::trait_solver::TraitSolver,
     types::r#type::{FnType, Type, TypeKind},
     types::type_like::TypeLike,
@@ -41,6 +41,27 @@ impl Deriver for EnumDefaultDeriver {
             .filter(|(name, _)| *name == default_variant)
             .map(|(_, payload_ty)| *payload_ty)
             .collect()
+    }
+
+    fn requirements(
+        &self,
+        _trait_id: TraitId,
+        input_types: &[Type],
+        solver: &TraitSolver,
+    ) -> Option<DerivedRequirements> {
+        let named = input_types[0].data().as_named().cloned()?;
+        solver.type_def(named.def).default_variant?;
+        // The default is built from the payload's, before the impl exists: a payload that needs
+        // the impl itself would make it of itself.
+        let members = self
+            .derived_members(input_types[0], solver)
+            .into_iter()
+            .filter(|payload_ty| *payload_ty != Type::unit())
+            .collect();
+        Some(DerivedRequirements {
+            members,
+            reserves: false,
+        })
     }
 
     fn derive_impl(

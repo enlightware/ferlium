@@ -11,7 +11,8 @@
 use arbitrary::Unstructured;
 use ferlium_fuzz::{
     effect_oracle::{Outcome, Report, check_program},
-    effect_soundness::{EffectProgram, Variant},
+    effect_soundness::{Circle, EffectProgram, Variant},
+    impl_web::WEB_ORDERS,
 };
 use std::collections::BTreeMap;
 use std::panic::{self, AssertUnwindSafe};
@@ -26,10 +27,15 @@ fn main() {
     let mut failed = 0;
     let mut typed_fallible = 0;
     let mut crashes = 0;
-    // Programs that ran while using a default method or the `Value` wrapper.
+    // Programs that ran while using a default method, the `Value` wrapper, or a circle of impls.
     let mut ran_defaults = 0;
     let mut ran_value_wrapper = 0;
+    let mut ran_circle = 0;
     let mut rejected: BTreeMap<String, (usize, String)> = BTreeMap::new();
+    // Webs of impls, checked in several orders.
+    let mut webs = 0;
+    let mut webs_ran = 0;
+    let mut web_rejected: BTreeMap<String, (usize, String)> = BTreeMap::new();
     for _ in 0..count {
         let data: Vec<u8> = (0..256)
             .map(|_| {
@@ -44,12 +50,28 @@ fn main() {
             continue;
         };
         let checked = panic::catch_unwind(AssertUnwindSafe(|| check_program(&program)));
-        let Ok(report) = checked else {
+        let Ok((report, web_report)) = checked else {
             let source = program.render(Variant::default());
-            println!("\n== CRASH\n{source}");
+            let web = program
+                .impl_web
+                .as_ref()
+                .map(|web| web.render(WEB_ORDERS[0]))
+                .unwrap_or_default();
+            println!("\n== CRASH\n{source}\n-- web:\n{web}");
             crashes += 1;
             continue;
         };
+        if let (Some(web), Some(web_report)) = (&program.impl_web, web_report) {
+            webs += 1;
+            match web_report {
+                Report::Ran { .. } => webs_ran += 1,
+                Report::Rejected { category, message } => {
+                    let source = web.render(WEB_ORDERS[0]);
+                    let category = format!("{category} at `{}`", pointed_line(&message, &source));
+                    web_rejected.entry(category).or_insert((0, source)).0 += 1;
+                }
+            }
+        }
         match report {
             Report::Ran { outcome, may_fail } => {
                 ran += 1;
@@ -60,6 +82,9 @@ fn main() {
                         .as_ref()
                         .is_some_and(|wrapper| !wrapper.uses.is_empty()),
                 );
+                ran_circle += usize::from(program.value_wrapper.as_ref().is_some_and(|wrapper| {
+                    !wrapper.uses.is_empty() && wrapper.circle != Circle::None
+                }));
                 failed += usize::from(matches!(outcome, Outcome::Failure { .. }));
                 typed_fallible += usize::from(may_fail);
             }
@@ -79,9 +104,15 @@ fn main() {
     println!(
         "{count} inputs: {ran} ran ({failed} failed, {typed_fallible} typed fallible), {crashes} crashed"
     );
-    println!("{ran_defaults} ran a default method, {ran_value_wrapper} used a custom `Value` impl");
+    println!(
+        "{ran_defaults} ran a default method, {ran_value_wrapper} used a custom `Value` impl, {ran_circle} of them with impls in a circle"
+    );
+    println!("{webs} webs of impls: {webs_ran} ran in every order");
     for (category, (n, sample)) in &rejected {
         println!("\n== {n} rejected: {category}\n{sample}");
+    }
+    for (category, (n, sample)) in &web_rejected {
+        println!("\n== {n} webs rejected: {category}\n{sample}");
     }
 }
 

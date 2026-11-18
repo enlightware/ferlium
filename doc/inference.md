@@ -38,6 +38,20 @@ Derived dictionaries are shared at erased effects, which is valid as derivable t
 and an impl method cannot perform an effect its trait does not expose. Source impls that a derivation
 needs for a member are still applied with the real effects, so that their prerequisites hold.
 
+Impls of a trait without outputs may require one another in a circle: an application asked for
+again while it is being selected holds if that selection does, provided that each application on
+the circle allows it. A trait with outputs does not, as the circle would have to give them, nor
+does a derivation built from its members before it exists, such as a derived default. This is for
+applications whose types are known: a definition that [builds evidence itself](#public-requirements)
+for generic types builds no such circle.
+
+An application is derived only if no written impl's head matches it, effects aside: a written impl
+that matches serves it alone, and its failing prerequisites are an error. With coherence, at most
+one impl can then serve an application, so which one does, and whether it holds, does not depend
+on the order of the requests (within the recursion limit). A written `Value` impl, which also
+decides how values are copied and dropped, removes the derived `Value` for every instantiation of
+its type.
+
 ## Publication policy
 
 Type subtyping and effect inclusion follow the same design choice: retain directional constraints
@@ -122,7 +136,7 @@ Missing evidence and reductions exceeding the work limit are errors at the defin
 `Value` construction may pass through custom impls when it refers back to a generated dictionary:
 the custom dictionary is built inside a generated entry using its self evidence. This preserves the
 custom methods without eagerly building cyclic captures. Cycles consisting only of source impl
-prerequisites remain errors. Other derivations currently require ground inputs.
+prerequisites remain errors there, for any trait. Other derivations currently require ground inputs.
 
 As with other inferred requirements, changing a private helper may tighten the published contract.
 A [written clause](#written-requirements) fixes the contract instead.

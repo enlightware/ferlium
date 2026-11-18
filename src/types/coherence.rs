@@ -11,7 +11,11 @@ use crate::{
         BlanketTraitImplKey, BlanketTraitImplSubKey, ConcreteTraitImplKey, ImplGenericNames,
         Module, ModuleEnv, ModuleId, TraitId, TraitImpl, TraitKey,
     },
-    std::value::{NO_DERIVE_VALUE_ATTRIBUTE, is_value_trait},
+    std::{
+        STD_MODULE_ID,
+        core_traits_names::REPR_TRAIT_NAME,
+        value::{NO_DERIVE_VALUE_ATTRIBUTE, is_value_trait},
+    },
     types::{
         effects::EffType,
         r#trait::TraitImplPolicy,
@@ -640,6 +644,8 @@ fn constraints_may_be_satisfiable(
 /// head may become. Prerequisites of candidate impls go through the same check. A sealed trait
 /// counts as open too: sealing restricts where its impls are written, but does not let the
 /// compiler assume that it knows them all.
+///
+/// `Repr` of a type variable is open too: the type it becomes has a representation.
 fn is_open_world(current: &Module, others: &Modules, constraint: &PubTypeConstraint) -> bool {
     let PubTypeConstraint::HaveTrait {
         trait_id,
@@ -649,13 +655,50 @@ fn is_open_world(current: &Module, others: &Modules, constraint: &PubTypeConstra
     else {
         return false;
     };
-    ModuleEnv::new(current, others)
-        .trait_def(*trait_id)
-        .impl_policy
-        != TraitImplPolicy::NativeOnly
+    let env = ModuleEnv::new(current, others);
+    let trait_def = env.trait_def(*trait_id);
+    (trait_def.impl_policy != TraitImplPolicy::NativeOnly || is_repr_trait(*trait_id, trait_def))
         && input_tys
             .iter()
             .any(|ty| matches!(*ty.data(), TypeKind::Variable(_)))
+}
+
+fn is_repr_trait(trait_id: TraitId, trait_def: &crate::types::r#trait::Trait) -> bool {
+    trait_id.module == STD_MODULE_ID && trait_def.name == REPR_TRAIT_NAME
+}
+
+/// Whether `Repr` of `input_ty`, whose head is known, may be `output_ty`. Selection gives it from
+/// the head, without any impl: the shape of a named type, any other type itself. A private
+/// representation counts as possible, which can report an overlap, never hide one.
+#[allow(clippy::too_many_arguments)]
+fn repr_may_be(
+    current: &Module,
+    others: &Modules,
+    ty_inf: &mut CoherenceTypeUnifier,
+    pending: Vec<ScopedConstraint>,
+    next_ty_var_index: u32,
+    stack: &mut FxHashSet<(TraitId, Vec<Type>, Vec<Type>)>,
+    input_ty: Type,
+    output_ty: Type,
+) -> Result<bool, InternalCompilationError> {
+    let named = input_ty.data().as_named().cloned();
+    let repr = match named {
+        Some(named) => {
+            let env = ModuleEnv::new(current, others);
+            env.type_def(named.def)
+                .instantiated_shape_with_effects(&named.params, &named.effect_params)
+        }
+        None => input_ty,
+    };
+    let repr = erased(&[repr])[0];
+    let span = Location::new_synthesized();
+    if ty_inf
+        .unify_same_type_with_sub_effects(repr, span, output_ty, span)
+        .is_err()
+    {
+        return Ok(false);
+    }
+    constraints_may_be_satisfiable(current, others, ty_inf, pending, next_ty_var_index, stack)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -674,6 +717,18 @@ fn trait_constraint_may_be_satisfiable(
     let derivers_enabled = !value_deriver_disabled_for_input(current, others, trait_id, input_tys);
     let env = ModuleEnv::new(current, others);
     let trait_def = env.trait_def(trait_id);
+    if is_repr_trait(trait_id, trait_def) {
+        return repr_may_be(
+            current,
+            others,
+            ty_inf,
+            pending,
+            next_ty_var_index,
+            stack,
+            input_tys[0],
+            output_tys[0],
+        );
+    }
     if derivers_enabled
         && !trait_def.derivers.is_empty()
         && !input_tys.iter().all(Type::is_constant)

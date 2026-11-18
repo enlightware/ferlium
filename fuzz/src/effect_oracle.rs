@@ -13,6 +13,7 @@
 use std::cell::Cell;
 
 use crate::effect_soundness::{EffectProgram, Variant};
+use crate::impl_web::{ImplWeb, WEB_ORDERS};
 use ferlium::{
     CompilerSession, ExecutionTarget, MirOptimization,
     compiler::error::RuntimeErrorKind,
@@ -214,8 +215,41 @@ fn outcome(result: Result<ferlium::hir::value::Value, RuntimeError>) -> Outcome 
     }
 }
 
-/// Checks every rendering variant of `program`; they must all compile alike and agree.
-pub fn check_program(program: &EffectProgram) -> Report {
+/// Checks every rendering variant of `program`; they must all compile alike and agree. Also
+/// checks its web of impls, if any, as a program of its own; gives the reports of both.
+pub fn check_program(program: &EffectProgram) -> (Report, Option<Report>) {
+    let report = check_program_variants(program);
+    (report, program.impl_web.as_ref().map(check_web))
+}
+
+/// Checks every order of `web`: which impl serves each application, and whether it holds, must
+/// not depend on the order of the impls, of their prerequisites, of the fields or of the calls.
+pub fn check_web(web: &ImplWeb) -> Report {
+    let base_source = web.render(WEB_ORDERS[0]);
+    let base = check_source(&base_source);
+    for order in &WEB_ORDERS[1..] {
+        let source = web.render(*order);
+        let report = check_source(&source);
+        match (&base, &report) {
+            (Report::Rejected { .. }, Report::Rejected { .. }) => {}
+            (Report::Ran { outcome: a, .. }, Report::Ran { outcome: b, .. }) => {
+                if *a != Outcome::Limit && *b != Outcome::Limit {
+                    assert_eq!(
+                        a, b,
+                        "the order of impls, prerequisites, fields and calls changed the outcome of:\n{base_source}\n{order:?}:\n{source}"
+                    );
+                }
+            }
+            _ => panic!(
+                "the order of impls, prerequisites, fields and calls changed whether this compiles \
+                 ({base:?} versus {report:?}):\n{base_source}\n{order:?}:\n{source}"
+            ),
+        }
+    }
+    base
+}
+
+fn check_program_variants(program: &EffectProgram) -> Report {
     let variants = [
         Variant::default(),
         Variant {

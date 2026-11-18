@@ -47,7 +47,7 @@ use crate::{
         effects::{EffType, PrimitiveEffect},
         mutability::{MutType, MutVal},
         r#trait::{
-            Deriver, Trait, TraitAssociatedConst, TraitAssociatedConstIndex,
+            DerivedRequirements, Deriver, Trait, TraitAssociatedConst, TraitAssociatedConstIndex,
             TraitDictionaryEntryIndex, TraitMethodIndex, structural_members,
         },
         trait_solver::TraitSolver,
@@ -2315,6 +2315,16 @@ impl Deriver for InspectDeriver {
         structural_members(ty, solver)
     }
 
+    fn requirements(
+        &self,
+        _trait_id: TraitId,
+        input_types: &[Type],
+        _solver: &TraitSolver,
+    ) -> Option<DerivedRequirements> {
+        // As for `Value`, the members' dictionaries are found once the body is compiled.
+        has_structural_derivation(input_types[0]).then(DerivedRequirements::none)
+    }
+
     fn derive_impl(
         &self,
         trait_id: TraitId,
@@ -3133,15 +3143,23 @@ fn derive_function_value_impl(
     ))
 }
 
-fn derive_structural_value_impl(
-    trait_id: TraitId,
-    input_types: &[Type],
-    span: Location,
-    _arena: &mut NodeArena,
-    solver: &mut TraitSolver,
-) -> Result<Option<TraitImplId>, InternalCompilationError> {
-    let ty_data = input_types[0].data();
-    if let TypeKind::Named(named) = &*ty_data {
+/// Whether the structural derivations of `Value` and `Inspect` cover the kind of `ty`.
+fn has_structural_derivation(ty: Type) -> bool {
+    ty.is_constant()
+        && matches!(
+            &*ty.data(),
+            TypeKind::Tuple(_)
+                | TypeKind::Record(_)
+                | TypeKind::Variant(_)
+                | TypeKind::Function(_)
+                | TypeKind::Subscript(_)
+                | TypeKind::Named(_)
+        )
+}
+
+/// Whether `Value` is derived for `ty`.
+fn derives_value(ty: Type, solver: &TraitSolver) -> bool {
+    if let Some(named) = ty.data().as_named() {
         // A type with a custom `Value` impl has no other one, even where that impl does not apply.
         let type_def = solver.type_def(named.def);
         if type_def.has_custom_value_impl
@@ -3150,20 +3168,20 @@ fn derive_structural_value_impl(
                 .iter()
                 .any(|attribute| attribute.path.0 == ustr(NO_DERIVE_VALUE_ATTRIBUTE))
         {
-            return Ok(None);
+            return false;
         }
     }
-    let can_derive = matches!(
-        &*ty_data,
-        TypeKind::Tuple(_)
-            | TypeKind::Record(_)
-            | TypeKind::Variant(_)
-            | TypeKind::Function(_)
-            | TypeKind::Subscript(_)
-            | TypeKind::Named(_)
-    );
-    drop(ty_data);
-    if !can_derive {
+    has_structural_derivation(ty)
+}
+
+fn derive_structural_value_impl(
+    trait_id: TraitId,
+    input_types: &[Type],
+    span: Location,
+    _arena: &mut NodeArena,
+    solver: &mut TraitSolver,
+) -> Result<Option<TraitImplId>, InternalCompilationError> {
+    if !derives_value(input_types[0], solver) {
         return Ok(None);
     }
 
@@ -3337,6 +3355,17 @@ struct ValueDeriver;
 impl Deriver for ValueDeriver {
     fn derived_members(&self, ty: Type, solver: &TraitSolver) -> Vec<Type> {
         structural_members(ty, solver)
+    }
+
+    fn requirements(
+        &self,
+        _trait_id: TraitId,
+        input_types: &[Type],
+        solver: &TraitSolver,
+    ) -> Option<DerivedRequirements> {
+        // The methods call those of the members, whose dictionaries are found once the impl's
+        // body is compiled.
+        derives_value(input_types[0], solver).then(DerivedRequirements::none)
     }
 
     fn derive_impl(

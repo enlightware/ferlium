@@ -4,6 +4,22 @@
 //! Trait solving: shared state, visibility, and module access.
 //! Matching, improvement, probing, materialization, and definition-site reduction live in
 //! separate modules; their public entry points remain available through `TraitSolver`.
+//!
+//! An application whose types are known is solved in two steps, see `solve`. Selection finds
+//! what serves it: an impl, a blanket impl at an instantiation with the requirements that
+//! hold for it, or a derived impl. It builds nothing, and its answer is kept for the requests
+//! that ask the same. Construction then builds the dictionary from that answer, and those of
+//! the requirements from theirs: it has nothing left to decide.
+//!
+//! Impls of a trait without outputs may require one another in a circle. An application
+//! asked for again while it is being selected holds if that selection does, provided each
+//! application on the circle may be part of one: its trait has no outputs, which the circle
+//! would have to give, and what serves it reserves its dictionary before those of its
+//! requirements are built, so that the application asked for again finds it. What is selected
+//! in between may rest on it, and is forgotten if that selection fails. A dictionary is
+//! reserved for an application that has been selected, so one found under construction serves
+//! an application that holds. Derivers are selected in the same way: one tells which impls its
+//! derivation needs, and builds it once these hold.
 
 mod canonical;
 mod context_reduction;
@@ -60,7 +76,31 @@ use crate::{
     },
 };
 
-use self::{improvement::TraitImprovementKey, solve::TraitOutputCacheEntry};
+use self::{
+    improvement::TraitImprovementKey,
+    solve::{CachedSelection, Selection},
+};
+
+/// An application being selected.
+#[derive(Debug)]
+struct SelectionFrame {
+    trait_id: TraitId,
+    input_tys: Vec<Type>,
+    /// Whether the application, as the candidate being tried serves it, can be part of a circle
+    /// of impls: its trait has no outputs, and its dictionary is reserved before those of its
+    /// requirements are built, so that one of them asking for it finds it.
+    may_close_circle: bool,
+    /// The positions in the stack of the applications below that this selection asked for
+    /// while they were being selected, directly or through a provisional selection: what it
+    /// finds, held or not, depends on the paths back to them.
+    heads: Vec<usize>,
+    /// The selections made on the way that asked for this application last among those still
+    /// being selected: they are provisional, and go with this frame.
+    provisional: Vec<CachedSelection>,
+    /// What was found for the applications that this selection asked for, which its
+    /// construction follows.
+    nested: Vec<CachedSelection>,
+}
 
 pub(crate) struct DerivedImplSnapshot {
     concrete_key_to_id: Rc<ConcreteImpls>,
@@ -111,8 +151,13 @@ pub struct TraitSolver<'a> {
     pub recursion_depth: usize,
     /// Whether this solver is deciding by structure if an impl applies, ignoring all effects.
     selecting_by_structure: bool,
-    /// Current stack of trait implementations being solved, for cycle detection.
-    pub solving_stack: FxHashSet<(TraitId, Vec<Type>)>,
+    /// The applications being selected, innermost last, for cycle detection.
+    solving_stack: Vec<SelectionFrame>,
+    /// The applications whose dictionary is being built.
+    building: FxHashSet<(TraitId, Vec<Type>)>,
+    /// The selections being built, innermost last: what they found for the applications they
+    /// asked for is what their construction builds.
+    plans: Vec<Rc<Selection>>,
     /// Partially known trait applications currently being improved, for cycle detection.
     active_improvements: FxHashSet<TraitImprovementKey>,
     /// Additional module whose private impls are visible to a privileged scratch expression.
@@ -120,11 +165,12 @@ pub struct TraitSolver<'a> {
     /// For each other module looked at, the traits it has private impls of, which a derivation
     /// made in its private scope depends on.
     private_impl_traits: FxHashMap<ModuleId, Rc<FxHashSet<TraitId>>>,
-    /// Successful fully-concrete, unconstrained output probes made during inference or defaulting.
+    /// The final selections of the applications asked so far, by trait: those that do not
+    /// depend on an application still being selected.
     ///
     /// This is deliberately per-solver. A [`TraitSolverProbe`] can hide private implementations
-    /// from its source solver, so it must not inherit answers from this cache.
-    unmaterialized_output_cache: FxHashMap<TraitId, Vec<TraitOutputCacheEntry>>,
+    /// from its source solver, so it must not inherit these answers.
+    selections: FxHashMap<TraitId, Vec<CachedSelection>>,
     /// While requesting a dictionary for a callable, the effect variables it quantifies: a reused
     /// dictionary must serve every value they may take. Taken by the request's top-level frame.
     quantified_request_effect_vars: FxHashSet<EffectVar>,
@@ -151,12 +197,14 @@ impl<'a> TraitSolver<'a> {
             fn_collector,
             others,
             recursion_depth: 0,
-            solving_stack: FxHashSet::default(),
+            solving_stack: Vec::new(),
+            building: FxHashSet::default(),
+            plans: Vec::new(),
             active_improvements: FxHashSet::default(),
             selecting_by_structure: false,
             privileged_impl_module: None,
             private_impl_traits: FxHashMap::default(),
-            unmaterialized_output_cache: FxHashMap::default(),
+            selections: FxHashMap::default(),
             quantified_request_effect_vars: FxHashSet::default(),
         }
     }

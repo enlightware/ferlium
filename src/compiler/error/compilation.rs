@@ -565,6 +565,8 @@ pub enum UnsupportedTraitDefinitionKind {
         method_name: Ustr,
         constraint_count: usize,
     },
+    /// A deriver on a trait with outputs, which a derivation cannot give.
+    DerivedOutputs,
 }
 
 impl UnsupportedTraitDefinitionKind {
@@ -589,6 +591,9 @@ impl UnsupportedTraitDefinitionKind {
                 constraint_count,
             } => format!(
                 "Generic constraints in trait methods are not supported yet, but `{trait_name}::{method_name}` has {constraint_count} generic constraints"
+            ),
+            DerivedOutputs => format!(
+                "Derivers of traits with outputs are not supported, but `{trait_name}` has outputs and derivers"
             ),
         }
     }

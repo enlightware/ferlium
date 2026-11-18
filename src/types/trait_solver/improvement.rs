@@ -598,9 +598,16 @@ impl<'a> TraitSolver<'a> {
         );
         let mut unique_candidate: Option<Candidate> = None;
         let mut found_multiple_candidates = false;
+        // What may leave the answer unknown whatever the candidates are: a pending impl, or
+        // a deriver that may apply once the inputs are known.
+        let undecided = self.impls.pending.blocks(trait_id, &normalized_inputs)
+            || (!self.trait_def(trait_id).derivers.is_empty()
+                && !input_tys.iter().all(|ty| ty.is_trait_input_resolved()));
+        let last = candidates.len().saturating_sub(1);
 
-        for candidate in candidates {
+        for (index, candidate) in candidates.into_iter().enumerate() {
             let mut snapshot = ty_inf.snapshot();
+            let mut probe_deps = None;
             // Concrete candidates only run unification against `ty_inf` and never reach `match_blanket_impl`, so they do not need a probe.
             // Skipping the probe avoids cloning the impl table once per concrete candidate, which is the dominant cost of this loop.
             let matched = match &candidate {
@@ -618,7 +625,7 @@ impl<'a> TraitSolver<'a> {
                 )?,
                 TraitImprovementCandidate::Blanket { .. } => {
                     let mut query = LazyTraitSolverProbe::new(self);
-                    Self::improvement_candidate_matches(
+                    let matched = Self::improvement_candidate_matches(
                         &mut query,
                         ty_inf,
                         &candidate,
@@ -629,9 +636,26 @@ impl<'a> TraitSolver<'a> {
                         assumptions,
                         fn_span,
                         arena,
-                    )?
+                    )?;
+                    probe_deps = query.into_deps();
+                    matched
                 }
             };
+            // The last candidate, when it applies and no other remains, is matched once: what
+            // it teaches is kept as found, with the modules that it was found in. Matching it
+            // again would match again all that it requires, at every level.
+            if index == last
+                && !undecided
+                && !found_multiple_candidates
+                && unique_candidate.is_none()
+                && matches!(matched, TraitImprovementMatch::Yes)
+                && ty_inf.declared_generics_intact(&generics)
+            {
+                if let Some(deps) = probe_deps {
+                    self.deps.extend(deps);
+                }
+                return Ok(TraitImprovementMatch::Yes);
+            }
             // Effects never decide which candidates there are: one ruled out by them alone remains,
             // with what it would teach unknown.
             let matched = if matches!(matched, TraitImprovementMatch::No) {

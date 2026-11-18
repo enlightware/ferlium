@@ -154,13 +154,14 @@ pub(super) struct BlanketCandidate<'k> {
     /// The outputs at this application.
     pub(super) output_tys: Vec<Type>,
     pub(super) output_effs: Vec<EffType>,
-    pub(super) runtime_requirements: Vec<ResolvedRuntimeRequirement>,
+    pub(super) runtime_requirements: Vec<MatchedRequirement>,
     /// The implementation's generic parameters resolved at this application.
     pub(super) instantiation: InstSubst,
 }
 
-/// A runtime hidden requirement from a matched blanket impl after substitution.
-pub(super) struct ResolvedRuntimeRequirement {
+/// A requirement of a matched blanket impl after substitution, which the match has solved.
+#[derive(Debug, Clone)]
+pub(super) struct MatchedRequirement {
     /// Original source order of the constraint in the blanket impl.
     pub(super) index: usize,
     pub(super) req: DictionaryReq,
@@ -199,10 +200,6 @@ pub(super) enum UnresolvedConstraints {
     Reject,
     /// The match is reported as `Unknown` instead of a definite mismatch.
     Unknown,
-    /// The match succeeds, and gives the constraint as a requirement that holds if the
-    /// application being matched does: it is solved after reserving that application's impl.
-    /// For `Value`, whose impls may be recursive.
-    Defer,
 }
 
 /// The index, in a match, of a constraint that the answer to another constraint requires: it is
@@ -221,7 +218,7 @@ pub(super) enum BlanketImplMatch {
     Yes {
         output_tys: Vec<Type>,
         output_effs: Vec<EffType>,
-        runtime_requirements: Vec<ResolvedRuntimeRequirement>,
+        runtime_requirements: Vec<MatchedRequirement>,
         /// The blanket implementation's generic parameters resolved at this application.
         instantiation: InstSubst,
     },
@@ -601,6 +598,10 @@ impl<'a> TraitSolver<'a> {
             .collect::<Vec<_>>();
         let mut remaining = Self::normalize_blanket_remaining_constraints(ty_inf, remaining);
         let mut queued_bounds = false;
+        // The constraints with unknown inputs as improvement left them: one that is still as
+        // it was then has nothing more to tell, and improving it again at every pass would
+        // improve again all that it requires, at every level.
+        let mut improved: Vec<PubTypeConstraint> = Vec::new();
         loop {
             let old_remaining = mem::take(&mut remaining);
             let mut still_remaining = Vec::new();
@@ -650,7 +651,7 @@ impl<'a> TraitSolver<'a> {
                     if let Some(unresolved) = unresolved {
                         still_remaining.push((*constraint_index, unresolved));
                     } else if let Some(req) = runtime_requirement {
-                        runtime_requirements.push(ResolvedRuntimeRequirement {
+                        runtime_requirements.push(MatchedRequirement {
                             index: *constraint_index,
                             req,
                         });
@@ -700,7 +701,9 @@ impl<'a> TraitSolver<'a> {
                     .iter()
                     .all(|ty| ty.is_trait_input_resolved())
                 {
-                    if Self::input_tys_can_drive_improvement(&constraint_inputs) {
+                    if Self::input_tys_can_drive_improvement(&constraint_inputs)
+                        && !improved.contains(&substituted_constraint)
+                    {
                         match query.improve_trait_application_query(
                             ty_inf,
                             trait_id,
@@ -715,6 +718,7 @@ impl<'a> TraitSolver<'a> {
                             TraitImprovementMatch::Unknown => {}
                             TraitImprovementMatch::Yes => {}
                         }
+                        improved.push(ty_inf.substitute_in_constraint(&substituted_constraint));
                     }
                     still_remaining.push((*constraint_index, substituted_constraint));
                     continue;
@@ -743,10 +747,6 @@ impl<'a> TraitSolver<'a> {
                     };
                     match solved {
                         Ok(outputs) => outputs,
-                        Err(_) if mode.unresolved == UnresolvedConstraints::Defer => {
-                            still_remaining.push((*constraint_index, substituted_constraint));
-                            continue;
-                        }
                         Err(_) => return Ok(BlanketImplMatch::No),
                     }
                 };
@@ -793,7 +793,7 @@ impl<'a> TraitSolver<'a> {
                         return Ok(BlanketImplMatch::No);
                     }
                 }
-                runtime_requirements.push(ResolvedRuntimeRequirement {
+                runtime_requirements.push(MatchedRequirement {
                     index: *constraint_index,
                     req: DictionaryReq::new_trait_impl(
                         trait_id,
@@ -845,43 +845,6 @@ impl<'a> TraitSolver<'a> {
                     }
                     UnresolvedConstraints::Unknown => {
                         return Ok(BlanketImplMatch::Unknown);
-                    }
-                    UnresolvedConstraints::Defer => {
-                        for (constraint_index, constraint) in still_remaining {
-                            let substituted_constraint =
-                                ty_inf.substitute_in_constraint(&constraint);
-                            let Some((
-                                _,
-                                trait_id,
-                                constraint_inputs,
-                                constraint_outputs,
-                                constraint_output_effs,
-                                _span,
-                            )) = substituted_constraint.as_have_trait()
-                            else {
-                                return Ok(BlanketImplMatch::No);
-                            };
-                            let trait_id = *trait_id;
-                            let constraint_inputs = constraint_inputs.clone();
-                            let constraint_outputs = constraint_outputs.clone();
-                            let constraint_output_effs = constraint_output_effs.clone();
-                            if !constraint_inputs
-                                .iter()
-                                .all(|ty| ty.is_trait_input_resolved())
-                            {
-                                return Ok(BlanketImplMatch::No);
-                            }
-                            runtime_requirements.push(ResolvedRuntimeRequirement {
-                                index: constraint_index,
-                                req: DictionaryReq::new_trait_impl(
-                                    trait_id,
-                                    constraint_inputs,
-                                    constraint_outputs,
-                                    constraint_output_effs,
-                                ),
-                            });
-                        }
-                        break;
                     }
                 }
             }
@@ -980,7 +943,7 @@ impl<'a> TraitSolver<'a> {
 
     pub(super) fn runtime_requirements_from_resolved(
         &self,
-        resolved_requirements: &[ResolvedRuntimeRequirement],
+        resolved_requirements: &[MatchedRequirement],
         source_constraints: &[PubTypeConstraint],
     ) -> Vec<DictionaryReq> {
         let value_trait_id = self.std_trait_id(VALUE_TRAIT_NAME);
@@ -1066,24 +1029,95 @@ impl<'a> TraitSolver<'a> {
         }
     }
 
-    pub(super) fn validate_runtime_requirements(
+    /// Whether the requirements of a matched blanket impl hold as they will be built: each as
+    /// the application of its inputs alone. With `validate_outputs`, their outputs must also
+    /// be the ones that the requirement names. Nothing is built.
+    pub(super) fn requirements_hold(
         &mut self,
-        resolved_requirements: &[ResolvedRuntimeRequirement],
+        requirements: &[MatchedRequirement],
         fn_span: Location,
-        arena: &mut NodeArena,
         validate_outputs: bool,
     ) -> Result<bool, InternalCompilationError> {
-        for resolved_requirement in resolved_requirements {
+        for requirement in requirements {
             let DictionaryReq::TraitImpl {
                 trait_id,
                 input_tys,
                 output_tys,
                 output_effs,
-            } = &resolved_requirement.req
+            } = &requirement.req
             else {
                 continue;
             };
-            // Marker traits have no runtime dictionary entries.
+            // The match has solved it, and a marker trait has no dictionary to build.
+            if !self.trait_def(*trait_id).has_runtime_dictionary() {
+                continue;
+            }
+            if self.is_compiler_provided_no_output_trait_query(
+                *trait_id,
+                input_tys,
+                output_tys,
+                output_effs,
+            ) {
+                continue;
+            }
+            let selection = match self.select_application(*trait_id, input_tys, None, None, fn_span)
+            {
+                Ok(selection) => selection,
+                Err(err) => {
+                    log::trace!(
+                        "Blanket impl constraint failed while solving {} for {:?}: {:?}",
+                        self.trait_def(*trait_id).name,
+                        input_tys,
+                        err
+                    );
+                    return Ok(false);
+                }
+            };
+            if !validate_outputs {
+                continue;
+            }
+            // By structure, only the types of the outputs count, without their effects.
+            if self.selecting_by_structure {
+                if instantiate_types(&selection.output_tys, &mut EffectErasingMapper) != *output_tys
+                {
+                    return Ok(false);
+                }
+                continue;
+            }
+            // Output effects relate by their polarity, as when matching.
+            if selection.output_tys != *output_tys
+                || !selection
+                    .output_effs
+                    .iter()
+                    .zip(output_effs.iter())
+                    .zip(self.output_effect_polarities(*trait_id))
+                    .all(|((solved_eff, constraint_eff), polarity)| {
+                        output_effect_fits(solved_eff, constraint_eff, polarity)
+                    })
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Build the dictionaries of the requirements of a selected blanket impl, which hold.
+    pub(super) fn build_requirements(
+        &mut self,
+        requirements: &[MatchedRequirement],
+        fn_span: Location,
+        arena: &mut NodeArena,
+    ) -> Result<(), InternalCompilationError> {
+        for requirement in requirements {
+            let DictionaryReq::TraitImpl {
+                trait_id,
+                input_tys,
+                output_tys,
+                output_effs,
+            } = &requirement.req
+            else {
+                continue;
+            };
             if !self.trait_def(*trait_id).has_runtime_dictionary() {
                 continue;
             }
@@ -1098,45 +1132,9 @@ impl<'a> TraitSolver<'a> {
                 )?;
                 continue;
             }
-            let dict_id = match self.solve_impl(*trait_id, input_tys, fn_span, arena) {
-                Ok(functions) => functions,
-                Err(err) => {
-                    log::trace!(
-                        "Blanket impl constraint failed while solving {} for {:?}: {:?}",
-                        self.trait_def(*trait_id).name,
-                        input_tys,
-                        err
-                    );
-                    return Ok(false);
-                }
-            };
-            let dict_impl_data = self.get_impl_data_by_id(dict_id);
-            // By structure, only the types of the outputs count, without their effects.
-            if self.selecting_by_structure {
-                if validate_outputs
-                    && instantiate_types(&dict_impl_data.output_tys, &mut EffectErasingMapper)
-                        != *output_tys
-                {
-                    return Ok(false);
-                }
-                continue;
-            }
-            // Output effects relate by their polarity, as when matching.
-            if validate_outputs
-                && (dict_impl_data.output_tys != *output_tys
-                    || !dict_impl_data
-                        .output_effs
-                        .iter()
-                        .zip(output_effs.iter())
-                        .zip(self.output_effect_polarities(*trait_id))
-                        .all(|((solved_eff, constraint_eff), polarity)| {
-                            output_effect_fits(solved_eff, constraint_eff, polarity)
-                        }))
-            {
-                return Ok(false);
-            }
+            self.solve_impl(*trait_id, input_tys, fn_span, arena)?;
         }
-        Ok(true)
+        Ok(())
     }
 
     /// The output effects of `imp` that do not relate to the requested ones by polarity, each with
@@ -1186,7 +1184,7 @@ impl<'a> TraitSolver<'a> {
     /// the impl applies and only its effects are wrong; other failures, such as a cycle, stand.
     pub(super) fn reject_if_requirements_fail_on_effects(
         &mut self,
-        requirements: &[ResolvedRuntimeRequirement],
+        requirements: &[MatchedRequirement],
         input_tys: &[Type],
         fn_span: Location,
     ) -> Result<(), InternalCompilationError> {
@@ -1195,7 +1193,7 @@ impl<'a> TraitSolver<'a> {
         }
         let erased = requirements
             .iter()
-            .map(|requirement| ResolvedRuntimeRequirement {
+            .map(|requirement| MatchedRequirement {
                 index: requirement.index,
                 req: match &requirement.req {
                     DictionaryReq::TraitImpl {
@@ -1213,12 +1211,9 @@ impl<'a> TraitSolver<'a> {
                 },
             })
             .collect::<Vec<_>>();
-        let snapshot = self.snapshot_derived_impl_state();
-        let mut arena = NodeArena::default();
         self.selecting_by_structure = true;
-        let holds = self.validate_runtime_requirements(&erased, fn_span, &mut arena, true);
+        let holds = self.requirements_hold(&erased, fn_span, true);
         self.selecting_by_structure = false;
-        self.rollback_derived_impl_state(snapshot);
         if holds? {
             return Err(internal_compilation_error!(TraitImplEffectsMismatch {
                 input_ty: input_tys[0],

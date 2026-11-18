@@ -55,7 +55,8 @@ Targets:
 - `ide_compile_any` (`make fuzz-ide`) feeds valid UTF-8 through the IDE compiler path, including diagnostic position conversion.
 - `grammar_ide_compile` (`make fuzz-grammar`) decodes Barkus decision tapes into Ferlium-shaped source for the IDE compiler path.
 - `grammar_optimization_differential` (`make fuzz-optimization`) runs grammar-generated source with MIR optimization off and on, and compares the outcomes.
-- `effect_soundness` (`make fuzz-effect-soundness`) generates programs combining traits with output effects, impls, generic callers and fallible callbacks, traits whose default methods rely on effect bounds, and custom `Value` impls with effect prerequisites.
+- `effect_soundness` (`make fuzz-effect-soundness`) generates programs combining traits with output effects, impls, generic callers and fallible callbacks, traits whose default methods rely on effect bounds, custom `Value` impls with effect prerequisites, and impls that require one another in a circle.
+  Each program also carries a web of impls, compiled in several orders that must agree.
 - `effect_selection` (`make fuzz-effect-selection`) generates programs in which effects could reach impl selection.
 
 The raw byte target ignores invalid UTF-8 and inputs larger than 32 KiB.
@@ -81,6 +82,7 @@ cargo run --release --manifest-path fuzz/Cargo.toml --bin check_effect_source --
 ```
 
 A program that implements `Value` is compiled as trusted code; pass `--trusted` before the file to check its source in the same way.
+For a finding in a program's web of impls, pass `--web` and the order its message names before the input.
 
 Under the sanitizer, the target checks a few programs per second and worker.
 For a faster search without coverage guidance, `effect_soundness_census` and `effect_selection_census` check programs from pseudo-random inputs, recording crashes and rejections by kind instead of stopping at the first:
