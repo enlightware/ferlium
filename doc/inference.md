@@ -371,6 +371,8 @@ gives each reference an instance of the contract of its function and reads the n
 every function, starting from the contracts of functions that call nothing. A contract is the
 effects of a signature, the effect that the function performs, and its requirements with their
 effects; it holds no type that a round found, so a round cannot change a type for the next one.
+As in a published signature, an effect that only positive positions of the signature name, and no
+requirement, is none in a contract: a reference then gets the effects that its function publishes.
 The group is settled when every function gets its contract again: each body then confirmed the
 contracts that it assumed, its own included, which is the rule for typing recursive definitions,
 so the result is sound however the contracts were found. What a round assumes is provisional:

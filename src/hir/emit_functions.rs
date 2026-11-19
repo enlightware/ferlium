@@ -35,8 +35,9 @@ use crate::{
             default_unconstrained_types_to_never, first_unbound_type_in_constraints,
             function_and_associated_lambdas, insert_inst_data_for_function_and_lambdas,
             instantiate_function_descr_in_place, is_compiler_provided_value_constraint,
-            log_dropped_constraints_module, record_field_uses, refresh_debug_info_for_functions,
-            set_pending_function, substitute_and_canonicalize_functions,
+            log_dropped_constraints_module, output_only_effects_to_pure, record_field_uses,
+            refresh_debug_info_for_functions, set_pending_function,
+            substitute_and_canonicalize_functions,
         },
         function::{CallableDefinition, arg_conventions_for_args},
         hir_syn,
@@ -818,13 +819,7 @@ impl GroupContract {
     fn bottom(shape: &Self) -> Self {
         let subst = (
             FxHashMap::default(),
-            shape
-                .scheme
-                .ty
-                .positive_only_effect_vars()
-                .into_iter()
-                .map(|var| (var, EffType::empty()))
-                .collect(),
+            output_only_effects_to_pure(&shape.scheme.ty, &[]),
         );
         let ty = shape
             .scheme
@@ -1640,6 +1635,13 @@ fn round_contract(
         .iter()
         .map(|requirement| requirement.map(&mut effects))
         .collect::<Vec<_>>();
+    // The contract is what its function publishes, with its output-only effects pure. Otherwise a
+    // reference would get fresh effects there, which a requirement on the structure of a type
+    // could keep, although the function has none.
+    let ty = ty.map(&mut BitmapInstantiationMapper::new(&(
+        TypeInstSubst::default(),
+        output_only_effects_to_pure(&ty, &requirements),
+    )));
     let mut variables = ContractEffects {
         numbers: written_effects
             .iter()

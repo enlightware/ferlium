@@ -86,9 +86,9 @@ use crate::{
     },
     types::{
         coherence::{check_module_coherence, check_trait_impl},
-        effects::{EffType, EffectVar},
+        effects::{EffType, EffectVar, EffectsInstSubst},
         trait_solver::{TraitSolver, trait_solver_from_module},
-        r#type::{Type, TypeKind, TypeVar},
+        r#type::{FnType, Type, TypeKind, TypeVar},
         type_inference::unify::UnifiedTypeInference,
         type_like::TypeLike,
         type_mapper::{BitmapInstantiationMapper, EffectErasingMapper, TypeMapper},
@@ -531,8 +531,28 @@ pub(super) fn refresh_debug_info_for_functions(
     }
 }
 
+/// The effect variables of a signature that occur only in effects the function performs and
+/// that nothing outside the function determines, each set to pure: their least solution is all
+/// callers can see. The constraints are observable by callers, like the type, so the variables
+/// they name are kept. Publication, and the contracts of a recursive group, which must match
+/// what is published, both apply this rule.
+pub(super) fn output_only_effects_to_pure(
+    ty: &FnType,
+    constraints: &[PubTypeConstraint],
+) -> EffectsInstSubst {
+    let mut retained_effect_vars = FxHashSet::default();
+    for constraint in constraints {
+        constraint.fill_with_inner_effect_vars(&mut retained_effect_vars);
+    }
+    ty.positive_only_effect_vars()
+        .into_iter()
+        .filter(|var| !retained_effect_vars.contains(var))
+        .map(|var| (var, EffType::empty()))
+        .collect()
+}
+
 /// Default to pure the effect variables that occur only in effects the function performs and
-/// that nothing outside the function determines: their least solution is all callers can see.
+/// that nothing outside the function determines (see [`output_only_effects_to_pure`]).
 pub(super) fn default_output_effects_in_functions(
     output: &mut Module,
     pending_functions: &mut PendingModuleFunctions,
@@ -540,22 +560,9 @@ pub(super) fn default_output_effects_in_functions(
     function_ids: &[LocalFunctionId],
 ) {
     for &id in function_ids {
-        let effect_subst: FxHashMap<_, _> = {
-            let descr = &output.functions[id.as_index()];
-            // The published constraints are observable by callers, like the type.
-            let mut retained_effect_vars = FxHashSet::default();
-            for constraint in &descr.definition.ty_scheme.constraints {
-                constraint.fill_with_inner_effect_vars(&mut retained_effect_vars);
-            }
-            descr
-                .definition
-                .ty_scheme
-                .ty
-                .positive_only_effect_vars()
-                .into_iter()
-                .filter(|var| !retained_effect_vars.contains(var))
-                .map(|var| (var, EffType::empty()))
-                .collect()
+        let effect_subst = {
+            let scheme = &output.functions[id.as_index()].definition.ty_scheme;
+            output_only_effects_to_pure(&scheme.ty, &scheme.constraints)
         };
         if effect_subst.is_empty() {
             continue;

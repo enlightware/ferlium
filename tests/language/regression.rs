@@ -1116,6 +1116,28 @@ fn a_call_in_a_recursive_group_passes_evidence_for_types_only_requirements_name(
     " });
 }
 
+/// A function that its own body puts in a variant is pure there, as it is published: the
+/// reference takes no effects that the function lacks, which the variant would keep as effect
+/// generics of the function. Found by fuzzing.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_recursive_reference_in_a_variant_has_the_effects_of_its_function() {
+    for (definition, call) in [
+        ("fn y() { let a = Some(y); || 0 }", "y()()"),
+        ("fn y() { let a = Some(y); 0 }", "y()"),
+    ] {
+        let mut session = TestSession::new();
+        let module = session.compile_and_get_module(definition);
+        let scheme = &module.get_function(ustr("y")).unwrap().definition.ty_scheme;
+        assert!(scheme.eff_quantifiers.is_empty(), "{definition}");
+        assert_val_eq!(
+            TestSession::new().run(&format!("{definition}\n{call}")),
+            int(0),
+            "{definition}"
+        );
+    }
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn a_recursive_call_with_a_callback_of_other_effects_keeps_them() {
