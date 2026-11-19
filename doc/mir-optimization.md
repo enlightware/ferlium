@@ -763,8 +763,9 @@ other analyses, it is rebuilt after a rewrite rather than maintained through one
 On top of it, `mir::pass::value_cells` recognizes the cells that behave as values, like rustc's
 `SsaLocals`: one store or copy fills the cell whole and dominates every other use, and every other
 use only observes it, including as a `let` call argument, which the callee can neither mutate nor
-retain. A call's result place is not such a definition, since a scalar result is a register. A pass
-may then treat each read of such a cell as the value its definition produced. Store forwarding and
+retain. A call's result place is not such a definition, since a scalar result is a register, and
+neither is the store of a variant shell, which is the one use that consumes it. A pass may then
+treat each read of such a cell as the value its definition produced. Store forwarding and
 LICM consume this verdict.
 
 ## Storage forwarding

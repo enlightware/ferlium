@@ -19,8 +19,10 @@
 //! storing a closure capturing no value, which holds a function and its hidden evidence; its drop
 //! releases what represents the evidence, so it goes only with the closure's construction.
 //! Any other value must be `TrivialCopy`, so a read never transfers ownership and
-//! the cell carries no drop obligation. A `move` out still leaves the cell uninitialized, making it
-//! the cell's last use until the definition runs again.
+//! the cell carries no drop obligation. Nor may its store be the one use that consumes the stored
+//! register, as a variant shell's is, since forwarding the reads would remove that use. A `move`
+//! out still leaves the cell uninitialized, making it the cell's last use until the definition
+//! runs again.
 //!
 //! Dominance is per block, and in program order within one; a use before the definition in its
 //! block belongs to an earlier iteration and disqualifies the cell. A cell allocated inside a loop
@@ -29,7 +31,7 @@
 
 use std::cell::OnceCell;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
     local_cells::{self, Access, Allocation, Cell, CellId, CellUse, LocalCells, Transfer},
@@ -107,6 +109,7 @@ impl<'a> ValueCells<'a> {
         dominance: impl FnOnce() -> &'d Dominance,
     ) -> Self {
         let closures = OnceCell::new();
+        let owned_results = OnceCell::new();
         let mut candidates: Vec<_> = local
             .iter()
             .enumerate()
@@ -130,6 +133,12 @@ impl<'a> ValueCells<'a> {
                 shape
             })
             .filter(|shape| shape.copyable(env))
+            .filter(|shape| match shape.value.definition {
+                Definition::Value(mir::Value::Register(stored)) => !owned_results
+                    .get_or_init(|| owned_results_of(func))
+                    .contains(&stored),
+                _ => true,
+            })
             .map(|shape| (shape.value, shape.index))
             .collect();
         if !candidates.is_empty() {
@@ -312,6 +321,23 @@ fn shape(
         ty,
         function_uses,
     })
+}
+
+/// The registers whose definition must be consumed once, such as a variant shell, which only its
+/// store transfers.
+fn owned_results_of(func: &Function) -> FxHashSet<ValueId> {
+    func.blocks()
+        .flat_map(|block| {
+            let basic_block = func.block(block);
+            let invoked = match &basic_block.terminator().kind {
+                TerminatorKind::Invoke { operation, .. } => Some(operation),
+                _ => None,
+            };
+            basic_block.operations().iter().chain(invoked)
+        })
+        .filter(|operation| operation.result_requires_consuming_use())
+        .filter_map(Operation::result_id)
+        .collect()
 }
 
 /// The closures of evidence alone read once, by the register `build_closure` defines, with the

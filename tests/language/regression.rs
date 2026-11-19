@@ -12,7 +12,7 @@ use test_log::test;
 
 use indoc::indoc;
 
-use crate::harness::{TestSession, float, int};
+use crate::harness::{TestSession, float, int, variant_0};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -1138,6 +1138,22 @@ fn a_recursive_call_with_a_callback_of_other_effects_keeps_them() {
                 r(|z| z + 2, 2)"
             )),
             SourceFailureKind::DivisionByZero,
+            "{call}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_inlined_variant_of_a_generic_type_keeps_its_store() {
+    // `a` returns a variant of a type it is generic over, so the variant's storage is given at run
+    // time. Once `a` is inlined, its result must still be stored rather than returned directly.
+    // Found by fuzzing.
+    let mut session = TestSession::new();
+    for call in ["a()", "(a)()", "{ let f = a; f() }"] {
+        assert_val_eq!(
+            session.run(&format!("fn a() {{ item }} {call}")),
+            variant_0("item"),
             "{call}"
         );
     }
