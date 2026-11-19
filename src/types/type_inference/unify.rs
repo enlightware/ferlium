@@ -25,8 +25,9 @@ use super::{
 use crate::{
     FxHashMap, FxHashSet,
     compiler::error::{
-        ADTAccessType, FieldAccessSite, InfiniteTypeKind, InternalCompilationError,
-        InvalidRecordFieldContext, MutabilityMustBeContext, MutabilityMustBeWhat,
+        ADTAccessType, CompilationErrorImpl, FieldAccessSite, InfiniteTypeKind,
+        InternalCompilationError, InvalidRecordFieldContext, MutabilityMustBeContext,
+        MutabilityMustBeWhat,
     },
     hir::{NodeArena, value::LiteralValue},
     internal_compilation_error,
@@ -585,123 +586,141 @@ impl UnifiedTypeInference {
         // revisiting potentially large recursive `Value<B>` applications on every pass.
         let mut variant_layout_constraints = Vec::new();
 
-        // First, resolve mutability constraints.
+        // First, resolve the explicit mutability constraints, which solving types reads, saving
+        // the first error and continuing. Later phases rely on mutability, so that error is
+        // reported before them.
+        let mut mutability_error = None;
         for constraint in mut_constraints {
             use MutConstraint::*;
-            match constraint {
+            let result = match constraint {
                 SameMut {
                     current,
                     current_span,
                     expected,
                     expected_span,
-                } => {
-                    unified_ty_inf.unify_mut_must_be_at_least_or_equal(
-                        current,
-                        current_span,
-                        expected,
-                        expected_span,
-                        MutabilityMustBeContext::Value,
-                        SubOrSameType::SameTypeWithSubEffects,
-                    )?;
-                }
+                } => unified_ty_inf.unify_mut_must_be_at_least_or_equal(
+                    current,
+                    current_span,
+                    expected,
+                    expected_span,
+                    MutabilityMustBeContext::Value,
+                    SubOrSameType::SameTypeWithSubEffects,
+                ),
                 MutBeAtLeast {
                     current,
                     current_span,
                     target,
                     reason_span,
-                } => {
-                    unified_ty_inf.unify_mut_must_be_at_least_or_equal(
-                        current,
-                        current_span,
-                        target,
-                        reason_span,
-                        MutabilityMustBeContext::Value,
-                        SubOrSameType::SubType,
-                    )?;
-                }
-            }
-        }
-
-        // Make the remaining mutability variables constant.
-        for var in 0..unified_ty_inf.mut_unification_table.len() {
-            let var = MutVarKey::new(var as u32);
-            if unified_ty_inf
-                .mut_unification_table
-                .probe_value(var)
-                .is_none()
-            {
-                unified_ty_inf
-                    .mut_unification_table
-                    .unify_var_value(var, Some(MutVal::constant()))
-                    .expect("Cannot unify free mutability variable");
-            }
-        }
-
-        // Equality and directional constraints share generation, but unknown
-        // subtype endpoints remain in the bounds graph until selection.
-        for constraint in ty_constraints {
-            match constraint {
-                TypeConstraint::Pub(cst) => {
-                    if matches!(cst, PubTypeConstraint::VariantPayloadLayout { .. }) {
-                        variant_layout_constraints.push(cst);
-                    } else {
-                        remaining_constraints.push(cst);
-                    }
-                }
-                constraint => unified_ty_inf.unify_type_relation(constraint)?,
-            }
-        }
-        unified_ty_inf.propagate_type_bounds()?;
-
-        // Then, solve all effect equalities.
-        for constraint in effect_constraints {
-            use EffectConstraint::*;
-            match constraint {
-                SameEffect {
+                } => unified_ty_inf.unify_mut_must_be_at_least_or_equal(
                     current,
                     current_span,
-                    expected,
-                    expected_span,
-                } => unified_ty_inf.unify_same_effect(
-                    &current,
-                    current_span,
-                    &expected,
-                    expected_span,
-                )?,
+                    target,
+                    reason_span,
+                    MutabilityMustBeContext::Value,
+                    SubOrSameType::SubType,
+                ),
+            };
+            if let Err(error) = result {
+                mutability_error.get_or_insert(error);
             }
         }
 
-        unified_ty_inf.normalize_given_outputs(&|id| trait_solver.output_effect_polarities(id))?;
+        // Then, solve the types. If that succeeds or reports a mutability error, the saved one
+        // takes precedence; any other error is reported.
+        let solved = (|| -> Result<Vec<PubTypeConstraint>, InternalCompilationError> {
+            // Make the remaining mutability variables constant.
+            for var in 0..unified_ty_inf.mut_unification_table.len() {
+                let var = MutVarKey::new(var as u32);
+                if unified_ty_inf
+                    .mut_unification_table
+                    .probe_value(var)
+                    .is_none()
+                {
+                    unified_ty_inf
+                        .mut_unification_table
+                        .unify_var_value(var, Some(MutVal::constant()))
+                        .expect("Cannot unify free mutability variable");
+                }
+            }
 
-        // Bounds and public constraints share one fixed point. Trait outputs
-        // remain blockers until that pass has either resolved or deferred them.
-        *unified_ty_inf.remaining_ty_constraints = remaining_constraints;
-        unified_ty_inf.resolve_remaining_constraints_to_fixed_point(trait_solver, arena)?;
-        let mut remaining_constraints = mem::take(&mut *unified_ty_inf.remaining_ty_constraints);
+            // Equality and directional constraints share generation, but unknown
+            // subtype endpoints remain in the bounds graph until selection.
+            for constraint in ty_constraints {
+                match constraint {
+                    TypeConstraint::Pub(cst) => {
+                        if matches!(cst, PubTypeConstraint::VariantPayloadLayout { .. }) {
+                            variant_layout_constraints.push(cst);
+                        } else {
+                            remaining_constraints.push(cst);
+                        }
+                    }
+                    constraint => unified_ty_inf.unify_type_relation(constraint)?,
+                }
+            }
+            unified_ty_inf.propagate_type_bounds()?;
 
-        if !variant_layout_constraints.is_empty() {
-            unified_ty_inf.substitute_in_constraints_in_place(&mut variant_layout_constraints);
-            variant_layout_constraints.retain(|constraint| {
-                let PubTypeConstraint::VariantPayloadLayout {
-                    payload_ty,
-                    payload_span,
-                    ..
-                } = constraint
-                else {
-                    unreachable!("only variant layout evidence is deferred")
-                };
-                !type_has_static_layout(*payload_ty, payload_span.use_site, trait_solver)
-            });
-            remaining_constraints.extend(variant_layout_constraints);
-            unified_ty_inf.deduplicate_constraints_in_place(&mut remaining_constraints);
-        }
+            // Then, solve all effect equalities.
+            for constraint in effect_constraints {
+                use EffectConstraint::*;
+                match constraint {
+                    SameEffect {
+                        current,
+                        current_span,
+                        expected,
+                        expected_span,
+                    } => unified_ty_inf.unify_same_effect(
+                        &current,
+                        current_span,
+                        &expected,
+                        expected_span,
+                    )?,
+                }
+            }
 
-        // Create minimalist types for orphan variant constraints.
-        // FIXME: something is missing here
-        // remaining_constraints = unified_ty_inf.simplify_variant_constraints(remaining_constraints);
+            unified_ty_inf
+                .normalize_given_outputs(&|id| trait_solver.output_effect_polarities(id))?;
 
-        // Flatten inverted effect constraints into normal constraints
-        unified_ty_inf.effects.expand_deferred_inclusions()?;
+            // Bounds and public constraints share one fixed point. Trait outputs
+            // remain blockers until that pass has either resolved or deferred them.
+            *unified_ty_inf.remaining_ty_constraints = remaining_constraints;
+            unified_ty_inf.resolve_remaining_constraints_to_fixed_point(trait_solver, arena)?;
+            let mut remaining_constraints =
+                mem::take(&mut *unified_ty_inf.remaining_ty_constraints);
+
+            if !variant_layout_constraints.is_empty() {
+                unified_ty_inf.substitute_in_constraints_in_place(&mut variant_layout_constraints);
+                variant_layout_constraints.retain(|constraint| {
+                    let PubTypeConstraint::VariantPayloadLayout {
+                        payload_ty,
+                        payload_span,
+                        ..
+                    } = constraint
+                    else {
+                        unreachable!("only variant layout evidence is deferred")
+                    };
+                    !type_has_static_layout(*payload_ty, payload_span.use_site, trait_solver)
+                });
+                remaining_constraints.extend(variant_layout_constraints);
+                unified_ty_inf.deduplicate_constraints_in_place(&mut remaining_constraints);
+            }
+
+            // Create minimalist types for orphan variant constraints.
+            // FIXME: something is missing here
+            // remaining_constraints = unified_ty_inf.simplify_variant_constraints(remaining_constraints);
+
+            // Flatten inverted effect constraints into normal constraints
+            unified_ty_inf.effects.expand_deferred_inclusions()?;
+            Ok(remaining_constraints)
+        })();
+        let remaining_constraints = match (solved, mutability_error) {
+            (Err(error), Some(mutability_error))
+                if matches!(*error, CompilationErrorImpl::MutabilityMustBe { .. }) =>
+            {
+                return Err(mutability_error);
+            }
+            (Err(error), _) | (Ok(_), Some(error)) => return Err(error),
+            (Ok(remaining_constraints), None) => remaining_constraints,
+        };
 
         // FIXME: think whether we should have an intermediate struct without the remaining_constraints in it.
         *unified_ty_inf.remaining_ty_constraints = remaining_constraints;

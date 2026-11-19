@@ -287,7 +287,9 @@ Mutability constraints distinguish having at least the required access from havi
 same mutability. A mutable place can satisfy a read-only requirement; a read-only place cannot
 satisfy a mutable requirement. Both same-type relations require equal mutability. The solver
 resolves mutability constraints before structural type relations, so callable comparisons know
-which arguments require invariance. Mutability is not abstracted over in type schemes.
+which arguments require invariance. It saves the first error from these constraints and reports it
+only if solving types succeeds or reports a mutability error. Mutability is not abstracted over in
+type schemes.
 
 Returning a value and exposing a place have different typing requirements. A value may be widened
 by subtyping, while an exposed place preserves its referent type so writes remain valid.

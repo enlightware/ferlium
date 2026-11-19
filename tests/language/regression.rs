@@ -173,6 +173,29 @@ fn an_immutable_argument_to_a_function_value_is_reported_at_the_argument() {
     }
 }
 
+/// A type or field error that unification finds is reported before an error from the explicit
+/// mutability constraints.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_type_or_field_error_is_reported_before_a_mutability_error() {
+    let mut session = TestSession::new();
+    session
+        .fail_compilation(r#"fn f(x: int) { let a = x; a = "s" }"#)
+        .expect_type_mismatch("string", "int");
+    for (src, field) in [
+        ("fn f(x: (int, int)) { x.a = 1 }", "a"),
+        ("fn f(x: {a: int}) { x.b = 1 }", "b"),
+    ] {
+        match session.fail_compilation(src).into_inner() {
+            CompilationErrorImpl::InvalidRecordField { field: name, .. }
+            | CompilationErrorImpl::InvalidRecordFieldAccess { field: name, .. } => {
+                assert_eq!(name, field, "{src}")
+            }
+            other => panic!("{src}: expected a field error, got {other:?}"),
+        }
+    }
+}
+
 /// When the callee's type is only known after inference, function subtyping reports the mismatch
 /// by argument index rather than by locating the argument in the source text, which a pipe defeats.
 #[test]

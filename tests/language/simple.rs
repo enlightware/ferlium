@@ -3822,10 +3822,11 @@ fn properties() {
         .into_inner()
         .into_invalid_record_field_access()
         .unwrap();
-    // As for a record, the property must be a mutable place before its field is looked up.
     session
         .fail_compilation("@props::my_scope.my_var.a = 2")
-        .expect_mutability_must_be(MutabilityMustBeWhat::Mutable);
+        .into_inner()
+        .into_invalid_record_field_access()
+        .unwrap();
 
     // array value
     set_array_property_value(int_a![]);
