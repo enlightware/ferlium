@@ -107,6 +107,7 @@ The code after `yield` is the epilogue.
 The caller uses the yielded place between those two parts.
 
 Scoped members must contain exactly one reachable `yield`, and that `yield` must yield a place.
+That place must belong to a local that the member owns and that lives until the epilogue.
 A `mut` member must yield a mutable place.
 For now, the `yield` path must be block-structured: the `yield` may be nested in blocks, but not inside conditionals, matches, or loops.
 

@@ -38,7 +38,8 @@ use crate::{
         },
         function::{ArgConvention, CallableDefinition, arg_conventions_for_args},
         hir_syn, node_is_place_reference, node_is_stable_place_reference,
-        node_is_stable_storage_place_reference, place_resolution_may_create_temp,
+        node_is_stable_storage_place_reference, node_may_be_place_reference,
+        place_resolution_may_create_temp,
         value::LiteralValue,
     },
     internal_compilation_error,
@@ -1569,7 +1570,9 @@ impl TypeInference {
                 }
                 let effects = env.ir_arena[node_id].effects.clone();
                 let return_value = if env.return_requires_place() {
-                    if ty != Type::never() && !node_is_place_reference(env.ir_arena, node_id) {
+                    // Whether a field is a place is only known once it is resolved: elaboration
+                    // checks it again.
+                    if ty != Type::never() && !node_may_be_place_reference(env.ir_arena, node_id) {
                         return Err(internal_compilation_error!(InvalidSubscriptDefinition {
                             subject: env.subscript_member.map_or(
                                 SubscriptDefinitionSubject::AddressorFunction(env.function_name),
@@ -1612,10 +1615,14 @@ impl TypeInference {
                 let expected_ty = yield_context.expected_ty;
                 let expected_span = yield_context.expected_span;
                 let requires_mutable_place = yield_context.requires_mutable_place;
-                let (node_id, mut_ty) = self.infer_expr(env, *expr)?;
+                // Yielded as a place, not read, as an addressor's return.
+                let (node_id, mut_ty) =
+                    self.infer_expr_as_place(env, *expr, requires_mutable_place)?;
                 let ty = env.ir_arena[node_id].ty;
                 let operand_span = env.ir_arena[node_id].span;
-                if ty != Type::never() && !node_is_place_reference(env.ir_arena, node_id) {
+                // Whether a field is a place is only known once it is resolved: elaboration
+                // checks it again.
+                if ty != Type::never() && !node_may_be_place_reference(env.ir_arena, node_id) {
                     return Err(internal_compilation_error!(InvalidYield {
                         kind: InvalidYieldKind::NotAPlace,
                         span: operand_span,
@@ -2372,31 +2379,51 @@ impl TypeInference {
         Ok(self.infer_expr(env, expr)?.0)
     }
 
+    /// Infers the expression that an addressor returns, as a place (see
+    /// [`Self::infer_expr_as_place`]).
     fn infer_expr_as_place_return(
         &mut self,
         env: &mut TypingEnv,
         expr: DExprId,
     ) -> Result<NodeId, InternalCompilationError> {
+        let requires_mutable_place = env
+            .subscript_member
+            .is_some_and(|subscript_member| subscript_member.requires_mutable_place);
+        Ok(self
+            .infer_expr_as_place(env, expr, requires_mutable_place)?
+            .0)
+    }
+
+    /// Infers an expression that must be a place, as an addressor returns and an accessor yields,
+    /// keeping a place where ordinary inference would read it: an access chain keeps the place of
+    /// each of its fields, requiring each to be mutable with `requires_mutable_place`, and a
+    /// block, including an `effects_unsafe` one, gives its tail the same treatment. Returns the
+    /// node and the mutability with which it gives the place.
+    fn infer_expr_as_place(
+        &mut self,
+        env: &mut TypingEnv,
+        expr: DExprId,
+        requires_mutable_place: bool,
+    ) -> Result<(NodeId, MutType), InternalCompilationError> {
         let expr_span = env.ast_arena[expr].span;
         if Self::is_access_chain_expr(&env.ast_arena[expr].kind) {
             let chain = self.access_chain_for_expr(env, expr);
-            let mode = if env
-                .subscript_member
-                .is_some_and(|subscript_member| subscript_member.requires_mutable_place)
-            {
-                SubscriptMemberKind::Mut
+            let (mode, mut_ty) = if requires_mutable_place {
+                (SubscriptMemberKind::Mut, MutType::mutable())
             } else {
-                SubscriptMemberKind::Ref
+                (SubscriptMemberKind::Ref, MutType::constant())
             };
-            return self
-                .infer_access_chain_with_body(
-                    env,
-                    chain,
-                    mode,
-                    expr_span,
-                    |_, _, place, place_ty, _inside_yielded| Ok((place, place_ty)),
-                )
-                .map(|(node, _)| node);
+            // In `Mut` mode, the chain requires each of its places to be mutable. The mutability
+            // that it returns is not the place's when a field is read through projection
+            // evidence, which wraps the place.
+            let (node, _) = self.infer_access_chain_with_body(
+                env,
+                chain,
+                mode,
+                expr_span,
+                |_, _, place, place_ty, _inside_yielded| Ok((place, place_ty)),
+            )?;
+            return Ok((node, mut_ty));
         }
         match env.ast_arena[expr].kind.clone() {
             ExprKind::EffectsUnsafe(inner) => {
@@ -2409,8 +2436,12 @@ impl TypeInference {
                     );
                 }
 
-                let inner_node_id = self.infer_expr_as_place_return(env, inner)?;
-                Ok(self.effects_unsafe_node(env, inner_node_id, expr_span))
+                let (inner_node_id, mut_ty) =
+                    self.infer_expr_as_place(env, inner, requires_mutable_place)?;
+                Ok((
+                    self.effects_unsafe_node(env, inner_node_id, expr_span),
+                    mut_ty,
+                ))
             }
             ExprKind::Block(exprs) => {
                 assert!(!exprs.is_empty());
@@ -2430,11 +2461,16 @@ impl TypeInference {
                         break;
                     }
                 }
+                // A block that diverges before its tail is no place to write through.
+                let mut mut_ty = MutType::constant();
                 if nodes
                     .last()
                     .is_none_or(|node| env.ir_arena[*node].ty != Type::never())
                 {
-                    nodes.push(self.infer_expr_as_place_return(env, tail_expr)?);
+                    let (tail, tail_mut_ty) =
+                        self.infer_expr_as_place(env, tail_expr, requires_mutable_place)?;
+                    nodes.push(tail);
+                    mut_ty = tail_mut_ty;
                 }
 
                 Self::extend_local_scopes_to_span_end(env, env_size, expr_span);
@@ -2448,11 +2484,12 @@ impl TypeInference {
                         .collect::<Vec<_>>(),
                 );
                 let kind = self.close_block_scope(env, env_size, nodes);
-                Ok(env
+                let node = env
                     .ir_arena
-                    .alloc(hir::Node::new(kind, ty, effects, expr_span)))
+                    .alloc(hir::Node::new(kind, ty, effects, expr_span));
+                Ok((node, mut_ty))
             }
-            _ => self.infer_expr_drop_mut(env, expr),
+            _ => self.infer_expr(env, expr),
         }
     }
 
@@ -2481,7 +2518,9 @@ impl TypeInference {
             return Ok(node_id);
         }
         self.add_same_type_with_sub_effects_constraint(ty, expr_span, expected_ty, expected_span);
-        if !node_is_place_reference(env.ir_arena, node_id) {
+        // Whether a field is a place is only known once it is resolved: elaboration checks it
+        // again.
+        if !node_may_be_place_reference(env.ir_arena, node_id) {
             return Err(internal_compilation_error!(InvalidSubscriptDefinition {
                 subject: env.subscript_member.map_or(
                     SubscriptDefinitionSubject::AddressorFunction(env.function_name),

@@ -526,6 +526,118 @@ fn addressor_subscript_rejects_implicit_tail_value() {
     );
 }
 
+/// A field of a field is a place: an addressor returns it, to read and to write, on every
+/// backend, and so is a field that resolves to an addressor.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn addressor_subscript_returns_a_nested_field() {
+    let types = indoc! { r#"
+        struct Inner { b: int }
+        struct Item { inner: Inner }
+        struct Box { item: Item }
+        subscript Inner.c(self) -> int { ref mut { self.b } }
+    "# };
+    for field in ["inner.b", "inner.c"] {
+        let source = formatdoc! { r#"
+            {types}
+            subscript Box.text(self) -> int {{
+                ref mut {{ self.item.{field} }}
+            }}
+            fn main() -> int {{
+                let mut x = Box {{ item: Item {{ inner: Inner {{ b: 3 }} }} }};
+                let before = x.text;
+                x.text = 5;
+                before * 10 + x.item.inner.b
+            }}
+            main()
+        "# };
+        assert_val_eq!(experimental_session().run(&source), int(35), "{field}");
+    }
+}
+
+/// A field that resolves to an accessor is not a place, however deep it is.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn addressor_subscript_rejects_a_nested_field_that_is_an_accessor() {
+    assert_invalid_subscript_definition(
+        indoc! { r#"
+            struct Item { b: int }
+            subscript Item.c(self) -> int { ref { let local = self.b; yield local } }
+            struct Box { item: Item }
+            subscript Box.text(self) -> int { ref { self.item.c } }
+        "# },
+        SubscriptDefinitionSubject::SubscriptMember(ustr("text")),
+        InvalidSubscriptDefinitionKind::AddressorReturnMustBePlace,
+    );
+}
+
+/// An accessor yields a field of a field of a local that it owns, on every backend, also through
+/// blocks; the yield must still be rooted in such a local, and be a place once fields are
+/// resolved.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn yield_of_a_nested_field() {
+    for operand in [
+        "local.inner.b",
+        "{ local.inner.b }",
+        "{ let unused = 0; { local.inner.b } }",
+    ] {
+        let source = formatdoc! { r#"
+            struct Inner {{ b: int }}
+            struct Item {{ inner: Inner }}
+            subscript cell(slot: &mut int) -> int {{
+                ref mut {{
+                    let mut local = Item {{ inner: Inner {{ b: slot }} }};
+                    yield {operand};
+                    slot = local.inner.b + 1
+                }}
+            }}
+            fn main() -> int {{
+                let mut v = 1;
+                let before = v->[cell];
+                v->[cell] = 5;
+                before * 10 + v
+            }}
+            main()
+        "# };
+        // Reading through the mutable member runs its epilogue too: `v` is 2, then 6.
+        assert_val_eq!(experimental_session().run(&source), int(16), "{operand}");
+    }
+    assert_invalid_yield(
+        indoc! { r#"
+            struct Item { b: int }
+            struct Box { item: Item }
+            subscript Box.text(self) -> int { ref { yield self.item.b } }
+        "# },
+        InvalidYieldKind::NotAccessorOwned,
+    );
+    assert_invalid_yield(
+        indoc! { r#"
+            struct Item { b: int }
+            subscript Item.c(self) -> int { ref { let local = self.b; yield local } }
+            subscript cell(slot: &mut int) -> int {
+                ref { let local = Item { b: slot }; yield local.c }
+            }
+        "# },
+        InvalidYieldKind::NotAPlace,
+    );
+    // A block passes on the place of its tail, but its own locals end with it.
+    for operand in [
+        "{ let mut l = Item { b: slot }; l.b }",
+        "{ { let mut l = slot; l } }",
+    ] {
+        assert_invalid_yield(
+            &formatdoc! { r#"
+                struct Item {{ b: int }}
+                subscript cell(slot: &mut int) -> int {{
+                    ref mut {{ yield {operand}; slot = 0 }}
+                }}
+            "# },
+            InvalidYieldKind::RootDeclaredInOperand,
+        );
+    }
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn addressor_subscript_rejects_empty_member_body() {

@@ -191,6 +191,28 @@ pub(crate) fn node_is_place_reference(arena: &NodeArena, node_id: NodeId) -> boo
     }
 }
 
+/// Whether a node is a place, or may become one once elaboration resolves its fields: a field
+/// read through projection evidence, as is one of a receiver whose type inference does not know
+/// yet, becomes a projection if the field is structural, and stays an accessor otherwise.
+pub(crate) fn node_may_be_place_reference(arena: &NodeArena, node_id: NodeId) -> bool {
+    use NodeKind::*;
+
+    match &arena[node_id].kind {
+        WithYielded(with) => {
+            let FieldAccess(field) = &arena[with.accessor].kind else {
+                return false;
+            };
+            node_may_be_place_reference(arena, field.value)
+                && node_may_be_place_reference(arena, with.body)
+        }
+        WithPlace(node) => node_may_be_place_reference(arena, node.body),
+        Block(block) => block
+            .tail_node()
+            .is_some_and(|node| node_may_be_place_reference(arena, node)),
+        _ => node_is_place_reference(arena, node_id),
+    }
+}
+
 /// Whether an elaborated node evaluates to a place rather than an owned value.
 pub(crate) fn elaborated_node_is_place_reference(arena: &ENodeArena, node_id: ENodeId) -> bool {
     match &arena[node_id].kind {

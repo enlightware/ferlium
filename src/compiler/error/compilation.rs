@@ -839,6 +839,7 @@ pub enum InvalidYieldKind {
     OutsideSubscriptMember,
     NotAPlace,
     NotAccessorOwned,
+    RootDeclaredInOperand,
 }
 
 impl InvalidYieldKind {
@@ -848,6 +849,9 @@ impl InvalidYieldKind {
             Self::NotAPlace => "yield expression must be a place",
             Self::NotAccessorOwned => {
                 "yield expression must be rooted in storage owned by the subscript member"
+            }
+            Self::RootDeclaredInOperand => {
+                "yield expression must not be rooted in a local declared inside it"
             }
         }
     }

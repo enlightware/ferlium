@@ -1292,21 +1292,53 @@ fn check_elaborated_yield_root(
     if arena[node_id].ty == Type::never() {
         return Ok(());
     }
-    let valid =
-        elaborated_returned_place_origin(arena, node_id).is_some_and(|origin| match origin {
-            PlaceOrigin::Direct { local, .. } => locals
-                .get(local.as_index())
-                .is_some_and(|local| local.owns_storage()),
-            PlaceOrigin::Addressor(_) => false,
-        });
-    if valid {
-        Ok(())
-    } else {
-        Err(internal_compilation_error!(InvalidYield {
-            kind: InvalidYieldKind::NotAccessorOwned,
+    // Inference let a field through that might be a place; once resolved, it may be an accessor.
+    if !elaborated_node_is_place_reference(arena, node_id) {
+        return Err(internal_compilation_error!(InvalidYield {
+            kind: InvalidYieldKind::NotAPlace,
             span: arena[node_id].span,
-        }))
+        }));
     }
+    let root = match elaborated_returned_place_origin(arena, node_id) {
+        Some(PlaceOrigin::Direct { local, .. })
+            if locals
+                .get(local.as_index())
+                .is_some_and(|local| local.owns_storage()) =>
+        {
+            local
+        }
+        _ => {
+            return Err(internal_compilation_error!(InvalidYield {
+                kind: InvalidYieldKind::NotAccessorOwned,
+                span: arena[node_id].span,
+            }));
+        }
+    };
+    // A block of the operand passes on the place of its tail, but its own locals end with it.
+    if elaborated_node_declares_local(arena, node_id, root) {
+        return Err(internal_compilation_error!(InvalidYield {
+            kind: InvalidYieldKind::RootDeclaredInOperand,
+            span: arena[node_id].span,
+        }));
+    }
+    Ok(())
+}
+
+/// Whether a block within a node declares `local`.
+fn elaborated_node_declares_local(
+    arena: &ENodeArena,
+    node_id: ENodeId,
+    local: LocalDeclId,
+) -> bool {
+    let kind = &arena[node_id].kind;
+    if let NodeKind::Block(block) = kind
+        && block.cleanup.contains(&local)
+    {
+        return true;
+    }
+    elaborated_child_node_ids(kind)
+        .into_iter()
+        .any(|child| elaborated_node_declares_local(arena, child, local))
 }
 
 pub fn check_elaborated_place_return_roots(
@@ -1335,6 +1367,14 @@ fn check_elaborated_place_return_root(
 ) -> Result<(), InternalCompilationError> {
     if arena[node_id].ty == Type::never() {
         return Ok(());
+    }
+    // Inference let a field through that might be a place; once resolved, it may be an accessor.
+    if !elaborated_node_is_place_reference(arena, node_id) {
+        return Err(internal_compilation_error!(InvalidSubscriptDefinition {
+            subject,
+            kind: InvalidSubscriptDefinitionKind::AddressorReturnMustBePlace,
+            span: arena[node_id].span,
+        }));
     }
     let Some(origin) = elaborated_returned_place_origin(arena, node_id) else {
         return Err(internal_compilation_error!(InvalidSubscriptDefinition {
