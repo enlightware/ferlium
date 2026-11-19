@@ -26,8 +26,8 @@ Operations never carry intra-function successors. The terminators are:
 - `yield place -> resume`, which suspends a scoped accessor;
 - `return`;
 - `propagate_error`, which returns the pending source failure;
-- `effect_violation`, which poisons execution with the pending source failure in a function whose
-  type says it cannot fail, in place of `propagate_error`;
+- `effect_violation`, which poisons execution with a pending source failure raised within
+  `effects_unsafe`;
 - `failure_during_cleanup`, which poisons execution after a second source failure; and
 - `invariant_failure "message"`, which fatally terminates execution on a compiler/runtime bug.
 
@@ -254,11 +254,8 @@ source-error payload follows the explicit CFG: normal code may `return`, one pen
 `propagate_error` or reach `effect_violation`, and a second failure must reach
 `failure_during_cleanup`. Normal and error control flow may not silently rejoin.
 
-A function whose type cannot fail (no `fallible` effect and no effect variable) never propagates: a
-source failure reaching its exit, which only `effects_unsafe` makes possible, ends in
-`effect_violation` after the function's cleanup, so a plain call to it never raises. HIR emission
-chooses the exit from the function's type, and specialization turns a `propagate_error` into
-`effect_violation` when the substituted type cannot fail.
+Within `effects_unsafe`, an operation's error successor is `effect_violation` (see
+[mir-error-propagation.md](mir-error-propagation.md)).
 
 Sandbox violations, such as exceeding fuel, call-depth, or memory limits, are not source failures.
 They bypass MIR successors, poison the executor, and enter runtime reclamation without running

@@ -488,10 +488,10 @@ impl TypeInference {
                                     .collect::<Vec<_>>(),
                             );
                             node_id = env.ir_arena.alloc(N::new(
-                                K::Block(b(hir::Block {
-                                    body: b(SVec2::from_vec(project_node_ids)),
-                                    cleanup: Vec::new(),
-                                })),
+                                K::Block(b(hir::Block::new(
+                                    b(SVec2::from_vec(project_node_ids)),
+                                    Vec::new(),
+                                ))),
                                 return_ty,
                                 proj_effects,
                                 sp(*expr),
@@ -575,12 +575,12 @@ impl TypeInference {
             let store_eff = &env.ir_arena[store_variant_node_id].effects;
             let case_node_eff = &env.ir_arena[case_node_id].effects;
             let effects = self.make_dependent_effect([store_eff, case_node_eff]);
-            let node = K::Block(b(hir::Block {
-                body: b(SVec2::from_vec(vec![store_variant_node_id, case_node_id])),
-                // The materialized scrutinee is an owned local; drop it when the block exits or a
-                // resource-owning scrutinee leaks (a `Skip`-drop one resolves to no drop).
-                cleanup: vec![l_match_condition],
-            }));
+            // The materialized scrutinee is an owned local; drop it when the block exits or a
+            // resource-owning scrutinee leaks (a `Skip`-drop one resolves to no drop).
+            let node = K::Block(b(hir::Block::new(
+                b(SVec2::from_vec(vec![store_variant_node_id, case_node_id])),
+                vec![l_match_condition],
+            )));
             (node, case_ret_ty, MutType::constant(), effects)
         } else {
             // Literal patterns, convert optional default to mandatory one

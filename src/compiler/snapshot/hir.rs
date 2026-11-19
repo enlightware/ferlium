@@ -204,6 +204,7 @@ enum SnapshotNodeKind {
     Block {
         body: Vec<SnapshotNodeId>,
         cleanup: Vec<LocalDeclId>,
+        effects_unsafe: bool,
     },
     Return(SnapshotNodeId),
     Yield(SnapshotNodeId),
@@ -670,6 +671,7 @@ impl SnapshotNodeKind {
             NodeKind::Block(value) => Self::Block {
                 body: ids(&value.body),
                 cleanup: value.cleanup.clone(),
+                effects_unsafe: value.effects_unsafe,
             },
             NodeKind::Return(value) => Self::Return(node_id(*value)),
             NodeKind::Yield(value) => Self::Yield(node_id(*value)),
@@ -923,9 +925,14 @@ impl SnapshotNodeKind {
             })),
             Self::CheckCallDepth => NodeKind::CheckCallDepth,
             Self::CheckFuel => NodeKind::CheckFuel,
-            Self::Block { body, cleanup } => NodeKind::Block(b(hir::Block {
+            Self::Block {
+                body,
+                cleanup,
+                effects_unsafe,
+            } => NodeKind::Block(b(hir::Block {
                 body: b(ids(body)?.into()),
                 cleanup: cleanup.clone(),
+                effects_unsafe: *effects_unsafe,
             })),
             Self::Return(value) => NodeKind::Return(id(*value)?),
             Self::Yield(value) => NodeKind::Yield(id(*value)?),

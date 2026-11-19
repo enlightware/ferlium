@@ -22,10 +22,14 @@ Once guest execution starts, there are four outcomes besides successful return:
 3. A **failure during cleanup** means a second source failure was raised while propagating an
    earlier source failure. Both causes are retained, the execution domain is poisoned, and guest
    cleanup stops.
-4. An **effect violation** means a source failure escaped a function whose type says it cannot
-   fail (no `fallible` effect and no effect variable), which only trusted code using
-   `effects_unsafe` makes possible. The function's own cleanup runs first; then the failure is
-   retained, the execution domain is poisoned, and guest cleanup stops, since no caller expects it.
+4. An **effect violation** means a source failure was raised within `effects_unsafe`, whose type
+   hides it: trusted code promised that the block would not fail. The failure ends execution
+   where it is raised: it is retained, the execution domain is poisoned, and no guest cleanup
+   runs, neither the block's nor that of its function. If it interrupts the cleanup of an earlier
+   source failure, that failure is retained too. A function called within the block fails
+   as usual, with its own cleanup, until its failure reaches the block. Hence a call whose type
+   says it cannot fail (no `fallible` effect and no effect variable) never fails, whatever
+   instantiation of a generic callee it uses.
 
 The Rust representation makes these cases distinct through `RuntimeError::SourceFailure`,
 `RuntimeError::SandboxViolation`, `RuntimeError::FailureDuringCleanup`, and

@@ -1184,11 +1184,10 @@ pub(crate) fn substitute_body(
 
 /// Settles a body's exits on its substituted type, as HIR emission would have lowered them for
 /// that type: specializing a generic effect can make it unable to fail (see
-/// [`EffType::cannot_fail`]), so a
-/// source failure still reaching its exit, which only `effects_unsafe` makes possible, becomes an
-/// effect violation; and specializing a generic result or effect can make it return its result
-/// as a value (see [`call_result_transport`]), so its result parameter becomes a local, which each
-/// `return` reads.
+/// [`EffType::cannot_fail`]), so its source-error exits, which only an effect that inference
+/// missed could reach, become effect violations; and specializing a generic result or
+/// effect can make it return its result as a value (see [`call_result_transport`]), so its result
+/// parameter becomes a local, which each `return` reads.
 fn settle_exits(
     edit: &mut FunctionEdit,
     scheme: &TypeScheme<FnType>,

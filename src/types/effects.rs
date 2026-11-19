@@ -379,8 +379,8 @@ impl EffType {
     }
 
     /// Whether a function with these effects cannot fail: they neither include `fallible` nor
-    /// may be instantiated to include it. A source failure escaping such a function, which only
-    /// `effects_unsafe` makes possible, poisons execution instead of propagating.
+    /// may be instantiated to include it. A source failure within `effects_unsafe`, which these
+    /// effects hide, poisons execution where it is raised, so it never escapes such a function.
     pub fn cannot_fail(&self) -> bool {
         !self.primitives().contains(PrimitiveEffect::Fallible) && !self.has_variables()
     }

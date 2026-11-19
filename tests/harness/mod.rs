@@ -514,6 +514,15 @@ fn assert_outcomes_agree(
                     expected.kind(),
                     "{label} retained a different effect violation than HIR"
                 );
+                assert_eq!(
+                    actual
+                        .interrupted_source_failure()
+                        .map(|failure| failure.kind()),
+                    expected
+                        .interrupted_source_failure()
+                        .map(|failure| failure.kind()),
+                    "{label} retained a different failure interrupted by an effect violation than HIR"
+                );
             }
         }
         (expected, actual) => panic!(

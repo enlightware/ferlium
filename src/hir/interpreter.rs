@@ -150,18 +150,17 @@ fn eval_script_call(
     result.map(ControlFlow::into_value)
 }
 
-/// The error escaping a call of `function`. A source failure escaping a function whose type says it
-/// cannot fail, which only `effects_unsafe` makes possible, poisons execution, as MIR's
-/// `effect_violation`.
+/// The error escaping a call of `function`. A source failure escaping a function whose type says
+/// it cannot fail, which only an effect that inference missed allows (a failure within
+/// `effects_unsafe` stops where it is raised), poisons execution, as MIR's exit of such a function
+/// does.
 fn escaping_error(
     runtime: &mut EvalCtx,
     function: &ModuleFunction,
     error: RuntimeError,
 ) -> RuntimeError {
-    if matches!(error, RuntimeError::SourceFailure(_))
-        && function.definition.ty_scheme.ty.effects.cannot_fail()
-    {
-        runtime.poison_effect_violation(error)
+    if function.definition.ty_scheme.ty.effects.cannot_fail() {
+        runtime.poison_effect_violation_if_source_failure(error)
     } else {
         error
     }
@@ -170,11 +169,49 @@ fn escaping_error(
 struct HirInterpreter<'run, 'session> {
     runtime: &'run mut EvalCtx<'session>,
     frame: HirFrame,
+    /// How many `effects_unsafe` blocks of this frame enclose the node being evaluated. Within
+    /// one, a source failure is an effect violation as soon as this frame observes it.
+    effects_unsafe_depth: u32,
 }
 
 impl<'run, 'session> HirInterpreter<'run, 'session> {
     fn new(runtime: &'run mut EvalCtx<'session>, frame: HirFrame) -> Self {
-        Self { runtime, frame }
+        Self {
+            runtime,
+            frame,
+            effects_unsafe_depth: 0,
+        }
+    }
+
+    /// Evaluates `eval` within a block that is `effects_unsafe` if `effects_unsafe` is set: a
+    /// source failure raised there is an effect violation, as MIR's `effect_violation` successor
+    /// of the block's operations, so no cleanup runs for it.
+    fn within_effects_unsafe<T>(
+        &mut self,
+        effects_unsafe: bool,
+        eval: impl FnOnce(&mut Self) -> Result<T, RuntimeError>,
+    ) -> Result<T, RuntimeError> {
+        if !effects_unsafe {
+            return eval(self);
+        }
+        self.effects_unsafe_depth += 1;
+        let result = eval(self);
+        self.effects_unsafe_depth -= 1;
+        result.map_err(|error| {
+            self.runtime
+                .poison_effect_violation_if_source_failure(error)
+        })
+    }
+
+    /// `error` as this frame observes it: within `effects_unsafe`, a source failure is an effect
+    /// violation.
+    fn observed_error(&mut self, error: RuntimeError) -> RuntimeError {
+        if self.effects_unsafe_depth > 0 {
+            self.runtime
+                .poison_effect_violation_if_source_failure(error)
+        } else {
+            error
+        }
     }
 
     #[cfg(test)]
@@ -296,6 +333,7 @@ impl<'run, 'session> HirInterpreter<'run, 'session> {
         initial: RuntimeError,
         cleanup: impl FnOnce(&mut Self) -> Result<(), RuntimeError>,
     ) -> RuntimeError {
+        let initial = self.observed_error(initial);
         if !matches!(initial, RuntimeError::SourceFailure(_)) {
             return self.runtime.record_poisoning_error(initial);
         }
@@ -678,7 +716,9 @@ fn eval_node_with_ctx(
         Yield(node) => eval_yield(arena, *node, ctx, locals),
         WithYielded(node) => eval_with_yielded(arena, node, arena[node_id].span, ctx, locals),
         WithPlace(node) => eval_with_place(arena, node, ctx, locals),
-        Block(block) => eval_block(arena, block, ctx, locals),
+        Block(block) => ctx.within_effects_unsafe(block.effects_unsafe, |ctx| {
+            eval_block(arena, block, ctx, locals)
+        }),
         Assign(assignment) => eval_assign(arena, node_id, assignment, ctx, locals),
         PendingAssignment(never) => match *never {},
         Tuple(nodes) | Record(nodes) => eval_tuple(arena, nodes, ctx, locals),
@@ -2226,7 +2266,11 @@ fn eval_with_yielded(
     let binding_index = local_environment_index(ctx, locals, node.binding);
     ctx.runtime
         .set_environment_entry(binding_index, ValOrMut::Mut(yielded_place));
-    let body_result = eval_node_with_ctx(arena, node.body, ctx, locals);
+    // Within `effects_unsafe`, a failure of the body is an effect violation before the accessor
+    // resumes. MIR emission reaches the same result differently (`lower_with_yielded_enter`,
+    // through `effects_unsafe_scope_depth`): keep the two in step.
+    let body_result = eval_node_with_ctx(arena, node.body, ctx, locals)
+        .map_err(|error| ctx.observed_error(error));
     ctx.runtime
         .set_environment_entry(binding_index, ValOrMut::Val(Value::uninit()));
 
@@ -2286,7 +2330,9 @@ fn eval_accessor_until_yield(
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<(AccessorEpilogue, Place)>, RuntimeError> {
     if let NodeKind::Block(block) = &arena[accessor].kind {
-        return eval_block_accessor_until_yield(arena, block, span, ctx, locals);
+        return ctx.within_effects_unsafe(block.effects_unsafe, |ctx| {
+            eval_block_accessor_until_yield(arena, block, span, ctx, locals)
+        });
     }
 
     enum AccessorCall<'a> {
@@ -2561,9 +2607,9 @@ fn eval_epilogue_after_yield(
         return cont(Value::unit());
     }
     match &arena[node_id].kind {
-        NodeKind::Block(block) => {
+        NodeKind::Block(block) => ctx.within_effects_unsafe(block.effects_unsafe, |ctx| {
             eval_block_epilogue_after_yield(arena, block, yield_node_id, ctx, locals)
-        }
+        }),
         _ => panic!("yield epilogue replay only supports block-structured accessor bodies"),
     }
 }
@@ -3213,13 +3259,16 @@ fn try_eval_node_as_place(
             return Ok(control_flow_into_addressor_place(result).map_continue(Some));
         }
         Block(block) => {
-            let place = eval_or_return!(try_eval_nodes_as_place(arena, &block.body, ctx, locals));
-            if !block.cleanup.is_empty() {
-                // Addressor-place helpers may need temporaries to compute the final place.
-                // The returned place must not point into these cleanup locals.
-                drop_cleanup_locals(ctx, locals, &block.cleanup, node.span)?;
-            }
-            return Ok(ControlFlow::Continue(place));
+            return ctx.within_effects_unsafe(block.effects_unsafe, |ctx| {
+                let place =
+                    eval_or_return!(try_eval_nodes_as_place(arena, &block.body, ctx, locals));
+                if !block.cleanup.is_empty() {
+                    // Addressor-place helpers may need temporaries to compute the final place.
+                    // The returned place must not point into these cleanup locals.
+                    drop_cleanup_locals(ctx, locals, &block.cleanup, node.span)?;
+                }
+                Ok(ControlFlow::Continue(place))
+            });
         }
         WithPlace(node) if node_may_resolve_to_place(arena, node.body) => {
             return try_eval_with_place_as_place(arena, node, ctx, locals);
@@ -3571,14 +3620,14 @@ mod tests {
         );
         let accessor_entry = node(
             arena,
-            NodeKind::Block(b(hir::Block {
-                body: b(SVec2::from_vec(vec![
+            NodeKind::Block(b(hir::Block::new(
+                b(SVec2::from_vec(vec![
                     store_scratch,
                     yield_scratch,
                     assign_log,
                 ])),
-                cleanup: vec![accessor_scratch],
-            })),
+                vec![accessor_scratch],
+            ))),
             Type::unit(),
             span,
         );
@@ -3663,14 +3712,14 @@ mod tests {
         );
         let accessor_entry = node(
             &mut arena,
-            NodeKind::Block(b(hir::Block {
-                body: b(SVec2::from_vec(vec![
+            NodeKind::Block(b(hir::Block::new(
+                b(SVec2::from_vec(vec![
                     store_scratch,
                     yield_scratch,
                     assign_log,
                 ])),
-                cleanup: vec![accessor_scratch],
-            })),
+                vec![accessor_scratch],
+            ))),
             Type::unit(),
             span,
         );
@@ -3735,10 +3784,10 @@ mod tests {
         );
         let caller_entry = node(
             &mut arena,
-            NodeKind::Block(b(hir::Block {
-                body: b(SVec2::from_vec(vec![store_caller_log, with_yielded, tuple])),
-                cleanup: vec![caller_log, caller_result],
-            })),
+            NodeKind::Block(b(hir::Block::new(
+                b(SVec2::from_vec(vec![store_caller_log, with_yielded, tuple])),
+                vec![caller_log, caller_result],
+            ))),
             Type::tuple([int_ty, int_ty]),
             span,
         );
@@ -3838,14 +3887,14 @@ mod tests {
             eval_drop_tracked_node(&mut arena, test_module_id, tracked_function_id, span);
         let accessor_entry = node(
             &mut arena,
-            NodeKind::Block(b(hir::Block {
-                body: b(SVec2::from_vec(vec![
+            NodeKind::Block(b(hir::Block::new(
+                b(SVec2::from_vec(vec![
                     store_scratch,
                     yield_scratch,
                     epilogue_tracked,
                 ])),
-                cleanup: vec![accessor_scratch],
-            })),
+                vec![accessor_scratch],
+            ))),
             eval_drop_tracked_type(),
             span,
         );
@@ -3998,14 +4047,14 @@ mod tests {
         let load_log = node(&mut arena, hir_syn::load_local(caller_log), int_ty, span);
         let caller_entry = node(
             &mut arena,
-            NodeKind::Block(b(hir::Block {
-                body: b(SVec2::from_vec(vec![
+            NodeKind::Block(b(hir::Block::new(
+                b(SVec2::from_vec(vec![
                     store_log,
                     outer_with_yielded,
                     load_log,
                 ])),
-                cleanup: vec![caller_log],
-            })),
+                vec![caller_log],
+            ))),
             int_ty,
             span,
         );
@@ -4104,10 +4153,10 @@ mod tests {
             span,
         ));
         let block = arena.alloc(ENode::new(
-            NodeKind::Block(b(hir::Block {
-                body: b(SVec2::from_vec(vec![tracked, break_node])),
-                cleanup: Vec::new(),
-            })),
+            NodeKind::Block(b(hir::Block::new(
+                b(SVec2::from_vec(vec![tracked, break_node])),
+                Vec::new(),
+            ))),
             Type::never(),
             EffType::empty(),
             span,
@@ -4139,10 +4188,10 @@ mod tests {
         let tail = node(&mut arena, hir_syn::native(()), Type::unit(), span);
         let block = node(
             &mut arena,
-            NodeKind::Block(b(hir::Block {
-                body: b(SVec2::from_vec(vec![store, tail])),
-                cleanup: Vec::new(),
-            })),
+            NodeKind::Block(b(hir::Block::new(
+                b(SVec2::from_vec(vec![store, tail])),
+                Vec::new(),
+            ))),
             Type::unit(),
             span,
         );

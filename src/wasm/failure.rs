@@ -37,6 +37,17 @@ impl Failures {
             .or_else(|| self.native.take().map(RuntimeError::new_native))
     }
 
+    /// Ends an invocation on an effect violation. The propagated failure was raised within
+    /// `effects_unsafe`, so it becomes the violation before it meets the failures whose cleanup it
+    /// interrupted, as in MIR.
+    pub fn finish_effect_violation(&mut self) -> Option<RuntimeError> {
+        let violation = self
+            .propagated
+            .take()
+            .map(RuntimeError::into_effect_violation);
+        self.finish(violation)
+    }
+
     pub fn finish(&mut self, error: Option<RuntimeError>) -> Option<RuntimeError> {
         let mut error = error.or_else(|| self.propagated.take());
         for initial in self.pending.iter_mut().rev().filter_map(Option::take) {

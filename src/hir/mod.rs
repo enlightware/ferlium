@@ -615,9 +615,21 @@ pub struct Block<P: HirPhase = Unelaborated> {
     pub body: NodeIds<P>,
     /// Locals in declaration order.
     pub cleanup: Vec<LocalDeclId>,
+    /// Whether this block is the body of `effects_unsafe`, whose type hides its effects: a source
+    /// failure raised within it is an effect violation where it is raised, without cleanup.
+    pub effects_unsafe: bool,
 }
 
 impl<P: HirPhase> Block<P> {
+    /// A block that is not the body of `effects_unsafe`.
+    pub fn new(body: NodeIds<P>, cleanup: Vec<LocalDeclId>) -> Self {
+        Self {
+            body,
+            cleanup,
+            effects_unsafe: false,
+        }
+    }
+
     pub(crate) fn tail_node(&self) -> Option<NodeId<P>> {
         self.body.last().copied()
     }

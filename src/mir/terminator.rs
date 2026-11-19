@@ -229,9 +229,9 @@ pub enum TerminatorKind {
     },
     /// Continue propagating the source failure currently in flight to the caller.
     PropagateError,
-    /// Poison execution with the source failure currently in flight, which would otherwise escape
-    /// a function whose type says it cannot fail; only `effects_unsafe` makes this reachable. Takes
-    /// the place of `PropagateError` in such a function, after its cleanup ran.
+    /// Poison execution with the source failure currently in flight, raised within
+    /// `effects_unsafe`, whose type hides it; no cleanup runs before. As a safeguard, it also takes
+    /// the place of `PropagateError` in a function whose type says it cannot fail.
     EffectViolation,
     /// Poison execution after a cleanup action raised while another source failure was in flight.
     FailureDuringCleanup,

@@ -1037,10 +1037,10 @@ impl TypeInference {
         let body = &env.ir_arena[body];
         let (ty, effects) = (body.ty, body.effects.clone());
         env.ir_arena.alloc(N::new(
-            K::Block(b(hir::Block {
-                body: b(SVec2::from_vec(statements)),
-                cleanup: copies.iter().map(|&(_, copy)| copy).collect(),
-            })),
+            K::Block(b(hir::Block::new(
+                b(SVec2::from_vec(statements)),
+                copies.iter().map(|&(_, copy)| copy).collect(),
+            ))),
             ty,
             effects,
             span,
@@ -2162,7 +2162,7 @@ impl TypeInference {
 
                 let (inner_node_id, inner_mut_ty) = self.infer_expr(env, *expr)?;
                 return Ok((
-                    self.strip_effects_from_node(env, inner_node_id, expr_span),
+                    self.effects_unsafe_node(env, inner_node_id, expr_span),
                     inner_mut_ty,
                 ));
             }
@@ -2391,7 +2391,7 @@ impl TypeInference {
                 }
 
                 let inner_node_id = self.infer_expr_as_place_return(env, inner)?;
-                Ok(self.strip_effects_from_node(env, inner_node_id, expr_span))
+                Ok(self.effects_unsafe_node(env, inner_node_id, expr_span))
             }
             ExprKind::Block(exprs) => {
                 assert!(!exprs.is_empty());
@@ -5396,13 +5396,25 @@ impl TypeInference {
         }
     }
 
-    fn strip_effects_from_node(
+    /// Builds `effects_unsafe { .. }` from its body: the body's block, typed without effects and
+    /// marked so that a source failure raised within it is an effect violation.
+    fn effects_unsafe_node(
         &mut self,
         env: &mut TypingEnv,
         node_id: NodeId,
         span: Location,
     ) -> NodeId {
-        let kind = env.ir_arena[node_id].kind.clone();
+        let kind = match env.ir_arena[node_id].kind.clone() {
+            NodeKind::Block(mut block) => {
+                block.effects_unsafe = true;
+                NodeKind::Block(block)
+            }
+            _ => NodeKind::Block(b(hir::Block {
+                body: b(SVec2::from_vec(vec![node_id])),
+                cleanup: Vec::new(),
+                effects_unsafe: true,
+            })),
+        };
         let ty = env.ir_arena[node_id].ty;
         env.ir_arena
             .alloc(hir::Node::new(kind, ty, no_effects(), span))
@@ -5429,10 +5441,7 @@ impl TypeInference {
     }
 
     fn block(nodes: Vec<NodeId>, cleanup: Vec<LocalDeclId>) -> NodeKind {
-        NodeKind::Block(b(hir::Block {
-            body: b(SVec2::from_vec(nodes)),
-            cleanup,
-        }))
+        NodeKind::Block(b(hir::Block::new(b(SVec2::from_vec(nodes)), cleanup)))
     }
 
     fn prepare_value_for_exit(

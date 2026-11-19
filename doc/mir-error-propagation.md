@@ -50,9 +50,12 @@ temporaries, so a failed result holds at most a variant shell, which owns nothin
 A sandbox violation during either ordinary execution or cleanup bypasses all MIR successors. If it
 interrupts source cleanup, the pending source failure is retained as diagnostic context.
 
-A function whose type cannot fail ends its source-error paths in `effect_violation` rather than
-`propagate_error`: a failure there escaped through `effects_unsafe`, no caller expects it, so after
-the function's cleanup it poisons the executor like `failure_during_cleanup`.
+Within `effects_unsafe`, an operation's error successor is `effect_violation`, which poisons the
+executor without cleanup (the rule is in [runtime-sandboxing.md](runtime-sandboxing.md)). Cleanup
+of the scopes around the block, which a `return` or `break` from within it runs, keeps its usual
+successors. A function whose type cannot fail has no status to propagate, so its other
+source-error paths end in `effect_violation` too; only an effect that inference missed reaches
+them.
 
 ## Verification
 

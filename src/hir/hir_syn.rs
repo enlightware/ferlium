@@ -254,10 +254,7 @@ pub fn case_from_complete_alternatives(
 }
 
 pub fn block<P: HirPhase>(statements: impl IntoSVec2<NodeId<P>>) -> NodeKind<P> {
-    K::Block(b(hir::Block {
-        body: b(statements.into_svec2()),
-        cleanup: Vec::new(),
-    }))
+    K::Block(b(hir::Block::new(b(statements.into_svec2()), Vec::new())))
 }
 
 /// Like [`block`], but the listed owned locals are dropped when the block exits.
@@ -268,8 +265,5 @@ pub fn block_with_cleanup<P: HirPhase>(
     statements: impl IntoSVec2<NodeId<P>>,
     cleanup: Vec<LocalDeclId>,
 ) -> NodeKind<P> {
-    K::Block(b(hir::Block {
-        body: b(statements.into_svec2()),
-        cleanup,
-    }))
+    K::Block(b(hir::Block::new(b(statements.into_svec2()), cleanup)))
 }

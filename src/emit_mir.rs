@@ -488,6 +488,8 @@ impl<'a> Emitter<'a> {
                 propagate_error_block: None,
                 cannot_fail: f.definition.ty_scheme.ty.effects.cannot_fail(),
                 failure_during_cleanup_block: None,
+                effects_unsafe_scope_depth: None,
+                effect_violation_block: None,
             },
             hir_arena: &module.hir_arena,
         };
@@ -1096,7 +1098,9 @@ impl<'a> Emitter<'a> {
             .pop()
             .expect("exit_scope without a matching enter_scope");
         let actions: Vec<CleanupAction> = scope.actions.into_iter().rev().collect();
-        let outer = if actions.iter().any(CleanupAction::is_source_fallible) {
+        let outer = if self.context.effects_unsafe_scope_depth.is_none()
+            && actions.iter().any(CleanupAction::is_source_fallible)
+        {
             self.innermost_pad(span)
         } else {
             None
@@ -1123,14 +1127,21 @@ impl<'a> Emitter<'a> {
             self.context.cleanup_unwind_target,
             CleanupUnwindTarget::CurrentScope
         ));
+        let effects_unsafe_scope_depth = self.context.effects_unsafe_scope_depth;
         for depth in (to_depth..self.context.scopes.len()).rev() {
+            // A scope opened before the enclosing `effects_unsafe` block keeps its error edges.
+            if effects_unsafe_scope_depth.is_some_and(|block_depth| depth < block_depth) {
+                self.context.effects_unsafe_scope_depth = None;
+            }
             let actions: Vec<CleanupAction> = self.context.scopes[depth]
                 .actions
                 .iter()
                 .rev()
                 .cloned()
                 .collect();
-            let outer = if actions.iter().any(CleanupAction::is_source_fallible) {
+            let outer = if self.context.effects_unsafe_scope_depth.is_none()
+                && actions.iter().any(CleanupAction::is_source_fallible)
+            {
                 self.context.scopes[..depth]
                     .iter()
                     .rposition(|scope| !scope.actions.is_empty())
@@ -1140,6 +1151,7 @@ impl<'a> Emitter<'a> {
             };
             self.emit_inline_cleanup_actions(span, actions, outer);
         }
+        self.context.effects_unsafe_scope_depth = effects_unsafe_scope_depth;
     }
 
     /// Emits cleanup performed by a normal scope exit or control transfer.
@@ -1154,7 +1166,8 @@ impl<'a> Emitter<'a> {
         outer: Option<BlockId>,
     ) {
         for (index, action) in actions.iter().cloned().enumerate() {
-            if action.is_source_fallible() {
+            // Within `effects_unsafe`, a failing action is an effect violation: no pad.
+            if action.is_source_fallible() && self.context.effects_unsafe_scope_depth.is_none() {
                 let remaining = actions[index + 1..].to_vec();
                 let error_target = if remaining.is_empty() {
                     outer
@@ -2197,6 +2210,7 @@ impl<'a> Emitter<'a> {
                 // copy) and avoids allocating storage for a generic block type, which has no `Value`
                 // layout witness. A value-tailed block does not match this guard and falls through
                 // to the default arm, which materializes it into a temporary as before.
+                let effects_unsafe = self.begin_effects_unsafe(n.effects_unsafe);
                 let cleanup = n.cleanup.clone();
                 self.enter_scope(&cleanup);
                 let (tail, init) = n
@@ -2218,6 +2232,7 @@ impl<'a> Emitter<'a> {
                     self.lower_as_place(&self.hir_arena[*tail])
                 };
                 self.exit_scope(node.span);
+                self.end_effects_unsafe(effects_unsafe);
                 place
             }
 
@@ -2245,8 +2260,13 @@ impl<'a> Emitter<'a> {
         // drops what the earlier ones initialized. Nested blocks add theirs outermost-first; the
         // scope's reverse-order exit then drops innermost-first.
         self.enter_scope(&[]);
+        // An `effects_unsafe` block around the accessor covers it until it yields; its slide runs
+        // in the projection scope, after the block. The HIR interpreter reaches the same result
+        // differently (`eval_with_yielded`, through `observed_error`): keep the two in step.
+        let effects_unsafe = self.context.effects_unsafe_scope_depth;
         let mut accessor = &self.hir_arena[n.accessor];
         while let hir::NodeKind::Block(block) = &accessor.kind {
+            self.begin_effects_unsafe(block.effects_unsafe);
             let (tail, prefix) = block
                 .body
                 .split_last()
@@ -2273,6 +2293,7 @@ impl<'a> Emitter<'a> {
         if self.current_block_is_terminated() {
             let dummy = self.return_destination();
             self.context.locals.insert(n.binding, dummy.clone());
+            self.end_effects_unsafe(effects_unsafe);
             return;
         }
 
@@ -2319,6 +2340,7 @@ impl<'a> Emitter<'a> {
                 call_ty.clone(),
             ))
             .unwrap();
+        self.end_effects_unsafe(effects_unsafe);
         self.context.locals.insert(n.binding, place.clone());
         let scope = self
             .context
@@ -3001,6 +3023,7 @@ impl<'a> Emitter<'a> {
         use hir::NodeKind as K;
         match &node.kind {
             K::Block(n) => {
+                let effects_unsafe = self.begin_effects_unsafe(n.effects_unsafe);
                 let cleanup = n.cleanup.clone();
                 self.enter_scope(&cleanup);
                 if let Some((tail, init)) = n.body.split_last() {
@@ -3017,6 +3040,7 @@ impl<'a> Emitter<'a> {
                     self.return_value(node);
                 }
                 self.exit_scope(node.span);
+                self.end_effects_unsafe(effects_unsafe);
             }
             K::Case(n) => self.lower_case(node, n, ArmLowering::Return),
             // A subscript site returns its body's value; returning runs the scoped accessor's
@@ -3206,6 +3230,7 @@ impl<'a> Emitter<'a> {
                 // destination), then drop the scope's owned locals on the way out. A local moved
                 // into the destination (e.g. returned) has been left uninitialized, so its
                 // init-guarded `drop` is skipped at run time.
+                let effects_unsafe = self.begin_effects_unsafe(n.effects_unsafe);
                 let cleanup = n.cleanup.clone();
                 self.enter_scope(&cleanup);
                 if let Some((tail, init)) = n.body.split_last() {
@@ -3223,6 +3248,7 @@ impl<'a> Emitter<'a> {
                     }
                 }
                 self.exit_scope(node.span);
+                self.end_effects_unsafe(effects_unsafe);
             }
 
             K::Case(n) => self.lower_case(node, n, ArmLowering::Into(destination)),
@@ -3970,14 +3996,19 @@ impl<'a> Emitter<'a> {
         let span = operation.span;
         let normal = self.context.function.add_block();
         let error = match self.context.cleanup_unwind_target {
+            // A failure within `effects_unsafe` is an effect violation where it is raised. A
+            // second failure, in cleanup that already unwinds, poisons as it does elsewhere.
+            CleanupUnwindTarget::FailureDuringCleanup => {
+                self.failure_during_cleanup_block(span.location)
+            }
+            _ if self.context.effects_unsafe_scope_depth.is_some() => {
+                self.effect_violation_block(span.location)
+            }
             CleanupUnwindTarget::CurrentScope => self
                 .innermost_pad(span.location)
                 .unwrap_or_else(|| self.propagate_error_block(span.location)),
             CleanupUnwindTarget::Pad(target) => target,
             CleanupUnwindTarget::PropagateWithoutPad => self.propagate_error_block(span.location),
-            CleanupUnwindTarget::FailureDuringCleanup => {
-                self.failure_during_cleanup_block(span.location)
-            }
         };
         let terminator = Terminator::invoke(span, operation, normal, error);
         self.end_block_values(&terminator);
@@ -4007,12 +4038,40 @@ impl<'a> Emitter<'a> {
 
     /// How a source failure leaves the function once its cleanup ran: propagated to the caller, or,
     /// where the function's type says it cannot fail, as an effect violation poisoning execution.
+    /// The latter guards against an effect that inference missed: a failure within
+    /// `effects_unsafe` never reaches this exit.
     fn failure_exit(&self, span: Location) -> Terminator {
         if self.context.cannot_fail {
             Terminator::effect_violation(span)
         } else {
             Terminator::propagate_error(span)
         }
+    }
+
+    fn effect_violation_block(&mut self, span: Location) -> BlockId {
+        if let Some(block) = self.context.effect_violation_block {
+            return block;
+        }
+        let block = self.context.function.add_block();
+        self.context
+            .function
+            .set_terminator(block, Terminator::effect_violation(span));
+        self.context.effect_violation_block = Some(block);
+        block
+    }
+
+    /// Starts lowering a block, which is the body of `effects_unsafe` if `effects_unsafe` is set,
+    /// before it opens its scope. Returns what [`Self::end_effects_unsafe`] restores.
+    fn begin_effects_unsafe(&mut self, effects_unsafe: bool) -> Option<usize> {
+        let saved = self.context.effects_unsafe_scope_depth;
+        if effects_unsafe && saved.is_none() {
+            self.context.effects_unsafe_scope_depth = Some(self.context.scopes.len());
+        }
+        saved
+    }
+
+    fn end_effects_unsafe(&mut self, saved: Option<usize>) {
+        self.context.effects_unsafe_scope_depth = saved;
     }
 
     fn failure_during_cleanup_block(&mut self, span: Location) -> BlockId {
@@ -4149,6 +4208,16 @@ struct InsertionContext {
 
     /// Shared terminal double-failure exit, allocated lazily.
     failure_during_cleanup_block: Option<BlockId>,
+
+    /// While an `effects_unsafe` block is lowered, the number of scopes open where it began, so
+    /// scopes at this depth or deeper are the block's. A source failure within the block,
+    /// including one from the cleanup of a scope it opened, leaves as an effect violation, without
+    /// cleanup; the cleanup of the scopes around it, which a `return` or `break` from within the
+    /// block runs, keeps its own error edges. Nested blocks keep the outermost depth.
+    effects_unsafe_scope_depth: Option<usize>,
+
+    /// Shared terminal effect-violation exit of `effects_unsafe` blocks, allocated lazily.
+    effect_violation_block: Option<BlockId>,
 }
 
 /// How lowering selects an explicit source-error successor.

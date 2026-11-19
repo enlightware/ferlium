@@ -507,9 +507,8 @@ impl RuntimeInstance {
                 }
                 Some(FailureCode::EffectViolation) => {
                     return diagnostics
-                        .finish(None)
-                        .expect("effect violation diagnostic")
-                        .into_effect_violation();
+                        .finish_effect_violation()
+                        .expect("effect violation diagnostic");
                 }
                 None => js_error(error),
             };

@@ -410,10 +410,7 @@ pub(crate) fn wrap_generated_call_with_temp_cleanup(
     }
     temp_stores.push(call);
     arena.alloc(hir::Node::new(
-        NodeKind::Block(b(hir::Block {
-            body: b(SVec2::from_vec(temp_stores)),
-            cleanup,
-        })),
+        NodeKind::Block(b(hir::Block::new(b(SVec2::from_vec(temp_stores)), cleanup))),
         ty,
         EffType::empty(),
         span,

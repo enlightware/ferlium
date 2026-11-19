@@ -1838,10 +1838,10 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             no_effects(),
             span,
         );
-        Ok(NodeKind::Block(b(hir::Block {
-            body: b(SVec2::from_vec(vec![store, exit])),
-            cleanup: Vec::new(),
-        })))
+        Ok(NodeKind::Block(b(hir::Block::new(
+            b(SVec2::from_vec(vec![store, exit])),
+            Vec::new(),
+        ))))
     }
 
     /// Lower `projection`, whose slide may fail, so that no value leaving it is in its destination
@@ -1906,18 +1906,15 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             )]
         };
         if exits.transfers.is_empty() {
-            return Ok(NodeKind::Block(b(hir::Block {
-                body: b(SVec2::from_vec(nodes)),
+            return Ok(NodeKind::Block(b(hir::Block::new(
+                b(SVec2::from_vec(nodes)),
                 cleanup,
-            })));
+            ))));
         }
         let mut node = match nodes[..] {
             [node] => node,
             _ => self.alloc_elaborated_node(
-                NodeKind::Block(b(hir::Block {
-                    body: b(SVec2::from_vec(nodes)),
-                    cleanup: Vec::new(),
-                })),
+                NodeKind::Block(b(hir::Block::new(b(SVec2::from_vec(nodes)), Vec::new()))),
                 ty,
                 effects.clone(),
                 span,
@@ -1962,10 +1959,10 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 span,
             );
             node = self.alloc_elaborated_node(
-                NodeKind::Block(b(hir::Block {
-                    body: b(SVec2::from_vec(vec![exit, transfer])),
-                    cleanup: Vec::new(),
-                })),
+                NodeKind::Block(b(hir::Block::new(
+                    b(SVec2::from_vec(vec![exit, transfer])),
+                    Vec::new(),
+                ))),
                 Type::never(),
                 effects.clone(),
                 span,
@@ -1983,10 +1980,10 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 span,
             );
         }
-        Ok(NodeKind::Block(b(hir::Block {
-            body: b(SVec2::from_vec(vec![node])),
+        Ok(NodeKind::Block(b(hir::Block::new(
+            b(SVec2::from_vec(vec![node])),
             cleanup,
-        })))
+        ))))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2014,10 +2011,10 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             value_span,
         );
         let value = self.alloc_elaborated_node(
-            NodeKind::Block(b(hir::Block {
-                body: b(SVec2::from_vec(vec![store, load])),
-                cleanup: Vec::new(),
-            })),
+            NodeKind::Block(b(hir::Block::new(
+                b(SVec2::from_vec(vec![store, load])),
+                Vec::new(),
+            ))),
             ty,
             effects.clone(),
             value_span,
@@ -2106,10 +2103,10 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             }
             if src[node].ty == Type::never() {
                 body.push(value);
-                return Ok(NodeKind::Block(b(hir::Block {
-                    body: b(SVec2::from_vec(body)),
+                return Ok(NodeKind::Block(b(hir::Block::new(
+                    b(SVec2::from_vec(body)),
                     cleanup,
-                })));
+                ))));
             }
             // The interrupting field can itself hold a partial in-place construction. Later
             // fields cannot be interrupted and need no temporary cleanup obligation.
@@ -2145,10 +2142,10 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             return Ok(product);
         }
         body.push(self.alloc_elaborated_node(product, ty, effects.clone(), span));
-        Ok(NodeKind::Block(b(hir::Block {
-            body: b(SVec2::from_vec(body)),
+        Ok(NodeKind::Block(b(hir::Block::new(
+            b(SVec2::from_vec(body)),
             cleanup,
-        })))
+        ))))
     }
 
     fn elaborate_synthetic_node(
@@ -2634,10 +2631,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             return call;
         }
         let call = self.alloc_elaborated_node(call, ty, effects.clone(), span);
-        NodeKind::Block(b(hir::Block {
-            body: b(SVec2::from_vec(vec![call])),
-            cleanup,
-        }))
+        NodeKind::Block(b(hir::Block::new(b(SVec2::from_vec(vec![call])), cleanup)))
     }
 
     /// Argument cleanup is introduced during elaboration. Keep it outside the consumer of an
@@ -3304,6 +3298,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 Block(b(hir::Block {
                     body: b(SVec2::from_vec(body)),
                     cleanup,
+                    effects_unsafe: block.effects_unsafe,
                 }))
             }
             Assign(assignment) => {
@@ -3483,10 +3478,10 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 if let Some((local, store)) = staged {
                     let value =
                         self.alloc_elaborated_node(construction, node_ty, no_effects(), node_span);
-                    Block(b(hir::Block {
-                        body: b(SVec2::from_vec(vec![store, value])),
-                        cleanup: vec![local],
-                    }))
+                    Block(b(hir::Block::new(
+                        b(SVec2::from_vec(vec![store, value])),
+                        vec![local],
+                    )))
                 } else {
                     construction
                 }
@@ -3813,10 +3808,10 @@ mod tests {
             other_dead_span,
         ));
         let root = arena.alloc(Node::new(
-            NodeKind::Block(b(hir::Block {
-                body: b(SVec2::from_vec(vec![diverging, dead, other_dead])),
-                cleanup: Vec::new(),
-            })),
+            NodeKind::Block(b(hir::Block::new(
+                b(SVec2::from_vec(vec![diverging, dead, other_dead])),
+                Vec::new(),
+            ))),
             Type::never(),
             no_effects(),
             block_span,

@@ -3,10 +3,10 @@
 
 use test_log::test;
 
-use indoc::indoc;
+use indoc::{formatdoc, indoc};
 use ustr::ustr;
 
-use crate::harness::{TestSession, expected_array_infer, expected_tuple, int};
+use crate::harness::{RunMode, TestSession, expected_array_infer, expected_tuple, int};
 use ferlium::{
     compiler::error::{CompilationErrorImpl, RuntimeErrorKind, SourceFailureKind, UnsafeFeature},
     module::{LocalImplId, id::Id},
@@ -350,8 +350,8 @@ fn effects_unsafe_erases_effects_in_trusted_code() {
     );
 }
 
-/// A source failure escaping a function whose type says it cannot fail poisons execution rather
-/// than reaching a caller that does not expect it.
+/// A source failure within `effects_unsafe` poisons execution rather than reaching a caller that
+/// does not expect it.
 fn assert_effect_violation_by_division_by_zero(session: &mut TestSession, src: &str) {
     let error = session.try_run(src).expect_err("the division fails");
     assert_eq!(error.kind(), RuntimeErrorKind::EffectViolation);
@@ -384,6 +384,121 @@ fn effects_unsafe_failure_in_specialized_infallible_function_poisons() {
         &mut session,
         "fn apply(f, x) { effects_unsafe { idiv(1, f(x)) } }\napply(|x| x, 0)",
     );
+}
+
+const PROBE: &str = indoc! { r#"
+    struct Probe(int)
+
+    impl Value for Probe {
+        fn eq(left: Probe, right: Probe) -> bool { left.0 == right.0 }
+        fn to_string(value: Probe) -> string { to_string(value.0) }
+        fn hash(value: Probe, state: &mut hasher) { hash(value.0, state) }
+        fn clone(source: Probe) -> Probe { Probe(source.0) }
+        fn drop(target: &mut Probe) { testing::record_tracked_drop(target.0) }
+    }
+"# };
+
+/// Runs `src`, which defines `Probe` and resets the tracked drops, under each mode on its own,
+/// expecting an effect violation by a division by zero after which `drops` are logged.
+fn assert_effect_violation_dropping(src: &str, drops: isize) {
+    for mode in RunMode::ALL {
+        let mut session = TestSession::new();
+        session.allow_unsafe();
+        session.run_modes([mode]);
+        let error = session.try_run(src).expect_err("the division fails");
+        assert_eq!(error.kind(), RuntimeErrorKind::EffectViolation, "{mode:?}");
+        assert_eq!(
+            error.effect_violation().unwrap().kind(),
+            SourceFailureKind::DivisionByZero,
+            "{mode:?}"
+        );
+        assert_val_eq!(
+            session.run("testing::tracked_drop_log()"),
+            int(drops),
+            "{mode:?}"
+        );
+    }
+}
+
+/// A failure within `effects_unsafe` is an effect violation where it is raised, even in a function
+/// that may fail, and no cleanup runs for it, neither in the block nor around it.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn effects_unsafe_failure_in_fallible_function_poisons_without_cleanup() {
+    assert_effect_violation_dropping(
+        &formatdoc! { r#"
+            {PROBE}
+            fn f(x: int) -> int {{
+                let outer = Probe(1);
+                let a = idiv(1, x);
+                effects_unsafe {{
+                    let inner = Probe(2);
+                    idiv(1, a - 1)
+                }}
+            }}
+
+            testing::reset_tracked_drops();
+            f(1)
+        "# },
+        0,
+    );
+}
+
+/// A function called within `effects_unsafe` fails as usual, running its own cleanup; the failure
+/// becomes an effect violation once it reaches the block.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn effects_unsafe_failure_of_a_callee_poisons_after_its_cleanup() {
+    assert_effect_violation_dropping(
+        &formatdoc! { r#"
+            {PROBE}
+            fn inner(x: int) -> int {{
+                let local = Probe(3);
+                idiv(1, x)
+            }}
+
+            fn f(x: int) -> int {{
+                let outer = Probe(1);
+                effects_unsafe {{ inner(x) }}
+            }}
+
+            testing::reset_tracked_drops();
+            f(0)
+        "# },
+        3,
+    );
+}
+
+/// A function generic in its effects but called at a pure instantiation, by name or through a
+/// value, cannot fail at that call: a failure within its `effects_unsafe` is an effect violation,
+/// and the caller's cleanup does not run.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn effects_unsafe_failure_in_pure_instantiation_of_effect_generic_function_poisons() {
+    for call in [
+        "g(|z| z, 0)",
+        "{ let h: ((int) -> int, int) -> int = g; h(|z| z, 0) }",
+    ] {
+        assert_effect_violation_dropping(
+            &formatdoc! { r#"
+                {PROBE}
+                fn g<! E>(f: (int) -> int ! E, x: int) -> int {{
+                    let y = f(x);
+                    effects_unsafe {{ idiv(1, y) }}
+                }}
+
+                fn main(x: int) -> int {{
+                    let p = Probe(1);
+                    let a = idiv(1, x + 1);
+                    {call} + a
+                }}
+
+                testing::reset_tracked_drops();
+                main(0)
+            "# },
+            0,
+        );
+    }
 }
 
 #[test]

@@ -388,8 +388,8 @@ impl<'a> EvalCtx<'a> {
             ExecutionState::Poisoned(PoisonReason::FailureDuringCleanup(failure)) => Err(
                 RuntimeError::FailureDuringCleanup(Box::new(failure.clone())),
             ),
-            ExecutionState::Poisoned(PoisonReason::EffectViolation(failure)) => {
-                Err(RuntimeError::EffectViolation(Box::new(failure.clone())))
+            ExecutionState::Poisoned(PoisonReason::EffectViolation(violation)) => {
+                Err(RuntimeError::EffectViolation(Box::new(violation.clone())))
             }
         }
     }
@@ -402,10 +402,23 @@ impl<'a> EvalCtx<'a> {
         self.record_poisoning_error(initial.interrupted_by(during_cleanup))
     }
 
-    /// Poisons the execution domain with `error` escaping a function whose type says it cannot
-    /// fail: a source failure becomes an effect violation, an already poisoning error is kept.
+    /// Poisons the execution domain with `error`, raised within `effects_unsafe`: a source failure
+    /// becomes an effect violation, an already poisoning error is kept.
     pub(crate) fn poison_effect_violation(&mut self, error: RuntimeError) -> RuntimeError {
         self.record_poisoning_error(error.into_effect_violation())
+    }
+
+    /// Like [`Self::poison_effect_violation`], but leaves any other error, which already poisons or
+    /// is not a guest failure, untouched.
+    pub(crate) fn poison_effect_violation_if_source_failure(
+        &mut self,
+        error: RuntimeError,
+    ) -> RuntimeError {
+        if matches!(error, RuntimeError::SourceFailure(_)) {
+            self.poison_effect_violation(error)
+        } else {
+            error
+        }
     }
 
     pub(crate) fn record_poisoning_error(&mut self, error: RuntimeError) -> RuntimeError {
@@ -417,8 +430,8 @@ impl<'a> EvalCtx<'a> {
             RuntimeError::FailureDuringCleanup(failure) => {
                 PoisonReason::FailureDuringCleanup((**failure).clone())
             }
-            RuntimeError::EffectViolation(failure) => {
-                PoisonReason::EffectViolation((**failure).clone())
+            RuntimeError::EffectViolation(violation) => {
+                PoisonReason::EffectViolation((**violation).clone())
             }
             RuntimeError::SourceFailure(_) => {
                 panic!("source failure cannot directly poison an execution domain")
@@ -525,6 +538,11 @@ pub struct BacktraceFrame {
     call_site: Location,
 }
 impl BacktraceFrame {
+    /// Where the failure left this frame's function, in its caller.
+    pub fn call_site(&self) -> Location {
+        self.call_site
+    }
+
     fn fmt_with_suspended_at(
         &self,
         f: &mut std::fmt::Formatter<'_>,
@@ -592,9 +610,9 @@ pub enum RuntimeError {
     SandboxViolation(SandboxViolation),
     /// A second source failure raised while cleaning up an earlier one.
     FailureDuringCleanup(Box<FailureDuringCleanup>),
-    /// A source failure escaping a function whose type says it cannot fail, which only
-    /// `effects_unsafe` makes possible. Guest cleanup must not run after this point.
-    EffectViolation(Box<SourceFailure>),
+    /// A source failure raised within `effects_unsafe`, whose type hides it, so no caller expects
+    /// it. Guest cleanup must not run after this point.
+    EffectViolation(Box<EffectViolation>),
 }
 
 /// Source location and accumulated call stack shared by runtime diagnostics.
@@ -619,6 +637,14 @@ pub struct SandboxViolation {
     interrupted_source_failure: Option<Box<SourceFailure>>,
 }
 
+/// A source failure raised within `effects_unsafe`, and the source failure, if any, whose cleanup
+/// it interrupted.
+#[derive(Debug, Clone)]
+pub struct EffectViolation {
+    failure: SourceFailure,
+    interrupted_source_failure: Option<Box<SourceFailure>>,
+}
+
 /// The two source failures that made semantic cleanup impossible to complete.
 #[derive(Debug, Clone)]
 pub struct FailureDuringCleanup {
@@ -631,7 +657,7 @@ pub struct FailureDuringCleanup {
 pub enum PoisonReason {
     SandboxViolation(SandboxViolation),
     FailureDuringCleanup(FailureDuringCleanup),
-    EffectViolation(SourceFailure),
+    EffectViolation(EffectViolation),
 }
 
 impl FailureDuringCleanup {
@@ -662,6 +688,29 @@ impl SourceFailure {
             function_id,
             call_site: location,
         });
+        self
+    }
+}
+
+impl EffectViolation {
+    pub fn kind(&self) -> SourceFailureKind {
+        self.failure.kind()
+    }
+
+    pub fn failure(&self) -> &SourceFailure {
+        &self.failure
+    }
+
+    pub fn interrupted_source_failure(&self) -> Option<&SourceFailure> {
+        self.interrupted_source_failure.as_deref()
+    }
+
+    /// Once the two failures meet, the callers above belong to both.
+    fn with_frame(mut self, function_id: FunctionId, location: Location) -> Self {
+        self.failure = self.failure.with_frame(function_id, location);
+        self.interrupted_source_failure = self
+            .interrupted_source_failure
+            .map(|failure| Box::new(failure.with_frame(function_id, location)));
         self
     }
 }
@@ -715,16 +764,25 @@ impl RuntimeError {
                     .get_or_insert_with(|| Box::new(initial));
                 Self::SandboxViolation(violation)
             }
+            (Self::SourceFailure(initial), Self::EffectViolation(mut violation)) => {
+                violation
+                    .interrupted_source_failure
+                    .get_or_insert_with(|| Box::new(initial));
+                Self::EffectViolation(violation)
+            }
             (initial, _) if initial.is_poisoning() => initial,
             (_, error) => error,
         }
     }
 
-    /// This error escaping a function whose type says it cannot fail: a source failure becomes an
-    /// effect violation; any other error is kept.
+    /// This error, raised within `effects_unsafe`: a source failure becomes an effect violation;
+    /// any other error is kept.
     pub(crate) fn into_effect_violation(self) -> Self {
         match self {
-            Self::SourceFailure(failure) => Self::EffectViolation(Box::new(failure)),
+            Self::SourceFailure(failure) => Self::EffectViolation(Box::new(EffectViolation {
+                failure,
+                interrupted_source_failure: None,
+            })),
             error => error,
         }
     }
@@ -772,8 +830,8 @@ impl RuntimeError {
                     during_cleanup: failure.during_cleanup.with_frame(function_id, location),
                 }))
             }
-            Self::EffectViolation(failure) => {
-                Self::EffectViolation(Box::new(failure.with_frame(function_id, location)))
+            Self::EffectViolation(violation) => {
+                Self::EffectViolation(Box::new(violation.with_frame(function_id, location)))
             }
         }
     }
@@ -820,9 +878,9 @@ impl RuntimeError {
         }
     }
 
-    pub fn effect_violation(&self) -> Option<&SourceFailure> {
+    pub fn effect_violation(&self) -> Option<&EffectViolation> {
         match self {
-            Self::EffectViolation(failure) => Some(failure),
+            Self::EffectViolation(violation) => Some(violation),
             Self::Backend(_)
             | Self::SourceFailure(_)
             | Self::SandboxViolation(_)
@@ -836,7 +894,7 @@ impl RuntimeError {
             Self::SourceFailure(failure) => failure.location(),
             Self::SandboxViolation(violation) => violation.location(),
             Self::FailureDuringCleanup(failure) => failure.initial.location(),
-            Self::EffectViolation(failure) => failure.location(),
+            Self::EffectViolation(violation) => violation.failure.location(),
         }
     }
 
@@ -846,7 +904,7 @@ impl RuntimeError {
             Self::SourceFailure(failure) => failure.backtrace(),
             Self::SandboxViolation(violation) => violation.backtrace(),
             Self::FailureDuringCleanup(failure) => failure.initial.backtrace(),
-            Self::EffectViolation(failure) => failure.backtrace(),
+            Self::EffectViolation(violation) => violation.failure.backtrace(),
         }
     }
 
@@ -890,12 +948,16 @@ impl FormatWith<(&SourceTable, &Modules)> for RuntimeError {
                 writeln!(f, "failure during cleanup:")?;
                 failure.during_cleanup.fmt_with(f, data)?;
             }
-            Self::EffectViolation(failure) => {
+            Self::EffectViolation(violation) => {
                 writeln!(
                     f,
-                    "Execution poisoned by a failure escaping a function that cannot fail:"
+                    "Execution poisoned by a failure within `effects_unsafe`, which promised none:"
                 )?;
-                failure.fmt_with(f, data)?;
+                violation.failure.fmt_with(f, data)?;
+                if let Some(interrupted) = &violation.interrupted_source_failure {
+                    writeln!(f, "interrupted source failure:")?;
+                    interrupted.fmt_with(f, data)?;
+                }
             }
         }
         Ok(())

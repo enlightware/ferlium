@@ -6754,6 +6754,120 @@ fn a_failure_escaping_an_infallible_accessor_is_an_effect_violation() {
     }
 }
 
+/// An accessor generic in its effects but used at a pure instantiation cannot fail there: a
+/// failure within its `effects_unsafe`, before or after its yield, is an effect violation, and
+/// nothing of the caller is dropped, on every backend.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_failure_in_a_pure_instantiation_of_an_effect_generic_accessor_is_an_effect_violation() {
+    for member in [
+        "let local = f(slot);\n        let checked = effects_unsafe { idiv(1, local) };\n        yield checked",
+        "let local = f(slot);\n        yield local;\n        let ignored = effects_unsafe { idiv(1, slot) };",
+    ] {
+        let source = formatdoc! { r#"
+            {PROBE}
+            subscript cell<! E>(slot: &mut int, probe: Probe, f: (int) -> int ! E) -> int {{
+                ref {{
+                    {member}
+                }}
+            }}
+
+            fn main(x: int) -> int {{
+                let mut slot = 0;
+                let held = Probe(1);
+                let fallible = idiv(1, x);
+                slot->[cell](Probe(7), |z| z) + fallible
+            }}
+
+            testing::reset_tracked_drops();
+            main(1)
+        "# };
+        for mode in RunMode::ALL {
+            let mut session = experimental_session();
+            session.allow_unsafe();
+            session.run_modes([mode]);
+            let error = session.try_run(&source).expect_err("the division fails");
+            assert_eq!(
+                error.kind(),
+                RuntimeErrorKind::EffectViolation,
+                "{mode:?}: {member}"
+            );
+            assert_val_eq!(
+                session.run("testing::tracked_drop_log()"),
+                int(0),
+                "{mode:?}: {member}"
+            );
+        }
+    }
+}
+
+/// A failure within `effects_unsafe` is an effect violation even while an earlier failure unwinds,
+/// here an index out of bounds in the code using the yielded place, which resumes the accessor. The
+/// violation keeps the failure it interrupted, with the callers above, here `outer`.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_failure_within_effects_unsafe_during_an_unwind_is_an_effect_violation() {
+    let source = indoc! { r#"
+        subscript cell(slot: &mut [int], divisor: int) -> [int] {
+            mut {
+                let mut local = slot;
+                yield local;
+                let ignored = effects_unsafe { idiv(1, divisor) };
+            }
+        }
+
+        fn main() -> int {
+            let mut values = [1];
+            values->[cell](0)[1] = 2;
+            0
+        }
+
+        fn outer() -> int {
+            main()
+        }
+
+        outer()
+    "# };
+    for mode in RunMode::ALL {
+        let mut session = experimental_session();
+        session.allow_unsafe();
+        session.run_modes([mode]);
+        let error = session.try_run(source).expect_err("the division fails");
+        assert_eq!(error.kind(), RuntimeErrorKind::EffectViolation, "{mode:?}");
+        let violation = error.effect_violation().expect("an effect violation");
+        assert_eq!(
+            violation.kind(),
+            SourceFailureKind::DivisionByZero,
+            "{mode:?}"
+        );
+        // The index out of bounds whose unwind resumed the accessor is kept.
+        let interrupted = violation
+            .interrupted_source_failure()
+            .expect("the interrupted failure");
+        assert!(
+            matches!(interrupted.kind(), SourceFailureKind::Aborted(_)),
+            "{mode:?}: {interrupted:?}"
+        );
+        // The callers above the point where the two failures met belong to both: `outer`'s call
+        // of `main`, and the call of `outer`. Only HIR gives a poisoning error its callers' frames.
+        if matches!(mode, RunMode::Hir) {
+            let calls = [
+                source.find("    main()").unwrap() + 4,
+                source.rfind("outer()").unwrap(),
+            ];
+            for trace in [interrupted.backtrace(), violation.failure().backtrace()] {
+                let sites: Vec<_> = trace
+                    .iter()
+                    .map(|frame| frame.call_site().start_usize())
+                    .collect();
+                for call in calls {
+                    assert!(sites.contains(&call), "{sites:?} lacks the call at {call}");
+                }
+            }
+        }
+    }
+}
+
 /// As a recursive call does: the inner access instantiates `E1` with `fallible`, not with the
 /// caller's own `E1`, whether the subscript is named or held in a value.
 #[test]

@@ -104,10 +104,10 @@ pub(crate) fn lower_pending_assignments(
     lowering.arena[root].kind = if lowering.prefix.len() == 1 && lowering.cleanup.is_empty() {
         lowering.arena[lowering.prefix[0]].kind.clone()
     } else {
-        NodeKind::Block(b(hir::Block {
-            body: b(SVec2::from_vec(lowering.prefix)),
-            cleanup: lowering.cleanup,
-        }))
+        NodeKind::Block(b(hir::Block::new(
+            b(SVec2::from_vec(lowering.prefix)),
+            lowering.cleanup,
+        )))
     };
 }
 
