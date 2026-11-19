@@ -7043,3 +7043,50 @@ fn a_recursive_subscript_with_a_callback_of_other_effects_keeps_them() {
         assert_eq!(error, SourceFailureKind::DivisionByZero, "{access}");
     }
 }
+
+/// A subscript value of a recursive group keeps the effects of its use, when it leaves the group
+/// for a generic function and when the group joins a function and a subscript.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_subscript_value_of_a_recursive_group_keeps_the_effects_of_its_use() {
+    let escaping = indoc! {r#"
+        fn through(slot: &mut int, s, f, n: int) -> int { slot->[s](f, n) }
+        subscript cell<! E1>(slot: &mut int, f1: (int) -> int ! E1, n: int) -> int {
+            ref {
+                let local = if n > 0 {
+                    let a = through(slot, cell, |z| idiv(1, z), n - 1);
+                    let b = slot->[cell](f1, n - 1);
+                    a + b
+                } else {
+                    f1(n)
+                };
+                yield local
+            }
+        }
+    "#};
+    let mutual = indoc! {r#"
+        subscript cell<! E1>(slot: &mut int, f1: (int) -> int ! E1, n: int) -> int {
+            ref { let local = go(slot, f1, n); yield local }
+        }
+        fn go(slot: &mut int, f1, n: int) -> int {
+            if n > 0 {
+                let a = { let s = cell; slot->[s](|z| idiv(1, z), n - 1) };
+                let b = slot->[cell](f1, n - 1);
+                a + b
+            } else {
+                f1(n)
+            }
+        }
+    "#};
+    for (name, definitions) in [("escaping", escaping), ("mutual", mutual)] {
+        let error = experimental_session().fail_run(&formatdoc! {r#"
+            {definitions}
+            fn main() -> int {{
+                let mut slot = 1;
+                slot->[cell](|z| z + 2, 2)
+            }}
+            main()
+        "#});
+        assert_eq!(error, SourceFailureKind::DivisionByZero, "{name}");
+    }
+}

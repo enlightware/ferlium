@@ -2158,6 +2158,10 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
         Ok(self.alloc_elaborated_node(kind, ty, effects, span))
     }
 
+    /// Unlike a function reference, a subscript reference inside a recursive group records no
+    /// instantiation: nothing specializes a subscript value, whose members run as their generic
+    /// functions with the evidence that it captures. If something ever did, the reference would
+    /// need the one that `late_module_call_inst_data` gives, as `GetFunction` records it.
     fn elaborate_get_subscript(
         &mut self,
         mut get_subscript: hir::GetSubscript,
