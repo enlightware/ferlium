@@ -898,6 +898,82 @@ fn an_adaptor_performs_the_effect_of_the_iterator_it_wraps() {
     }
 }
 
+/// A call that a parent held by the dictionary of a written requirement answers performs the
+/// effect of that dictionary, as the caller gives it, even where the types of the parent are
+/// known: here `Seq` holds its iterator's `Iterator`, whose effect `Div` fixes to `fallible`,
+/// whether the clause writes `Div` or inference finds it, even after the call.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_held_parent_of_known_types_performs_the_effect_of_the_callers_dictionary() {
+    use PrimitiveEffect::*;
+
+    let src = indoc! {r#"
+        struct Div { n: int }
+
+        impl Iterator for Div {
+            fn next(it: &mut Div) -> Option<int> {
+                it.n = it.n - 1;
+                Some(idiv(1, it.n))
+            }
+        }
+
+        struct Box;
+
+        impl Seq for <Self = Box |-> Item = int, Iter = Div> {
+            fn iter(b: Box) -> Div {
+                Div { n: 1 }
+            }
+        }
+
+        trait Make<Self |-> Out> {
+            fn make(x: Self) -> Out;
+        }
+
+        impl Make for <Self = bool |-> Out = Div> {
+            fn make(x: bool) -> Div {
+                Div { n: 2 }
+            }
+        }
+
+        fn same<A>(a: A, b: A) -> A {
+            a
+        }
+
+        fn walk<S>(s: S) -> Option<int> where S: Seq<Item = _, Iter = ITER> {
+            let mut it: Div = iter(s);
+            next(it)
+        }
+
+        fn walk_late<S>(s: S) -> Option<int> where S: Seq<Item = _, Iter = ITER> {
+            let mut it = iter(s);
+            let walked = next(it);
+            let made = same(it, make(true));
+            walked
+        }
+
+        fn walked() -> Option<int> {
+            walk(Box)
+        }
+
+        fn walked_late() -> Option<int> {
+            walk_late(Box)
+        }
+    "#};
+    for iter in ["Div", "_"] {
+        let src = src.replace("ITER", iter);
+        let mut session = TestSession::new();
+        for f in ["walked", "walked_late"] {
+            test_mod(&mut session, &src, f, effect(Fallible));
+            // A source failure, not one escaping a call whose type says it cannot fail.
+            assert_eq!(
+                session.fail_run(&format!("{src}\n{f}()")),
+                SourceFailureKind::DivisionByZero,
+                "{f} with `{iter}`"
+            );
+        }
+    }
+}
+
 /// An implied requirement that the dictionary of the written one does not hold, as `Container`
 /// does not hold its item's `Iterator`, performs the effect of the implementation of its types
 /// once they are known, whether the `where` clause writes them or inference finds them, even

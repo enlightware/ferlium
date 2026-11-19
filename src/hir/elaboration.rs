@@ -158,17 +158,21 @@ fn trait_dictionary_node_kind(
     span: Location,
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
 ) -> Result<(NodeKind, Type), InternalCompilationError> {
-    let trait_def = ctx.trait_solver.trait_def(trait_id);
-    if let Some(index) = ctx.dicts.given_trait_impl(trait_id, input_tys) {
-        let ty = ctx.dicts.requirements[index].to_dict_type(ctx.trait_solver);
+    // The evidence that the function is given, in a dictionary that it takes or in their parent
+    // slots, from which inference answered the application, whether its types are known or not.
+    if let Some(binding) = ctx.given_evidence(trait_id, input_tys, output_tys) {
+        let ty = ctx.evidence_bindings[binding.as_index()]
+            .requirement
+            .to_dict_type(ctx.trait_solver);
         return Ok((
             NodeKind::LoadDictionary(hir::LoadDictionary {
-                extra_parameter: EvidenceBindingId::from_index(index),
+                extra_parameter: binding,
             }),
             ty,
         ));
     }
 
+    let trait_def = ctx.trait_solver.trait_def(trait_id);
     let (input_tys, output_tys, output_effs) = default_unquantified_trait_application_effects(
         input_tys,
         output_tys,
@@ -551,14 +555,9 @@ fn trait_dictionary_evidence_binding_inner(
     span: Location,
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
 ) -> Result<EvidenceBindingId, InternalCompilationError> {
-    if let Some(index) = ctx.dicts.given_trait_impl(trait_id, input_tys) {
-        return Ok(EvidenceBindingId::from_index(index));
-    }
-    // A dictionary that the function is given holds the evidence of what its trait implies.
-    // Known types select a dictionary that is static instead.
-    if input_tys.iter().any(|ty| !ty.inner_ty_vars().is_empty())
-        && let Some(binding) = ctx.parent_evidence(trait_id, input_tys)
-    {
+    // The evidence that the function is given, in a dictionary that it takes or in their parent
+    // slots, from which inference answered the application, whether its types are known or not.
+    if let Some(binding) = ctx.given_evidence(trait_id, input_tys, output_tys) {
         return Ok(binding);
     }
     let (input_tys, output_tys, output_effs) = default_unquantified_trait_application_effects(

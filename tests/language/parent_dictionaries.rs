@@ -15,7 +15,7 @@ use ferlium::{
 };
 use indoc::indoc;
 
-use crate::harness::{TestSession, expected_tuple, float, int, signature, some};
+use crate::harness::{TestSession, bool, expected_tuple, float, int, signature, some};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -294,6 +294,142 @@ fn parent_lookup_visits_each_requirement_once() {
     src += "impl Top for int {}\n";
     src += "fn f<T>(x: T) -> int where T: Top { base(x) }\n";
     assert_val_eq!(TestSession::new().run(&format!("{src}f(42)")), int(42));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn parent_lookup_keeps_requirements_that_differ_by_effects() {
+    // `x` and `y` hold `Extract` of two `Cb` that differ by an effect, each with its own `Mark`
+    // slot: the lookup of `Mark` for `v` goes through `y`'s `Extract`.
+    let src = indoc! { r#"
+        pub struct Cb<T>(T)
+        pub trait Mark<Self> { fn mark(x: Self) -> int; }
+        impl Mark for bool { fn mark(x: bool) -> int { 42 } }
+        pub trait Extract<Self |-> Out> where Out: Mark { fn extract(x: Self) -> Out; }
+        pub trait Has<Self |-> Item, Out> where Item: Extract<Out = Out> {
+            fn item(x: Self) -> (Item, Out);
+        }
+        impl<! E> Extract for <Self = Cb<(() -> int ! E)> |-> Out = bool> {
+            fn extract(x: Cb<(() -> int ! E)>) -> bool { true }
+        }
+        struct One;
+        struct Two;
+        impl Has for <Self = One |-> Item = Cb<(() -> int ! ())>, Out = bool> {
+            fn item(x: One) -> (Cb<(() -> int ! ())>, bool) { (Cb(|| 1), false) }
+        }
+        impl Has for <Self = Two |-> Item = Cb<(() -> int ! fallible)>, Out = bool> {
+            fn item(x: Two) -> (Cb<(() -> int ! fallible)>, bool) { (Cb(|| idiv(1, 1)), false) }
+        }
+        pub fn pair<X, Y, U, V>(x: X, y: Y, u: U, v: V) -> (int, int)
+        where
+            X: Has<Item = Cb<(() -> int ! ())>, Out = U>,
+            Y: Has<Item = Cb<(() -> int ! fallible)>, Out = V>
+        {
+            (mark(u), mark(v))
+        }
+    "# };
+    assert_val_eq!(
+        TestSession::new().run(&format!("{src}pair(One, Two, true, false)")),
+        expected_tuple([int(42), int(42)])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_exact_parent_slot_wins_over_a_dictionary_equal_up_to_effects() {
+    // `x` comes with its own `Extract` for a pure callback, and `y`'s `Has` holds `Extract` for
+    // a fallible one: the two are equal up to effects, and give the same values, so only the
+    // path of the evidence tells which one a call reads.
+    let src = indoc! { r#"
+        pub struct Cb<T>(T)
+        pub trait Extract<Self |-> Out> { fn extract(x: Self) -> Out; }
+        pub trait Has<Self |-> Item, Out> where Item: Extract<Out = Out> {
+            fn item(x: Self) -> (Item, Out);
+        }
+        impl<! E> Extract for <Self = Cb<(int, (() -> int ! E))> |-> Out = bool> {
+            fn extract(x: Cb<(int, (() -> int ! E))>) -> bool { true }
+        }
+        struct Two;
+        impl Has for <Self = Two |-> Item = Cb<(int, (() -> int ! fallible))>, Out = bool> {
+            fn item(x: Two) -> (Cb<(int, (() -> int ! fallible))>, bool) {
+                (Cb((0, || idiv(1, 1))), false)
+            }
+        }
+        pub fn pair<T, Y, U, V>(x: Cb<(T, (() -> int ! ()))>, y: Y) -> (U, V)
+        where
+            Cb<(T, (() -> int ! ()))>: Extract<Out = U>,
+            Y: Has<Item = Cb<(T, (() -> int ! fallible))>, Out = V>
+        {
+            (extract(x), extract(item(y).0))
+        }
+    "# };
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(&format!("{src}pair(Cb((0, || 1)), Two)")),
+        expected_tuple([bool(true), bool(true)])
+    );
+    let mir = session.emit_mir(src);
+    let body = mir_function(&mir, "fn pair(");
+    let entry = body
+        .lines()
+        .find(|line| line.contains("int ! fallible)>) -> ") && line.contains("= dict_entry"))
+        .unwrap_or_else(|| panic!("an entry of `Extract` for the fallible callback:\n{body}"));
+    let source = entry.rsplit("from ").next().unwrap().trim();
+    assert!(
+        body.lines().any(|line| line
+            .trim_start()
+            .starts_with(&format!("{source}: dict = dict_parent"))),
+        "the fallible `extract` must be read from `y`'s `Has` dictionary:\n{body}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_parent_slot_equal_up_to_effects_with_other_outputs_answers_nothing() {
+    // `x`'s `Has` holds `Extract` for a pure callback, whose output is `U`; `extract` on a
+    // fallible one is another application, whose output the implementation makes `bool`: it is
+    // answered by that implementation, not read from the slot.
+    let src = indoc! { r#"
+        pub struct Cb<T>(T)
+        pub trait Extract<Self |-> Out> { fn extract(x: Self) -> Out; }
+        pub trait Has<Self |-> Item, Out> where Item: Extract<Out = Out> {
+            fn item(x: Self) -> (Item, Out);
+        }
+        impl<! E> Extract for <Self = Cb<(() -> int ! E)> |-> Out = bool> {
+            fn extract(x: Cb<(() -> int ! E)>) -> bool { true }
+        }
+        struct One;
+        impl Has for <Self = One |-> Item = Cb<(() -> int ! ())>, Out = bool> {
+            fn item(x: One) -> (Cb<(() -> int ! ())>, bool) { (Cb(|| 1), false) }
+        }
+        pub fn pick<X, U>(x: X, cb: Cb<(() -> int ! fallible)>) -> bool
+        where
+            X: Has<Item = Cb<(() -> int ! ())>, Out = U>
+        {
+            extract(cb)
+        }
+    "# };
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(&format!("{src}pick(One, Cb(|| idiv(1, 0)))")),
+        bool(true)
+    );
+    let mir = session.emit_mir(src);
+    let body = mir_function(&mir, "fn pick(");
+    assert!(
+        !body.contains("dict_parent"),
+        "`extract` must not read the slot of `x`'s `Has`:\n{body}"
+    );
+}
+
+/// The MIR of the function whose header starts with `header`.
+fn mir_function<'a>(mir: &'a str, header: &str) -> &'a str {
+    let start = mir
+        .find(&format!("\n{header}"))
+        .unwrap_or_else(|| panic!("no `{header}` in the MIR:\n{mir}"))
+        + 1;
+    let body = &mir[start..];
+    &body[..body[1..].find("\nfn ").map_or(body.len(), |end| end + 1)]
 }
 
 #[test]

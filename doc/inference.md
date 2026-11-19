@@ -158,7 +158,7 @@ Requirements on the structure of a type, such as a field, an element or a varian
 
 A written requirement implies the parents and `where` constraints of its trait, transitively, as every impl of the trait satisfies them.
 The body may use these implied requirements, which changes no caller.
-A dictionary gives the dictionaries of the requirements that its trait implies when the trait's application determines them, so the body reads these there and they never become parameters.
+A dictionary gives the dictionaries of the requirements that its trait implies when the trait's application determines them, so the body reads these there, even where their types are known, and they never become parameters.
 An implied requirement that the trait's application does not determine, such as one whose effect each impl chooses, matters only where the body uses it.
 There, the definition answers it with an implementation if it mentions nothing that the caller chooses, no type or effect of the contract, written or inferred, however nested: the implementation then decides only what is local to that use, such as that effect.
 Otherwise it becomes a parameter, which the caller supplies.

@@ -26,9 +26,7 @@ use crate::{
     format::FormatWith,
     hir::{
         self, NodeArena,
-        dictionary::{
-            DictionaryReq, InputMatching, LateFunctionInstData, ModuleInstData, ParentWalk, Reached,
-        },
+        dictionary::{DictionaryReq, LateFunctionInstData, ModuleInstData, ParentWalk, Reached},
         elaboration::elaborate_generated_functions,
         emit_hir::{
             ImplStubData, PendingModuleFunctions, PubTypeConstraintPtr,
@@ -765,8 +763,7 @@ fn held_by_dictionaries(
         .iter()
         .enumerate()
         .filter_map(|(index, requirement)| Some((index, requirement.trait_requirement()?)));
-    let nodes =
-        ParentWalk::new(roots, |id| env.trait_def(id), InputMatching::Exact).into_all_nodes();
+    let nodes = ParentWalk::new(roots, |id| env.trait_def(id)).into_all_nodes();
     // A held requirement is reported where the written one that holds it is.
     let mut roots = Vec::with_capacity(nodes.len());
     let mut held = Vec::new();

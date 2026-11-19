@@ -463,8 +463,9 @@ impl ExtraParameters {
             DictionaryReq::TraitImpl {
                 trait_id,
                 input_tys,
+                output_tys,
                 ..
-            } => self.given_trait_impl(*trait_id, input_tys),
+            } => self.given_trait_impl(*trait_id, input_tys, output_tys),
         }
     }
 
@@ -502,58 +503,40 @@ impl ExtraParameters {
         })
     }
 
-    /// As [`Self::given`], for the dictionary of `trait_id` for `input_tys`.
-    pub fn given_trait_impl(&self, trait_id: TraitId, input_tys: &[Type]) -> Option<usize> {
-        let position = |same: &dyn Fn(&[Type]) -> bool| {
-            self.requirements.iter().position(|requirement| {
-                matches!(
-                    requirement,
-                    DictionaryReq::TraitImpl {
-                        trait_id: given_trait_id,
-                        input_tys: given_input_tys,
-                        ..
-                    } if *given_trait_id == trait_id && same(given_input_tys)
-                )
+    /// As [`Self::given`], for the dictionary of `trait_id` for `input_tys`, whose outputs are
+    /// `output_tys`: see [`same_application_erasing_effects`].
+    pub fn given_trait_impl(
+        &self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        output_tys: &[Type],
+    ) -> Option<usize> {
+        self.given_trait_impl_matching(trait_id, &|inputs, _| inputs == input_tys)
+            .or_else(|| {
+                self.given_trait_impl_matching(trait_id, &|inputs, outputs| {
+                    same_application_erasing_effects(inputs, outputs, input_tys, output_tys)
+                })
             })
-        };
-        // Function effects constrain where a function value may be called, but they do not
-        // distinguish runtime trait dictionaries for otherwise identical function-typed inputs.
-        position(&|given| given == input_tys)
-            .or_else(|| position(&|given| same_types_erasing_effects(input_tys, given)))
     }
-}
 
-/// How a [`ParentWalk`] tells that a requirement is one that it has already reached: by its
-/// trait and its input types, which determine its outputs.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum InputMatching {
-    /// The same input types, for contract reduction, which compares requirements as written.
-    Exact,
-    /// The same input types once their effects are erased, for evidence lookup: effects never
-    /// select an implementation, so they give the same dictionary.
-    ErasingEffects,
-}
-
-impl InputMatching {
-    fn same(self, left: &DictionaryReq, right: &DictionaryReq) -> bool {
-        match self {
-            Self::Exact => match (left, right) {
-                (
-                    DictionaryReq::TraitImpl {
-                        trait_id: left_trait,
-                        input_tys: left_inputs,
-                        ..
-                    },
-                    DictionaryReq::TraitImpl {
-                        trait_id: right_trait,
-                        input_tys: right_inputs,
-                        ..
-                    },
-                ) => left_trait == right_trait && left_inputs == right_inputs,
-                _ => false,
-            },
-            Self::ErasingEffects => same_trait_application_erasing_effects(left, right),
-        }
+    /// The first dictionary of `trait_id` that the function is given whose input and output
+    /// types `same` accepts.
+    fn given_trait_impl_matching(
+        &self,
+        trait_id: TraitId,
+        same: &dyn Fn(&[Type], &[Type]) -> bool,
+    ) -> Option<usize> {
+        self.requirements.iter().position(|requirement| {
+            matches!(
+                requirement,
+                DictionaryReq::TraitImpl {
+                    trait_id: given_trait_id,
+                    input_tys: given_input_tys,
+                    output_tys: given_output_tys,
+                    ..
+                } if *given_trait_id == trait_id && same(given_input_tys, given_output_tys)
+            )
+        })
     }
 }
 
@@ -578,9 +561,10 @@ pub(crate) enum Reached {
 /// A walk over the roots that are trait dictionaries, then the requirements that their
 /// dictionaries hold in their parent slots, transitively, breadth first. It yields the index of
 /// each node as it reaches it, and adds the slots of a node only when the earlier nodes are
-/// yielded, so a caller that stops early does not compute the rest. A requirement that
-/// `matching` finds among the earlier nodes is not added again, so the walk ends: a trait only
-/// implies traits defined before it.
+/// yielded. A requirement of the trait
+/// and the input types of an earlier node, which determine its outputs, is not added again, so
+/// the walk ends: a trait only implies traits defined before it. Requirements that differ only
+/// by the effects of their types are kept apart: each holds its own slots.
 ///
 /// Contract reduction (which implied requirements the slots hold) and evidence lookup (from which
 /// slot to read one) both walk the slots with this, so that they reach the same requirements.
@@ -591,21 +575,18 @@ pub(crate) struct ParentWalk<'t, D: Fn(TraitId) -> &'t Trait> {
     /// The next node whose slots to add.
     holder: usize,
     trait_def: D,
-    matching: InputMatching,
 }
 
 impl<'t, D: Fn(TraitId) -> &'t Trait> ParentWalk<'t, D> {
     pub(crate) fn new(
         roots: impl IntoIterator<Item = (usize, DictionaryReq)>,
         trait_def: D,
-        matching: InputMatching,
     ) -> Self {
         let mut walk = Self {
             nodes: Vec::new(),
             next: 0,
             holder: 0,
             trait_def,
-            matching,
         };
         for (root, requirement) in roots {
             if matches!(requirement, DictionaryReq::TraitImpl { .. }) {
@@ -613,16 +594,6 @@ impl<'t, D: Fn(TraitId) -> &'t Trait> ParentWalk<'t, D> {
             }
         }
         walk
-    }
-
-    /// The nodes reached so far, in the order of their indices.
-    pub(crate) fn nodes(&self) -> &[ParentNode] {
-        &self.nodes
-    }
-
-    /// The nodes reached so far, in the order of their indices.
-    pub(crate) fn into_nodes(self) -> Vec<ParentNode> {
-        self.nodes
     }
 
     /// All the nodes, once the walk has reached them.
@@ -635,7 +606,7 @@ impl<'t, D: Fn(TraitId) -> &'t Trait> ParentWalk<'t, D> {
         if !self
             .nodes
             .iter()
-            .any(|node| self.matching.same(&node.requirement, &requirement))
+            .any(|node| same_trait_application(&node.requirement, &requirement))
         {
             self.nodes.push(ParentNode {
                 requirement,
@@ -673,24 +644,28 @@ impl<'t, D: Fn(TraitId) -> &'t Trait> Iterator for ParentWalk<'t, D> {
     }
 }
 
-/// Whether two trait requirements are of the same trait at the same input types, effects aside:
-/// they then have the same evidence.
-fn same_trait_application_erasing_effects(left: &DictionaryReq, right: &DictionaryReq) -> bool {
-    match (left, right) {
-        (
-            DictionaryReq::TraitImpl {
-                trait_id: left_trait,
-                input_tys: left_inputs,
-                ..
-            },
-            DictionaryReq::TraitImpl {
-                trait_id: right_trait,
-                input_tys: right_inputs,
-                ..
-            },
-        ) => left_trait == right_trait && same_types_erasing_effects(left_inputs, right_inputs),
-        _ => false,
-    }
+/// Whether two trait requirements are of the same trait at the same input types.
+fn same_trait_application(left: &DictionaryReq, right: &DictionaryReq) -> bool {
+    matches!((left, right), (
+        DictionaryReq::TraitImpl { trait_id: left_trait, input_tys: left_inputs, .. },
+        DictionaryReq::TraitImpl { trait_id: right_trait, input_tys: right_inputs, .. },
+    ) if left_trait == right_trait && left_inputs == right_inputs)
+}
+
+/// Whether a given application, of `inputs` and `outputs`, is the requested one, of
+/// `requested_inputs` and `requested_outputs`, up to the effects of their types. Function effects
+/// constrain where a function value may be called, but they do not distinguish runtime trait
+/// dictionaries for otherwise identical function-typed inputs, so the same application may be
+/// seen with other effects; its output types then agree up to effects too. An application whose
+/// outputs differ is another one, which another dictionary answers.
+fn same_application_erasing_effects(
+    inputs: &[Type],
+    outputs: &[Type],
+    requested_inputs: &[Type],
+    requested_outputs: &[Type],
+) -> bool {
+    same_types_erasing_effects(inputs, requested_inputs)
+        && same_types_erasing_effects(outputs, requested_outputs)
 }
 
 fn same_types_erasing_effects(left: &[Type], right: &[Type]) -> bool {
@@ -914,18 +889,55 @@ impl<'d, 'sr, 'sm> DictElaborationCtx<'d, 'sr, 'sm> {
         id
     }
 
-    /// The evidence of the trait `trait_id` at `input_tys` read from the parent slots of a
-    /// dictionary that the function is given, directly or through other parent slots, if one
-    /// holds it. The shortest path is taken; parameters are searched in order.
-    ///
-    /// The slots are walked as contract reduction (`held_by_dictionaries`) walks them, so this
-    /// finds every requirement that reduction leaves to them.
-    pub(crate) fn parent_evidence(
+    /// The evidence of the trait `trait_id` at `input_tys`, whose outputs are `output_tys`, that
+    /// the function is given: a dictionary that it takes, or one that their parent slots hold.
+    /// This very application is searched for first, in both; one equal to it up to the effects
+    /// of its types only then (see [`same_application_erasing_effects`]): such a match never
+    /// hides an exact one.
+    pub(crate) fn given_evidence(
         &mut self,
         trait_id: TraitId,
         input_tys: &[Type],
+        output_tys: &[Type],
     ) -> Option<EvidenceBindingId> {
-        let mut walk = ParentWalk::new(
+        let exact = |inputs: &[Type], _: &[Type]| inputs == input_tys;
+        let erased = |inputs: &[Type], outputs: &[Type]| {
+            same_application_erasing_effects(inputs, outputs, input_tys, output_tys)
+        };
+        // The slots are walked once, and only if a parameter does not answer exactly.
+        let mut slots = None;
+        for same in [&exact as &dyn Fn(&[Type], &[Type]) -> bool, &erased] {
+            if let Some(index) = self.dicts.given_trait_impl_matching(trait_id, same) {
+                return Some(EvidenceBindingId::from_index(index));
+            }
+            let nodes = slots.get_or_insert_with(|| self.parent_nodes());
+            // The walk is breadth first: the first slot that holds it is on a shortest path.
+            let found = nodes.iter().position(|node| {
+                matches!((node.reached, &node.requirement), (
+                    Reached::Slot { .. },
+                    DictionaryReq::TraitImpl {
+                        trait_id: slot_trait,
+                        input_tys: slot_inputs,
+                        output_tys: slot_outputs,
+                        ..
+                    },
+                ) if *slot_trait == trait_id && same(slot_inputs, slot_outputs))
+            });
+            if let Some(found) = found {
+                let nodes = slots.take().expect("the slots were walked");
+                return Some(self.bind_parent_path(&nodes, found));
+            }
+        }
+        None
+    }
+
+    /// The requirements that the parent slots of the dictionaries that the function is given
+    /// hold, directly or through other parent slots, breadth first.
+    ///
+    /// The slots are walked as contract reduction (`held_by_dictionaries`) walks them, so this
+    /// finds every requirement that reduction leaves to them.
+    fn parent_nodes(&self) -> Vec<ParentNode> {
+        ParentWalk::new(
             self.dicts
                 .requirements
                 .iter()
@@ -933,29 +945,12 @@ impl<'d, 'sr, 'sm> DictElaborationCtx<'d, 'sr, 'sm> {
                 .filter(|(_, requirement)| matches!(requirement, DictionaryReq::TraitImpl { .. }))
                 .map(|(index, requirement)| (index, requirement.clone())),
             |id| self.trait_solver.trait_def(id),
-            InputMatching::ErasingEffects,
-        );
-        // The first slot that holds it is on a shortest path.
-        let found = loop {
-            let index = walk.next()?;
-            let node = &walk.nodes()[index];
-            if let (
-                Reached::Slot { .. },
-                DictionaryReq::TraitImpl {
-                    trait_id: slot_trait,
-                    input_tys: slot_inputs,
-                    ..
-                },
-            ) = (node.reached, &node.requirement)
-                && *slot_trait == trait_id
-                && (slot_inputs.as_slice() == input_tys
-                    || same_types_erasing_effects(slot_inputs, input_tys))
-            {
-                break index;
-            }
-        };
-        let nodes = walk.into_nodes();
-        // Bind the path from its parameter down to the found node.
+        )
+        .into_all_nodes()
+    }
+
+    /// Bind the path of parent slots from its parameter down to `nodes[found]`.
+    fn bind_parent_path(&mut self, nodes: &[ParentNode], found: usize) -> EvidenceBindingId {
         let mut path = Vec::new();
         let mut node = found;
         let parameter = loop {
@@ -977,7 +972,7 @@ impl<'d, 'sr, 'sm> DictElaborationCtx<'d, 'sr, 'sm> {
                 },
             );
         }
-        Some(binding)
+        binding
     }
 
     pub(crate) fn take_generated_projection_subscripts(

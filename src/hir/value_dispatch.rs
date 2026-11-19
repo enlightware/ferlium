@@ -124,10 +124,8 @@ fn resolve_value_method_dispatch(
         )));
     }
     let value_trait_id = ctx.trait_solver.std_trait_id(VALUE_TRAIT_NAME);
-    if let Some(dict_index) = ctx.dicts.given_trait_impl(value_trait_id, &[ty]) {
-        return Ok(ResolvedValueMethodDispatch::Dictionary(
-            EvidenceBindingId::from_index(dict_index),
-        ));
+    if let Some(binding) = ctx.given_evidence(value_trait_id, &[ty], &[]) {
+        return Ok(ResolvedValueMethodDispatch::Dictionary(binding));
     }
     // A private open application may have been reduced to public evidence parameters.
     // Build its dictionary from those parameters using the same uniform selection rule.

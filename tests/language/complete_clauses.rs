@@ -540,9 +540,10 @@ fn an_unused_implied_requirement_needs_no_implementation() {
     }
 }
 
-/// A parent that the dictionary of a written requirement holds keeps the outputs that the clause
-/// gives it, even where an implementation for its types is visible: that implementation does not
-/// specialize a written generic, whether the body uses the parent or not.
+/// A parent that the dictionary of a written requirement holds is read from it, even where its
+/// types are known: it keeps the outputs that the clause gives it, so an implementation visible
+/// here does not specialize a written generic, whether the body uses the parent or not, and
+/// none need be visible at all.
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn a_held_parent_keeps_the_written_generics() {
@@ -576,11 +577,25 @@ fn a_held_parent_keeps_the_written_generics() {
         TestSession::new().run(&format!("{has}{keep}keep(S, true)")),
         bool(true)
     );
-    // `pick` is only typed: elaboration still serves its `extract` with the implementation for
-    // `int` rather than with the dictionary's slot that inference used.
     assert_eq!(
         signature(&mut TestSession::new(), &format!("{has}{pick}"), "pick"),
         "fn pick<T, U>(x: T) -> U where T: Has <Item = int, Out = U>, U: Value"
+    );
+    assert_val_eq!(
+        TestSession::new().run(&format!("{has}{pick}pick(S)")),
+        bool(true)
+    );
+    // No implementation of `Marker` for `int` is visible: the dictionary of `HasItem` has one.
+    let marked = indoc! { r#"
+        pub trait Marker<Self> { fn mark(x: Self) -> int; }
+        pub trait HasItem<Self |-> Item> where Item: Marker { fn item(x: Self) -> Item; }
+        pub fn marked<T>(x: T) -> int where T: HasItem<Item = int> {
+            mark(item(x))
+        }
+    "# };
+    assert_eq!(
+        signature(&mut TestSession::new(), marked, "marked"),
+        "fn marked<T>(x: T) -> int where T: HasItem <Item = int>"
     );
 }
 
