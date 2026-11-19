@@ -1612,6 +1612,8 @@ fn trait_default_recursive_dispatch_obeys_call_depth_limit() {
         "trait Loop<Self> { fn cycle(x: Self) -> int { callback() } } fn callback() -> int { cycle(1) } impl Loop for int {} cycle(1)",
         "trait Parent<Self> { fn parent(x: Self) -> int; } trait Child<Self>: Parent<Self> { fn child(x: Self) -> int { parent(x) } } impl Parent for int { fn parent(x: int) -> int { child(x) } } impl Child for int {} child(1)",
         "trait Other<Self> { fn other(x: Self) -> int; } trait Loop<Self> where Self: Other { fn cycle(x: Self) -> int { other_helper(x) } } fn other_helper<T>(x: T) -> int where T: Other { other(x) } impl Other for int { fn other(x: int) -> int { cycle(x) } } impl Loop for int {} cycle(1)",
+        // A generic function reads `Parent` from the slot of the static `Child<int>`.
+        "trait Parent<Self> { fn parent(x: Self) -> int; } trait Child<Self>: Parent<Self> { fn child(x: Self) -> int; } fn via<T>(x: T) -> int where T: Child { parent(x) } impl Parent for int { fn parent(x: int) -> int { via(x) } } impl Child for int { fn child(x: int) -> int { 0 } } via(1)",
         "trait Loop<Self> { fn a(x: Self) -> int { b(x) } fn b(x: Self) -> int; } impl Loop for int { fn b(x: int) -> int { a(x) } } a(1)",
         "trait Loop<Self> { fn a(x: Self) -> int; fn b(x: Self) -> int; } impl<T> Loop for [T] where nothing { fn a(x: [T]) -> int { b(x) } fn b(x: [T]) -> int { a(x) } } a([1])",
     ] {

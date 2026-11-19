@@ -559,6 +559,10 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                     } => self
                         .memory
                         .prepare_type(types.resolve(ty.fn_ty.ret), &env)?,
+                    // The dictionary built here reads its static parents when they are accessed.
+                    OperationKind::BuildDictionary { definition, .. } => {
+                        evidence.extend(self.static_parents(*definition))
+                    }
                     _ => (),
                 }
                 evidence.extend(
@@ -1024,20 +1028,46 @@ impl<'a, 'p> Interpreter<'a, 'p> {
         )
     }
 
+    /// The static evidence that the static parent slots of a dictionary of `definition` read:
+    /// it must be prepared wherever such a dictionary may exist.
+    fn static_parents(&self, definition: TraitDictionaryId) -> Vec<ProgramEvidenceId> {
+        self.program
+            .dictionary(definition)
+            .into_iter()
+            .flat_map(|dictionary| dictionary.parents())
+            .filter_map(|parent| match parent {
+                PhysicalParentAccessor::Static(evidence) => {
+                    self.program.static_evidence_id(evidence)
+                }
+                PhysicalParentAccessor::Capture(_) => None,
+            })
+            .collect()
+    }
+
     fn prepare_static_evidence(
         &mut self,
         mut required: FxHashSet<ProgramEvidenceId>,
     ) -> Result<(), RuntimeError> {
         let mut pending = required.iter().copied().collect::<Vec<_>>();
         while let Some(id) = pending.pop() {
-            let captures = match &self.program.static_evidence()[id.as_index()] {
-                InternedStaticEvidence::Dictionary { captures, .. }
-                | InternedStaticEvidence::Subscript { captures, .. } => captures,
+            let (captures, definition) = match &self.program.static_evidence()[id.as_index()] {
+                InternedStaticEvidence::Dictionary {
+                    captures,
+                    definition,
+                    ..
+                } => (captures, Some(*definition)),
+                InternedStaticEvidence::Subscript { captures, .. } => (captures, None),
                 InternedStaticEvidence::VariantPayloadStorage(_) => continue,
             };
-            for &capture in captures {
-                if required.insert(capture) {
-                    pending.push(capture);
+            // A static parent slot is read from the prepared static evidence when it is
+            // accessed, possibly from a dictionary that a caller passed: prepare it with its
+            // dictionary.
+            let parents = definition
+                .map(|definition| self.static_parents(definition))
+                .unwrap_or_default();
+            for dependency in captures.iter().copied().chain(parents) {
+                if required.insert(dependency) {
+                    pending.push(dependency);
                 }
             }
         }

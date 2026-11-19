@@ -134,6 +134,27 @@ fn a_dictionary_built_at_run_time_holds_its_parents() {
         TestSession::new().run(&format!("{src}\nscale(W(2.0)).0")),
         float(3.0)
     );
+    // A parent that the dictionary's types do not decide is static: `Child` for `W<T>` is built
+    // from the caller's `T: Mark`, and its parent `Parent` for `int` is the same for every `T`.
+    let src = indoc! { r#"
+        pub trait Mark<Self> { fn mark(x: Self) -> int; }
+        impl Mark for bool { fn mark(x: bool) -> int { 41 } }
+        pub trait Parent<Self> { fn parent(x: Self) -> int; }
+        impl Parent for int { fn parent(x: int) -> int { x + 1 } }
+        pub trait Child<Self |-> Item> where Item: Parent { fn item(x: Self) -> Item; }
+        pub struct W<T>(T)
+        impl<T> Child for <Self = W<T> |-> Item = int> where T: Mark {
+            fn item(x: W<T>) -> int { mark(x.0) }
+        }
+        #[inline(never)] fn via<X, J>(x: X) -> int where X: Child<Item = J> { parent(item(x)) }
+        #[inline(never)] fn middle<T>(x: T) -> int where T: Mark { via(W(x)) }
+    "# };
+    assert_val_eq!(
+        TestSession::new().run(&format!(
+            "{src}let go: (bool) -> int = middle; black_box(go)(black_box(true))"
+        )),
+        int(42)
+    );
 }
 
 #[test]
