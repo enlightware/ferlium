@@ -732,11 +732,15 @@ impl SandboxViolation {
         self.interrupted_source_failure.as_deref()
     }
 
+    /// Once the violation interrupts a source failure, the callers above belong to both.
     fn with_frame(mut self, function_id: FunctionId, location: Location) -> Self {
         self.context.backtrace.push(BacktraceFrame {
             function_id,
             call_site: location,
         });
+        self.interrupted_source_failure = self
+            .interrupted_source_failure
+            .map(|failure| Box::new(failure.with_frame(function_id, location)));
         self
     }
 }

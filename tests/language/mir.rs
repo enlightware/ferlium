@@ -370,9 +370,7 @@ fn execution_targets_use_configured_limits() {
 fn sandbox_violation_during_source_failure_cleanup_retains_both_causes() {
     let mut session = TestSession::new();
     session.allow_unsafe();
-    let module_id = session
-        .compile(
-            r#"
+    let source = r#"
                 struct Bomb(int)
 
                 impl Value for Bomb {
@@ -393,12 +391,16 @@ fn sandbox_violation_during_source_failure_cleanup_retains_both_causes() {
                     let f = || idiv(1, bomb.0);
                     f()
                 }
-            "#,
-        )
-        .module_id;
-    let limits = ReferenceInterpreterLimits::default().with_fuel_limit(Some(0));
 
-    for name in ["main", "captured"] {
+                fn outer() -> int {
+                    main()
+                }
+            "#;
+    let module_id = session.compile(source).module_id;
+    let limits = ReferenceInterpreterLimits::default().with_fuel_limit(Some(0));
+    let outer_call = source.find("    main()").unwrap() + 4;
+
+    for name in ["main", "captured", "outer"] {
         let entry = session
             .session()
             .expect_fresh_module(module_id)
@@ -413,13 +415,24 @@ fn sandbox_violation_during_source_failure_cleanup_retains_both_causes() {
                 .sandbox_violation()
                 .expect("cleanup fuel exhaustion must be a sandbox violation");
             assert_eq!(violation.kind(), SandboxViolationKind::FuelExhausted);
-            assert_eq!(
-                violation
-                    .interrupted_source_failure()
-                    .expect("the interrupted source failure must be retained")
-                    .kind(),
-                SourceFailureKind::DivisionByZero
-            );
+            let interrupted = violation
+                .interrupted_source_failure()
+                .expect("the interrupted source failure must be retained");
+            assert_eq!(interrupted.kind(), SourceFailureKind::DivisionByZero);
+            // The callers above the point where the two failures met belong to both. Only HIR
+            // gives a poisoning error its callers' frames.
+            if name == "outer" && target == ExecutionTarget::Hir {
+                for trace in [violation.backtrace(), interrupted.backtrace()] {
+                    let sites: Vec<_> = trace
+                        .iter()
+                        .map(|frame| frame.call_site().start_usize())
+                        .collect();
+                    assert!(
+                        sites.contains(&outer_call),
+                        "{sites:?} lacks the call at {outer_call}"
+                    );
+                }
+            }
         }
     }
 }
