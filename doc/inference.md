@@ -52,6 +52,29 @@ on the order of the requests (within the recursion limit). A written `Value` imp
 decides how values are copied and dropped, removes the derived `Value` for every instantiation of
 its type.
 
+## Impls not known yet
+
+As inputs select at most one impl, the input types of an impl must determine its output types,
+directly or through the outputs of its requirements. Coherence compares impls by their inputs and
+requirements only: different outputs never make two impls disjoint.
+
+Adding impls keeps positive conclusions true: an impl applies, two impls overlap. It can make
+negative ones false: no impl applies, this is the only candidate, derive since none is written,
+these impls are disjoint. So the compiler draws no negative conclusion that an impl still to come
+could change.
+
+Within a module, impls and the functions they use may come in any order. An impl not inferred yet
+is pending, unless its header writes all its types. An item whose inference drew a negative
+conclusion that a pending impl could change is undone, and retried once another item is done, so
+each item is inferred as against the complete module. If no item can progress, the compiler
+reports that they depend on each other. A requirement whose only unknowns are written generics,
+and whose answer is unused, is kept for the caller without looking at impls, so a generic impl and
+a helper it uses may call each other.
+
+Across modules, another module may implement a trait for its own type, which may later replace a
+type variable. Coherence therefore treats a requirement on a type variable as satisfiable. Once a
+module's impls are all known, each is checked against every other impl of its trait.
+
 ## Publication policy
 
 Type subtyping and effect inclusion follow the same design choice: retain directional constraints
