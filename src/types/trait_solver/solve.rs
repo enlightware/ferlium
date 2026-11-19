@@ -322,8 +322,11 @@ impl<'a> TraitSolver<'a> {
             self.selecting_by_structure = false;
             return result;
         }
-        // The quantified variables name the top-level request's variables only; nested requests
-        // made while materializing are in the implementation's variables.
+        // Only the top-level request makes the quantified variables rigid. A nested request may
+        // still name one, through a type that the implementation's head binds, but it cannot
+        // restrict it: each effect in a head is a variable of its own, and a restriction that a
+        // requirement makes through an associated effect is an obligation of the caller's
+        // inference, which relates it to the caller's own row, or a bound that it publishes.
         let quantified_effect_vars = mem::take(&mut self.quantified_request_effect_vars);
         if let Some(impl_id) = self.existing_dictionary(
             trait_id,
