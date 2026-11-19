@@ -427,7 +427,8 @@ fn pretty_print_checking_error(error: &CompilationError, src: &str, source_table
                 .eprint(&mut cache)
                 .unwrap();
         }
-        _ => eprintln!("Module emission error: {}", error.format_with(source_table)),
+        // `process_input` already printed that compilation failed.
+        _ => eprintln!("{}", error.format_with(source_table)),
     }
 }
 
