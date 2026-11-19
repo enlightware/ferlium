@@ -39,6 +39,18 @@ fn every_corpus_snippet_optimizes() {
     }
 }
 
+/// Folding a branch on a constant can leave one load of a place dominating another, so loads
+/// are shared again after it. Debug builds check that normalization leaves no work. Found by
+/// fuzzing.
+#[test]
+fn loads_are_shared_again_after_a_branch_folds() {
+    emit(
+        "folded_branch",
+        "fn main() { let f = |a| if if true {a and a} else {a} {a = a} else {a = a}; () }",
+        MirOptimization::Enabled,
+    );
+}
+
 /// The folding gate from `doc/plans/partial-evaluation.md`: constant arithmetic collapses into a
 /// single store into the return place, with no call left.
 #[test]

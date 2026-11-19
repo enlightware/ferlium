@@ -424,7 +424,8 @@ fn normalize_semantic(
             normalize::Pass {
                 id: NormalizingPass::Fold,
                 run: &fold,
-                enables: &[],
+                // A branch folded on a constant can leave a load dominating another.
+                enables: &[NormalizingPass::CommonLoads],
             },
             normalize::Pass {
                 id: NormalizingPass::CommonCalls,
