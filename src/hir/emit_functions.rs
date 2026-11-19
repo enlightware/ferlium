@@ -665,15 +665,27 @@ impl CompleteClause {
     /// answers with an implementation if they mention nothing of the contract that `written`
     /// makes, and the caller otherwise. With `implied_as_givens` false, the implied ones are all
     /// published.
+    ///
+    /// An implementation's clause may write the implementation's own head, `own_head`: its
+    /// parents are then what the implementation must have of its own, so that requirement
+    /// implies none, and its dictionary holds none for the bodies.
     fn declare(
         written: impl IntoIterator<Item = PubTypeConstraint>,
+        own_head: Option<&PubTypeConstraint>,
         implied_as_givens: bool,
         env: ModuleEnv<'_>,
         ty_inf: &mut TypeInference,
     ) -> Self {
         let written = written.into_iter().collect::<Vec<_>>();
+        let implying = written
+            .iter()
+            .filter(|requirement| {
+                !own_head.is_some_and(|head| same_trait_application(head, requirement))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         let mut implied = Vec::new();
-        for requirement in &written {
+        for requirement in &implying {
             let span = requirement.use_site();
             let mut implication = Vec::new();
             push_with_implied(requirement.clone(), env, &mut implication, ty_inf);
@@ -705,7 +717,7 @@ impl CompleteClause {
             ty_inf.add_pub_constraint(constraint.clone());
         }
         let held = if implied_as_givens {
-            held_by_dictionaries(&written, env)
+            held_by_dictionaries(&implying, env)
         } else {
             Vec::new()
         };
@@ -2641,7 +2653,25 @@ fn declare_trait_impl(
             None
         }
         WhereClauseKind::Complete => {
-            Some(CompleteClause::declare(written, true, *module_env, ty_inf))
+            // The clause may write the implementation's own head, which is given anyway.
+            let own_head = explicit_trait_impl
+                .as_ref()
+                .map(|(explicit_input_tys, ..)| {
+                    PubTypeConstraint::new_have_trait(
+                        trait_ctx.trait_id,
+                        explicit_input_tys.clone(),
+                        Vec::new(),
+                        Vec::new(),
+                        trait_ctx.span,
+                    )
+                });
+            Some(CompleteClause::declare(
+                written,
+                own_head.as_ref(),
+                true,
+                *module_env,
+                ty_inf,
+            ))
         }
     };
     let self_given = Some(
@@ -2904,6 +2934,7 @@ where
             // functions, the implied requirements are published.
             WhereClauseKind::Complete => Some(CompleteClause::declare(
                 written,
+                None,
                 matches!(mode, GroupMode::Normal),
                 ModuleEnv::new(output, others),
                 ty_inf,

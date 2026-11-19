@@ -15,7 +15,7 @@ use ferlium::{
 };
 use indoc::indoc;
 
-use crate::harness::{TestSession, bool, expected_tuple, float, int, signature, some};
+use crate::harness::{TestSession, bool, expected_tuple, float, int, signature, some, string};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -265,6 +265,28 @@ fn a_parent_whose_implementation_needs_its_child_is_built_from_it() {
     assert_val_eq!(
         TestSession::new().run(&format!("{src}\n(c(1), p(1), both(1))")),
         expected_tuple([int(1), int(11), int(12)])
+    );
+}
+
+/// The parents of an implementation are what it must have of its own: a clause that writes its
+/// own head gives none of them, so the definition is rejected, not its uses. Writing its own head
+/// stays possible when the parents come from elsewhere.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_impl_does_not_take_its_parents_from_its_own_head() {
+    let traits = indoc! { r#"
+        trait Named<Self> { fn name(x: Self) -> string; }
+        trait Show<Self>: Named<Self> { fn show(x: Self) -> string; }
+        struct L<T>(T)
+    "# };
+    let show = "impl<T> Show for L<T> where L<T>: Show { fn show(x: L<T>) -> string { name(x) } }";
+    TestSession::new()
+        .fail_compilation(&format!("{traits}{show}"))
+        .expect_undeclared_requirement("L<T>: Named", false);
+    let named = "impl<T> Named for L<T> { fn name(x: L<T>) -> string { \"n\" } }";
+    assert_val_eq!(
+        TestSession::new().run(&format!("{traits}{named}\n{show}\nshow(L(1))")),
+        string("n")
     );
 }
 
