@@ -159,7 +159,9 @@ Requirements on the structure of a type, such as a field, an element or a varian
 A written requirement implies the parents and `where` constraints of its trait, transitively, as every impl of the trait satisfies them.
 The body may use these implied requirements, which changes no caller.
 A dictionary gives the dictionaries of the requirements that its trait implies when the trait's application determines them, so the body reads these there and they never become parameters.
-An implied requirement that the trait's application does not determine, such as one whose effect each impl chooses, becomes a parameter when the body uses it.
+An implied requirement that the trait's application does not determine, such as one whose effect each impl chooses, matters only where the body uses it.
+There, the definition answers it with an implementation if it mentions nothing that the caller chooses, no type or effect of the contract, written or inferred, however nested: the implementation then decides only what is local to that use, such as that effect.
+Otherwise it becomes a parameter, which the caller supplies.
 
 In a recursive group, a function with a complete clause shows the other functions, at each round, only its written, implied and structural requirements, and reduces the rest after the last round.
 A requirement that another function would add to its contract is an error.
@@ -331,8 +333,10 @@ also when the method has a default body: an effect left unwritten there is the e
 is in a type definition.
 
 An output effect that the header of an implementation leaves unwritten is inferred from its
-methods, as an output type is. An implementation is announced before its methods are checked,
-so that the module can use it in any order, only if its header writes all its outputs.
+methods, as an output type is: it is the least effect that covers what they perform, including
+through the requirements whose methods they call. An implementation is announced before its
+methods are checked, so that the module can use it in any order, only if its header writes all
+its outputs.
 
 A recursive group of functions behaves, for effects, as its unrolling: each
 function calling copies of the others, down to functions that call nothing. Types keep one

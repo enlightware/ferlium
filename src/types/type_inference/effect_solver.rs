@@ -203,7 +203,6 @@ pub(crate) struct EffectSolver {
 #[derive(Debug, Clone)]
 struct PublicationView {
     roots: FxHashMap<EffectVar, EffType>,
-    representatives: FxHashMap<EffectVar, EffectVar>,
 }
 
 impl EffectSolver {
@@ -1257,18 +1256,6 @@ impl EffectSolver {
         self.substitute_var(var) != EffType::single_variable(var)
     }
 
-    /// The variable standing for `var` in the current view.
-    pub(super) fn effect_var_root(&mut self, var: EffectVar) -> EffectVar {
-        self.ensure_var(var);
-        let root = self.table.find(var);
-        if self.publishing {
-            if let Some(representative) = self.publication_view().representatives.get(&root) {
-                return *representative;
-            }
-        }
-        self.class(root).smallest.unwrap_or(root)
-    }
-
     fn publication_view(&mut self) -> &PublicationView {
         if self.publication.is_none() {
             self.publication = Some(self.compute_publication_view());
@@ -1390,7 +1377,6 @@ impl EffectSolver {
                 .extend(&rigid);
         }
         let mut roots = FxHashMap::default();
-        let mut representatives = FxHashMap::default();
         for root in order {
             let row = match ceilings.get(&root) {
                 Some(ceiling) => ceiling.clone(),
@@ -1398,24 +1384,14 @@ impl EffectSolver {
                     let smallest = groups.probe_value(group_keys[&root]);
                     let rigid = &group_rigid[&smallest];
                     match rigid.inner_vars().as_slice() {
-                        [] => {
-                            representatives.insert(root, smallest);
-                            least[&root].union(&EffType::single_variable(smallest))
-                        }
-                        [declared] => {
-                            representatives.insert(root, *declared);
-                            least[&root].union(rigid)
-                        }
+                        [] => least[&root].union(&EffType::single_variable(smallest)),
                         _ => least[&root].union(rigid),
                     }
                 }
             };
             roots.insert(root, row);
         }
-        PublicationView {
-            roots,
-            representatives,
-        }
+        PublicationView { roots }
     }
 
     pub(super) fn log_debug_constraints(&mut self) {

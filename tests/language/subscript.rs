@@ -6868,6 +6868,38 @@ fn a_failure_within_effects_unsafe_during_an_unwind_is_an_effect_violation() {
     }
 }
 
+/// A subscript whose `where` clause implies a requirement performs that requirement's effect, as a
+/// function does: here the `NextEffect` of the iterator that `Tagged` implies.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_subscript_performs_the_effect_of_an_implied_requirement() {
+    let error = experimental_session().fail_run(indoc! { r#"
+        struct Div { n: int }
+
+        impl Iterator for Div {
+            fn next(it: &mut Div) -> Option<int> {
+                it.n = it.n - 1;
+                Some(idiv(1, it.n))
+            }
+        }
+
+        trait Tagged<Self> where Self: Iterator<Item = int> {}
+
+        impl Tagged for Div {}
+
+        subscript pulled<I>(it: &mut I) -> Option<int> where I: Tagged {
+            ref {
+                let local = next(it);
+                yield local
+            }
+        }
+
+        let mut div = Div { n: 1 };
+        div->[pulled]
+    "# });
+    assert_eq!(error, SourceFailureKind::DivisionByZero);
+}
+
 /// As a recursive call does: the inner access instantiates `E1` with `fallible`, not with the
 /// caller's own `E1`, whether the subscript is named or held in a value.
 #[test]

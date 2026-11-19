@@ -778,6 +778,220 @@ fn trait_output_effects_can_join_multiple_effect_variables() {
     );
 }
 
+/// An adaptor whose impl leaves its output effect unwritten performs the effect of the iterator
+/// it wraps, as `NextEffect = E` with `I: Iterator<Item = int ! NextEffect = E>` would say, also
+/// when its `where` clause only implies that requirement. So does a function, recursive or not,
+/// whose `where` clause implies it. When the implied requirement is on a concrete type, the
+/// selected implementation gives its effect.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_adaptor_performs_the_effect_of_the_iterator_it_wraps() {
+    use PrimitiveEffect::*;
+
+    let src = indoc! {r#"
+        struct Div { n: int }
+
+        impl Iterator for Div {
+            fn next(it: &mut Div) -> Option<int> {
+                it.n = it.n - 1;
+                Some(idiv(1, it.n))
+            }
+        }
+
+        struct Wrap<I> { inner: I }
+
+        impl<I> Iterator for Wrap<I> where I: Iterator<Item = int> {
+            fn next(it: &mut Wrap<I>) -> Option<int> {
+                next(it.inner)
+            }
+        }
+
+        trait Tagged<Self> where Self: Iterator<Item = int> {}
+
+        impl Tagged for Div {}
+
+        struct TaggedWrap<I> { inner: I }
+
+        impl<I> Iterator for TaggedWrap<I> where I: Tagged {
+            fn next(it: &mut TaggedWrap<I>) -> Option<int> {
+                next(it.inner)
+            }
+        }
+
+        fn wrapped_div() -> Option<int> {
+            let mut wrapped = Wrap { inner: Div { n: 1 } };
+            next(wrapped)
+        }
+
+        fn wrapped_array() -> Option<int> {
+            let mut wrapped = Wrap { inner: iter([1]) };
+            next(wrapped)
+        }
+
+        fn tagged_wrapped_div() -> Option<int> {
+            let mut wrapped = TaggedWrap { inner: Div { n: 1 } };
+            next(wrapped)
+        }
+
+        struct DivWrap { inner: Div }
+
+        impl Iterator for DivWrap where Div: Tagged {
+            fn next(it: &mut DivWrap) -> Option<int> {
+                next(it.inner)
+            }
+        }
+
+        fn div_wrapped() -> Option<int> {
+            let mut wrapped = DivWrap { inner: Div { n: 1 } };
+            next(wrapped)
+        }
+
+        fn pull_div() -> Option<int> where Div: Tagged {
+            let mut div = Div { n: 1 };
+            next(div)
+        }
+
+        fn pull<I>(it: &mut I) -> Option<int> where I: Tagged {
+            next(it)
+        }
+
+        fn pull_after<I>(it: &mut I, n: int) -> Option<int> where I: Tagged {
+            if n > 0 {
+                pull_after(it, n - 1)
+            } else {
+                next(it)
+            }
+        }
+
+        fn pulled_div() -> Option<int> {
+            let mut div = Div { n: 1 };
+            pull(div)
+        }
+
+        fn pulled_after_div() -> Option<int> {
+            let mut div = Div { n: 1 };
+            pull_after(div, 2)
+        }
+    "#};
+    let mut session = TestSession::new();
+    test_mod(&mut session, src, "wrapped_div", effect(Fallible));
+    test_mod(&mut session, src, "wrapped_array", EffType::empty());
+    test_mod(&mut session, src, "tagged_wrapped_div", effect(Fallible));
+    test_mod(&mut session, src, "pulled_div", effect(Fallible));
+    test_mod(&mut session, src, "pulled_after_div", effect(Fallible));
+    test_mod(&mut session, src, "div_wrapped", effect(Fallible));
+    test_mod(&mut session, src, "pull_div", effect(Fallible));
+    // A source failure, not one escaping a call whose type says it cannot fail.
+    for call in [
+        "wrapped_div()",
+        "tagged_wrapped_div()",
+        "pulled_div()",
+        "pulled_after_div()",
+        "div_wrapped()",
+        "pull_div()",
+    ] {
+        assert_eq!(
+            session.fail_run(&format!("{src}\n{call}")),
+            SourceFailureKind::DivisionByZero,
+            "{call}"
+        );
+    }
+}
+
+/// An implied requirement that the dictionary of the written one does not hold, as `Container`
+/// does not hold its item's `Iterator`, performs the effect of the implementation of its types
+/// once they are known, whether the `where` clause writes them or inference finds them, even
+/// after the body uses it.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_implied_requirement_of_known_types_performs_the_effect_of_their_implementation() {
+    use PrimitiveEffect::*;
+
+    let src = indoc! {r#"
+        struct Div { n: int }
+
+        impl Iterator for Div {
+            fn next(it: &mut Div) -> Option<int> {
+                it.n = it.n - 1;
+                Some(idiv(1, it.n))
+            }
+        }
+
+        struct Source;
+
+        trait Container<Self |-> Item> where Item: Iterator<Item = int> {
+            fn get(value: Self) -> Item;
+        }
+
+        impl Container for <Self = Source |-> Item = Div> {
+            fn get(value: Source) -> Div {
+                Div { n: 1 }
+            }
+        }
+
+        trait Make<Self |-> Out> {
+            fn make(x: Self) -> Out;
+        }
+
+        impl Make for <Self = bool |-> Out = Div> {
+            fn make(x: bool) -> Div {
+                Div { n: 2 }
+            }
+        }
+
+        fn same<A>(a: A, b: A) -> A {
+            a
+        }
+
+        struct Wrap<T> { source: T }
+
+        impl<T> Iterator for Wrap<T> where T: Container<Item = ITEM> {
+            fn next(it: &mut Wrap<T>) -> Option<int> {
+                let mut inner: Div = get(it.source);
+                next(inner)
+            }
+        }
+
+        fn wrapped() -> Option<int> {
+            let mut wrapped = Wrap { source: Source };
+            next(wrapped)
+        }
+
+        fn pull<T>(x: T) -> Option<int> where T: Container<Item = ITEM> {
+            let mut inner: Div = get(x);
+            next(inner)
+        }
+
+        fn pull_late<T>(x: T) -> Option<int> where T: Container<Item = ITEM> {
+            let mut inner = get(x);
+            let pulled = next(inner);
+            let made = same(inner, make(true));
+            pulled
+        }
+
+        fn pulled() -> Option<int> {
+            pull(Source)
+        }
+
+        fn pulled_late() -> Option<int> {
+            pull_late(Source)
+        }
+    "#};
+    for item in ["Div", "_"] {
+        let src = src.replace("ITEM", item);
+        let mut session = TestSession::new();
+        for f in ["wrapped", "pulled", "pulled_late"] {
+            test_mod(&mut session, &src, f, effect(Fallible));
+            // A source failure, not one escaping a call whose type says it cannot fail.
+            assert_eq!(
+                session.fail_run(&format!("{src}\n{f}()")),
+                SourceFailureKind::DivisionByZero,
+                "{f} with `{item}`"
+            );
+        }
+    }
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn trait_impl_effect_must_not_have_more_than_def_effects() {

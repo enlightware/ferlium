@@ -152,6 +152,14 @@ pub(crate) struct GroupReference {
 pub struct TypeInference {
     /// Evidence supplied by the enclosing checked declaration, not obligations to select an impl.
     pub(super) given_constraints: Vec<PubTypeConstraint>,
+    /// Requirements known to hold, for which the declaration supplies no evidence, such as one
+    /// that a written requirement implies but whose dictionary does not hold: each gives its
+    /// outputs to an application equal to it, which the definition answers if it mentions
+    /// nothing of the contract, and the caller otherwise.
+    pub(super) derived_constraints: Vec<PubTypeConstraint>,
+    /// The written requirements that the derived constraints follow from. With the written
+    /// generics, their types are the contract, which the caller chooses.
+    pub(super) contract_constraints: Vec<PubTypeConstraint>,
     /// The type variables standing for generic parameters written by the enclosing declaration.
     pub(super) declared_generics: Vec<Type>,
     /// For each function of a recursive group whose bodies are inferred together against their
@@ -676,6 +684,17 @@ impl TypeInference {
         let id = GivenId(self.given_constraints.len());
         self.given_constraints.push(constraint);
         id
+    }
+
+    /// Adds the requirements that `contract`, written requirements, imply but give no evidence
+    /// for: see [`TypeInference::derived_constraints`].
+    pub(crate) fn add_derived_constraints(
+        &mut self,
+        contract: &[PubTypeConstraint],
+        derived: impl IntoIterator<Item = PubTypeConstraint>,
+    ) {
+        self.contract_constraints.extend(contract.iter().cloned());
+        self.derived_constraints.extend(derived);
     }
 
     pub(crate) fn constraint_scope_start(&self) -> usize {

@@ -656,17 +656,16 @@ struct CompleteClause {
     /// The implied requirements that the dictionary of a written one holds, in its parent slots
     /// or in theirs: the bodies read their evidence from it, so they are never published.
     held: Vec<PubTypeConstraint>,
-    /// The other implied requirements that the bodies may use, each with the given that supplies
-    /// it. One that a body uses is published with the written ones; the others are not.
-    implied: Vec<(GivenId, PubTypeConstraint)>,
 }
 
 impl CompleteClause {
     /// Adds the requirements of a complete clause that writes `written` to `ty_inf`: those written,
-    /// which the item publishes, and the ones that they imply, which the bodies may use. The
-    /// evidence of an implied one that the dictionary of a written one holds is read from it;
-    /// another is published if a body uses it. With `implied_as_givens` false, the implied ones
-    /// are all published.
+    /// which the item publishes, and the ones that they imply, which hold. The evidence of an
+    /// implied one that the dictionary of a written one holds is read from it. Another one only
+    /// gives its outputs to the applications of the bodies equal to it, which the definition
+    /// answers with an implementation if they mention nothing of the contract that `written`
+    /// makes, and the caller otherwise. With `implied_as_givens` false, the implied ones are all
+    /// published.
     fn declare(
         written: impl IntoIterator<Item = PubTypeConstraint>,
         implied_as_givens: bool,
@@ -711,48 +710,25 @@ impl CompleteClause {
         } else {
             Vec::new()
         };
-        let mut leaves = written;
-        leaves.extend(implied.iter().cloned());
-        let implied = if implied_as_givens {
-            implied
-                .into_iter()
-                .filter_map(|constraint| {
-                    let in_slot = held
-                        .iter()
-                        .any(|held| same_trait_application(held, &constraint));
-                    let given = ty_inf.add_given_constraint(constraint.clone());
-                    (!in_slot).then_some((given, constraint))
-                })
-                .collect()
-        } else {
-            for constraint in implied {
+        let mut derived = Vec::new();
+        for constraint in implied.iter().cloned() {
+            if !implied_as_givens {
                 ty_inf.add_pub_constraint(constraint);
+            } else if held
+                .iter()
+                .any(|held| same_trait_application(held, &constraint))
+            {
+                ty_inf.add_given_constraint(constraint);
+            } else {
+                // The item has no evidence for it: the definition answers it if it mentions
+                // nothing that the caller chooses, else the caller gives it.
+                derived.push(constraint);
             }
-            Vec::new()
-        };
-        Self {
-            leaves,
-            held,
-            implied,
         }
-    }
-
-    /// The implied requirements that `function` uses and that no dictionary of a written one
-    /// holds, as they are now.
-    fn used_implied(
-        &self,
-        function: LocalFunctionId,
-        ty_inf: &mut UnifiedTypeInference,
-    ) -> Vec<PubTypeConstraint> {
-        let used = self
-            .implied
-            .iter()
-            .filter(|(given, _)| ty_inf.given_used_by(function, *given))
-            .map(|(_, constraint)| constraint)
-            .collect::<Vec<_>>();
-        used.into_iter()
-            .map(|constraint| ty_inf.substitute_in_constraint(constraint))
-            .collect()
+        ty_inf.add_derived_constraints(&written, derived);
+        let mut leaves = written;
+        leaves.extend(implied);
+        Self { leaves, held }
     }
 
     /// `requirements` without those that the dictionaries of the written ones hold, as reduction
@@ -3736,19 +3712,23 @@ where
             ModuleEnv::new(output, others),
         )?;
 
+        // Implementation methods are quantified over the header only, so their own effect
+        // variables, such as that of a callback parameter written without effects, are fixed.
+        // An output effect is not observable as such: it is the least solution of what the
+        // header writes for it and what the methods perform, unless a requirement determines it.
         let mut head_effect_vars = trait_output
             .input_tys
             .iter()
             .chain(&trait_output.output_tys)
             .flat_map(|ty| ty_inf.substitute_in_type(*ty).inner_effect_vars())
             .collect::<FxHashSet<_>>();
-        for eff in &trait_output.output_effs {
-            ty_inf
-                .substitute_in_effect_type(eff)
-                .fill_with_inner_effect_vars(&mut head_effect_vars);
+        if let Some((_, _, written_output_effs, _)) = &explicit_trait_impl {
+            for eff in written_output_effs {
+                ty_inf
+                    .substitute_in_effect_type(eff)
+                    .fill_with_inner_effect_vars(&mut head_effect_vars);
+            }
         }
-        // Implementation methods are quantified over the head only, so their own effect
-        // variables, such as that of a callback parameter written without effects, are fixed.
         minimize_body_effects(output, &[], head_effect_vars, &mut ty_inf)?;
         ty_inf.finalize_effects()?;
 
@@ -3797,18 +3777,7 @@ where
                     .collect::<Vec<_>>()
             };
             ty_inf.normalize_remaining_constraints();
-            let mut constraints = ty_inf.remaining_constraints().to_vec();
-            // The implied requirements that a method uses are requirements of the impl, but for
-            // those that the dictionaries of the written ones hold.
-            if let Some(complete) = &complete_clause {
-                for id in &local_fns {
-                    for constraint in complete.used_implied(*id, &mut ty_inf) {
-                        if !constraints.contains(&constraint) {
-                            constraints.push(constraint);
-                        }
-                    }
-                }
-            }
+            let constraints = ty_inf.remaining_constraints().to_vec();
             let mut solver = trait_solver_from_module!(output, others);
             let constraints = match solver.reduce_public_requirements(
                 constraints,
@@ -3898,82 +3867,20 @@ where
         &mut ty_inf,
     );
     check_declared_effects_not_combined(output, &associated_lambdas, &local_fns, &mut ty_inf)?;
-    // The impl constraints are not yet part of the method schemes, but they determine the
-    // effects of the methods' calls to their evidence, so these effects must be retained.
-    let impl_constraint_effect_vars = {
-        ty_inf.normalize_remaining_constraints();
-        let mut head_tys = ty_inf.substitute_in_types(&trait_output.input_tys);
-        head_tys.extend(ty_inf.substitute_in_types(&trait_output.output_tys));
-        let head_boundary = ConstraintBoundary::from_seed_ty_vars(collect_ty_vars(&head_tys));
-        let mut vars = FxHashSet::default();
-        for constraint in head_boundary.accessible_constraints(ty_inf.remaining_constraints()) {
-            constraint.fill_with_inner_effect_vars(&mut vars);
-        }
-        vars
-    };
-    default_output_effects_in_functions(
-        output,
-        &mut pending_functions,
-        &associated_lambdas,
-        &local_fns,
-        &impl_constraint_effect_vars,
-    );
 
     // Resolve input and output types and output effects.
     ty_inf.substitute_in_types_in_place(&mut trait_output.input_tys);
     ty_inf.substitute_in_types_in_place(&mut trait_output.output_tys);
-    let output_eff_slot_roots = trait_output
-        .output_effs
-        .iter()
-        .map(|eff| {
-            eff.to_single_variable()
-                .map(|var| ty_inf.effect_var_root(var))
-        })
-        .collect::<Vec<_>>();
+    // What the methods perform, as minimization left it, which includes what the header writes.
     ty_inf.substitute_in_effect_types_in_place(&mut trait_output.output_effs);
-    match explicit_trait_impl
-        .as_ref()
-        .map(|(_, _, explicit_output_effs, _)| explicit_output_effs.as_slice())
-    {
-        Some(explicit_output_effs) if !explicit_output_effs.is_empty() => {
-            let explicit_output_effs = ty_inf.substitute_in_effect_types(explicit_output_effs);
-            trait_output.output_effs = trait_output
-                .output_effs
-                .iter()
-                .zip(explicit_output_effs)
-                .zip(output_eff_slot_roots)
-                .map(|((slot_eff, mut explicit_eff), slot_root)| {
-                    // The explicit associated output-effect expression is
-                    // the impl head. Trait output slots are inference
-                    // placeholders used while checking method bodies; keep
-                    // real inferred lower bounds, but do not leak the slot
-                    // placeholder itself into the public impl output.
-                    for effect in slot_eff.iter() {
-                        if matches!(effect, Effect::Variable(var) if Some(var) == slot_root) {
-                            continue;
-                        }
-                        explicit_eff.insert(effect);
-                    }
-                    explicit_eff
-                })
-                .collect();
-        }
-        _ => {
-            // Without explicit output-effect bindings, any output effect
-            // slot left unconstrained by the methods resolves to empty.
-            for eff in &mut trait_output.output_effs {
-                *eff = EffType::multiple_primitive(&eff.inner_non_vars());
-            }
-        }
-    }
 
     trait_output.evidence_plan.substitute(&mut ty_inf);
     // Take final substituted constraints.
     ty_inf.normalize_remaining_constraints();
     let all_constraints = ty_inf.take_constraints();
 
-    // Validate that each method's effects are a subset of the trait definition's effects,
-    // and override them with the trait's effects.
+    // Check that each method's effects are a subset of the trait definition's effects, so that
+    // the impl's output effects lose none of them, and override them with the trait's effects.
     // This ensures ABI consistency: the calling convention is determined by the trait definition.
     let trait_id = trait_ctx.trait_id;
     let trait_def = &trait_ctx.trait_def;
@@ -3987,6 +3894,21 @@ where
             .ty
             .effects
             .instantiate(&trait_effect_subst);
+        let performed = ty_inf.substitute_in_effect_type(&descr.definition.ty_scheme.ty.effects);
+        if !performed
+            .iter()
+            .all(|effect| trait_effects.contains(effect))
+        {
+            return Err(internal_compilation_error!(Internal {
+                error: format!(
+                    "method {} of an implementation of trait {} performs effects {performed:?} \
+                     that its trait's {trait_effects:?} do not include",
+                    trait_def.method(i).0,
+                    trait_def.name
+                ),
+                span: trait_ctx.span,
+            }));
+        }
         // Override the function's effects with the trait's effects for ABI consistency.
         descr.definition.ty_scheme.ty.effects = trait_effects.clone();
     }
@@ -4033,6 +3955,10 @@ where
     trait_output.constraints = all_constraints
         .iter()
         .filter_map(|constraint| {
+            // A requirement that the definition leaves to its caller is published, not solved here.
+            if ty_inf.is_callers_application(constraint) {
+                return Some(Ok(constraint.instantiate_simple(&subst)));
+            }
             constraint
                 .instantiate_and_drop_if_solved(&mut subst, &mut solver, solver_arena)
                 .transpose()
@@ -4637,11 +4563,14 @@ fn determine_function_types(
         ty_inf.normalize_remaining_constraints();
         let sig_boundary = ConstraintBoundary::from_seed_ty_vars(sig_ty_vars.iter().copied());
         let module_env = ModuleEnv::new(output, others);
+        let remaining = ty_inf.remaining_constraints().to_vec();
         let remaining_orphans: Vec<_> = sig_boundary
-            .inaccessible_constraints(ty_inf.remaining_constraints())
+            .inaccessible_constraints(&remaining)
             .into_iter()
             .filter(|c| !c.is_type_has_variant())
             .filter(|c| !is_compiler_provided_value_constraint(c, module_env))
+            // One left to the caller is related to the signature by the contract.
+            .filter(|c| !ty_inf.is_callers_application(c))
             .collect();
         if !remaining_orphans.is_empty() {
             if let Some((ty_var, ty, span)) =
@@ -4870,6 +4799,13 @@ where
         })
         .collect::<Vec<_>>();
 
+    // A requirement that the definition leaves to its caller is published, not solved here.
+    let callers_applications = all_constraints
+        .iter()
+        .filter(|constraint| ty_inf.is_callers_application(constraint))
+        .map(constraint_ptr)
+        .collect::<FxHashSet<_>>();
+
     // The type variables of the signatures of the group.
     let group_signature_vars = local_fns
         .iter()
@@ -4920,11 +4856,23 @@ where
             sig_ty_vars.extend(explicit_ty_vars.iter().copied());
             sig_ty_vars = sig_ty_vars.into_iter().unique().collect();
             let sig_boundary = ConstraintBoundary::from_seed_ty_vars(sig_ty_vars.iter().copied());
-            let related_constraints = sig_boundary
+            let mut related_constraints = sig_boundary
                 .accessible_constraints(&all_constraints)
                 .into_iter()
                 .filter(|constraint| !of_others.contains(&constraint_ptr(constraint)))
                 .collect::<Vec<_>>();
+            // A requirement left to the caller is of the function even when only an effect of
+            // the contract relates it to the signature.
+            for constraint in &all_constraints {
+                let ptr = constraint_ptr(constraint);
+                if callers_applications.contains(&ptr)
+                    && !related_constraints
+                        .iter()
+                        .any(|related| constraint_ptr(related) == ptr)
+                {
+                    related_constraints.push(constraint);
+                }
+            }
             let related_ptrs: FxHashSet<PubTypeConstraintPtr> = related_constraints
                 .iter()
                 .map(|c| constraint_ptr(c))
@@ -4989,6 +4937,9 @@ where
                 .iter()
                 .filter(|c| related_ptrs.contains(&constraint_ptr(c)))
                 .filter_map(|constraint| {
+                    if callers_applications.contains(&constraint_ptr(constraint)) {
+                        return Some(Ok(constraint.instantiate_simple(&drop_subst)));
+                    }
                     constraint
                         .instantiate_and_drop_if_solved(&mut drop_subst, &mut solver, solver_arena)
                         .transpose()
@@ -5066,13 +5017,7 @@ where
         }
     }
 
-    default_output_effects_in_functions(
-        output,
-        pending_functions,
-        associated_lambdas,
-        local_fns,
-        &FxHashSet::default(),
-    );
+    default_output_effects_in_functions(output, pending_functions, associated_lambdas, local_fns);
 
     // Safety check: make sure that there are no unused constraints.
     let module_env = ModuleEnv::new(output, others);
@@ -5169,16 +5114,7 @@ where
             (None, None) if exports_group => ReductionLeaves::Public,
             (None, None) => continue,
         };
-        let mut scheme = output.functions[id.as_index()].definition.ty_scheme.clone();
-        // The implied requirements that the function uses are requirements of the function, but
-        // for those that the dictionaries of the written ones hold.
-        if let Some(complete) = complete {
-            for constraint in complete.used_implied(*id, ty_inf) {
-                if !scheme.constraints.contains(&constraint) {
-                    scheme.constraints.push(constraint);
-                }
-            }
-        }
+        let scheme = output.functions[id.as_index()].definition.ty_scheme.clone();
         let rigid =
             scheme
                 .ty

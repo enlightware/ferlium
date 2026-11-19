@@ -6,7 +6,9 @@
 
 use test_log::test;
 
-use ferlium::compiler::error::{CompilationErrorImpl, InvalidTraitConstraintKind};
+use ferlium::compiler::error::{
+    CompilationErrorImpl, InvalidTraitConstraintKind, SourceFailureKind,
+};
 use indoc::indoc;
 
 use crate::harness::{TestSession, bool, expected_tuple, float, int, signature, string};
@@ -505,6 +507,244 @@ fn a_written_ground_requirement_is_checked_and_not_published() {
     TestSession::new()
         .fail_compilation("fn g() -> int where string: Num { 1 }")
         .expect_trait_impl_not_found("Num", &["Self = string"]);
+}
+
+/// An implied requirement that the body does not use needs no implementation at the definition,
+/// whether the dictionary of the written requirement holds it, as `HasItem` holds its item's
+/// `Marker`, or not, as `HasIter` does not hold its iterator's `Iterator`, and whether the
+/// clause writes its type or inference finds it.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_unused_implied_requirement_needs_no_implementation() {
+    let src = indoc! { r#"
+        pub trait Marker<Self> { fn mark(x: Self) -> int; }
+        pub trait HasItem<Self |-> Item> where Item: Marker { fn item(x: Self) -> Item; }
+        pub fn item_of<T>(x: T) -> int where T: HasItem<Item = ITEM> {
+            item(x)
+        }
+        pub trait HasIter<Self |-> It> where It: Iterator<Item = int> { fn it(x: Self) -> It; }
+        pub fn ignore<T>(x: T) -> int where T: HasIter<It = bool> {
+            0
+        }
+    "# };
+    for item in ["int", "_"] {
+        let src = src.replace("ITEM", item);
+        assert_eq!(
+            signature(&mut TestSession::new(), &src, "item_of"),
+            "fn item_of<T>(x: T) -> int where T: HasItem <Item = int>"
+        );
+        assert_eq!(
+            signature(&mut TestSession::new(), &src, "ignore"),
+            "fn ignore<T>(x: T) -> int where T: HasIter <It = bool>"
+        );
+    }
+}
+
+/// A parent that the dictionary of a written requirement holds keeps the outputs that the clause
+/// gives it, even where an implementation for its types is visible: that implementation does not
+/// specialize a written generic, whether the body uses the parent or not.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_held_parent_keeps_the_written_generics() {
+    let has = indoc! { r#"
+        pub trait Extract<Self |-> Out> { fn extract(x: Self) -> Out; }
+        pub trait Has<Self |-> Item, Out> where Item: Extract<Out = Out> {
+            fn value(x: Self) -> (Item, Out);
+        }
+        impl Extract for <Self = int |-> Out = bool> { fn extract(x: int) -> bool { true } }
+        struct S;
+        impl Has for <Self = S |-> Item = int, Out = bool> {
+            fn value(x: S) -> (int, bool) { (0, false) }
+        }
+    "# };
+    let keep = indoc! { r#"
+        pub fn keep<T, U>(x: T, y: U) -> U where T: Has<Item = int, Out = U> {
+            y
+        }
+    "# };
+    let pick = indoc! { r#"
+        pub fn pick<T, U>(x: T) -> U where T: Has<Item = int, Out = U> {
+            let (i, o) = value(x);
+            extract(i)
+        }
+    "# };
+    assert_eq!(
+        signature(&mut TestSession::new(), &format!("{has}{keep}"), "keep"),
+        "fn keep<T, U>(x: T, y: U) -> U where T: Has <Item = int, Out = U>, U: Value"
+    );
+    assert_val_eq!(
+        TestSession::new().run(&format!("{has}{keep}keep(S, true)")),
+        bool(true)
+    );
+    // `pick` is only typed: elaboration still serves its `extract` with the implementation for
+    // `int` rather than with the dictionary's slot that inference used.
+    assert_eq!(
+        signature(&mut TestSession::new(), &format!("{has}{pick}"), "pick"),
+        "fn pick<T, U>(x: T) -> U where T: Has <Item = int, Out = U>, U: Value"
+    );
+}
+
+/// A call through an implied requirement that no dictionary holds is the caller's to supply
+/// when it mentions what the caller chooses; the definition answers it only when it does not.
+/// Here `Has` leaves `Extract`'s effect to its implementations, and the implementation for
+/// `W<int>` gives `bool`: a contract whose `Out` is `bool` lets the definition use it, one whose
+/// `Out` is the caller's `U` does not, whether the clause writes it or inference finds it, and
+/// whether the implementation gives `bool` itself or through what it requires.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_implied_requirement_that_mentions_the_contract_is_the_callers() {
+    let has = indoc! { r#"
+        pub struct W<T>(T)
+        pub trait Extract<Self |-> Out ! E> { fn extract(x: Self) -> Out ! E; }
+        pub trait Has<Self |-> Item, Out> where Item: Extract<Out = Out> {
+            fn value(x: Self) -> (Item, Out);
+        }
+        impl<V> Extract for <Self = W<V> |-> Out = bool ! E = ()> {
+            fn extract(x: W<V>) -> bool { true }
+        }
+        struct S;
+        impl Has for <Self = S |-> Item = W<int>, Out = bool> {
+            fn value(x: S) -> (W<int>, bool) { (W(1), false) }
+        }
+    "# };
+    let callers = "fn pick<T, U ! e₀>(x: T) -> U ! e₀ where T: Has <Item = W<int>, Out = U>, \
+                   U: Value, W<int>: Extract <Out = U ! E = e₀>";
+    for out in ["U", "_"] {
+        let src = format!(
+            "{has}pub fn pick<T, U>(x: T) -> U where T: Has<Item = W<int>, Out = {out}> {{
+                let (i, o) = value(x);
+                extract(i)
+            }}\n"
+        );
+        assert_eq!(signature(&mut TestSession::new(), &src, "pick"), callers);
+        assert_val_eq!(TestSession::new().run(&format!("{src}pick(S)")), bool(true));
+    }
+    let src = format!(
+        "{has}pub fn pick<T>(x: T) -> bool where T: Has<Item = W<int>, Out = _> {{
+            let (i, o) = value(x);
+            extract(i)
+        }}\n"
+    );
+    assert_eq!(
+        signature(&mut TestSession::new(), &src, "pick"),
+        "fn pick<T>(x: T) -> bool where T: Has <Item = W<int>, Out = bool>"
+    );
+    assert_val_eq!(TestSession::new().run(&format!("{src}pick(S)")), bool(true));
+    // An implementation that gets `bool` from what it requires is no different.
+    let through_source = indoc! { r#"
+        pub struct W<T>(T)
+        pub trait Extract<Self |-> Out ! E> { fn extract(x: Self) -> Out ! E; }
+        pub trait Has<Self |-> Item, Out> where Item: Extract<Out = Out> {
+            fn value(x: Self) -> (Item, Out);
+        }
+        pub trait Source<Self |-> Out> { fn source(x: Self) -> Out; }
+        impl Source for <Self = int |-> Out = bool> { fn source(x: int) -> bool { true } }
+        impl<V, U> Extract for <Self = W<V> |-> Out = U ! E = ()> where V: Source<Out = U> {
+            fn extract(x: W<V>) -> U { source(x.0) }
+        }
+        struct S;
+        impl Has for <Self = S |-> Item = W<int>, Out = bool> {
+            fn value(x: S) -> (W<int>, bool) { (W(1), false) }
+        }
+        pub fn pick<T, U>(x: T) -> U where T: Has<Item = W<int>, Out = U> {
+            let (i, o) = value(x);
+            extract(i)
+        }
+    "# };
+    assert_eq!(
+        signature(&mut TestSession::new(), through_source, "pick"),
+        callers
+    );
+    assert_val_eq!(
+        TestSession::new().run(&format!("{through_source}pick(S)")),
+        bool(true)
+    );
+    // An implementation leaves it to its users likewise.
+    assert_val_eq!(
+        TestSession::new().run(&format!(
+            "{has}pub trait Get<Self |-> Out> {{ fn get(x: Self) -> Out; }}
+            pub struct P<T>(T)
+            impl<T, U> Get for <Self = P<T> |-> Out = U> where T: Has<Item = W<int>, Out = U> {{
+                fn get(x: P<T>) -> U {{
+                    let (i, o) = value(x.0);
+                    extract(i)
+                }}
+            }}
+            get(P(S))"
+        )),
+        bool(true)
+    );
+}
+
+/// An effect that the contract gives, nested in the output type of an implied requirement that
+/// no dictionary holds, makes the call the caller's too: the implementation for `int` would fix
+/// it to `fallible`. The function performs it, whether its clause writes it or not.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_effect_of_the_contract_in_an_implied_requirement_is_the_callers() {
+    let has = indoc! { r#"
+        pub trait Extract<Self |-> Out ! E> {
+            fn extract(x: Self) -> Out ! E;
+        }
+        pub trait Has<Self |-> Item ! H> where Item: Extract<Out = (() -> int ! H)> {
+            fn value(x: Self) -> Item;
+            fn perform(x: Self) -> Item ! H;
+        }
+        impl Extract for <Self = int |-> Out = (() -> int ! fallible) ! E = fallible> {
+            fn extract(x: int) -> (() -> int ! fallible) { let d = idiv(12, x); || idiv(d, 2) }
+        }
+        struct S(int)
+        impl Has for <Self = S |-> Item = int ! H = fallible> {
+            fn value(x: S) -> int { x.0 }
+            fn perform(x: S) -> int { 1 }
+        }
+    "# };
+    for (generics, h, signature_of_pick) in [
+        (
+            "T ! H",
+            " ! H = H",
+            "fn pick<T ! H>(x: T) -> int ! H where T: Has <Item = int ! H = H>, \
+             int: Extract <Out = () -> int ! H ! E = H>",
+        ),
+        (
+            "T",
+            "",
+            "fn pick<T ! e₀>(x: T) -> int ! e₀ where T: Has <Item = int ! H = e₀>, \
+             int: Extract <Out = () -> int ! e₀ ! E = e₀>",
+        ),
+    ] {
+        let src = format!(
+            "{has}pub fn pick<{generics}>(x: T) -> int where T: Has<Item = int{h}> {{
+                let f = extract(value(x));
+                f()
+            }}\n"
+        );
+        assert_eq!(
+            signature(&mut TestSession::new(), &src, "pick"),
+            signature_of_pick
+        );
+        assert_val_eq!(TestSession::new().run(&format!("{src}pick(S(3))")), int(2));
+        // A source failure, not one escaping a call whose type says it cannot fail.
+        assert_eq!(
+            TestSession::new().fail_run(&format!("{src}pick(S(0))")),
+            SourceFailureKind::DivisionByZero
+        );
+    }
+    // The effect of `Extract` itself is the caller's implementation's too, even where nothing
+    // performs it: it is not taken to be none.
+    let src = format!(
+        "{has}pub fn pick<T ! H>(x: T) -> int where T: Has<Item = int ! H = H> {{
+            let n = value(x);
+            let g = || extract(n);
+            n
+        }}\n"
+    );
+    assert_eq!(
+        signature(&mut TestSession::new(), &src, "pick"),
+        "fn pick<T ! H, e₁>(x: T) -> int where T: Has <Item = int ! H = H>, \
+         int: Extract <Out = () -> int ! H ! E = e₁>"
+    );
+    assert_val_eq!(TestSession::new().run(&format!("{src}pick(S(3))")), int(3));
 }
 
 #[test]

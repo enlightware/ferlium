@@ -1763,6 +1763,44 @@ fn generic_trait_impl_for_user_defined_zip_iterator() {
     assert_val_eq!(session.run(&run_zip_iterator_src), int(25));
 }
 
+/// An output effect that the header leaves unwritten is what the methods perform: their own
+/// effects and those of the requirements they use, without a variable of its own.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_unwritten_output_effect_is_what_the_methods_perform() {
+    let mut session = TestSession::new();
+    let rendered = format_compiled_module(
+        &mut session,
+        indoc! { r#"
+            struct Countdown<T> { n: int, tag: T }
+
+            impl<T> Iterator for Countdown<T> {
+                fn next(it: &mut Countdown<T>) -> Option<int> {
+                    it.n = it.n - 1;
+                    Some(idiv(1, it.n))
+                }
+            }
+
+            struct Wrap<I> { inner: I }
+
+            impl<I> Iterator for Wrap<I> where I: Iterator<Item = int> {
+                fn next(it: &mut Wrap<I>) -> Option<int> {
+                    next(it.inner)
+                }
+            }
+        "# },
+    );
+    for header in [
+        "impl<A> Iterator for <Self = Countdown<A> |-> Item = int ! NextEffect = fallible>",
+        "impl<A> Iterator for <Self = Wrap<A> |-> Item = int ! NextEffect = e₀> where A: Iterator <Item = int ! NextEffect = e₀>",
+    ] {
+        assert!(
+            rendered.contains(header),
+            "expected {header}, got:\n{rendered}"
+        );
+    }
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn compiled_impl_headers_use_source_syntax() {
@@ -1835,13 +1873,13 @@ fn compiled_impl_headers_use_source_syntax() {
     );
     assert!(
         rendered.contains(
-            "impl<A, B, C> Iterator for <Self = MapIterator<A, B, C> |-> Item = C ! NextEffect = ()>"
+            "impl<A, B, C> Iterator for <Self = MapIterator<A, B, C> |-> Item = C ! NextEffect = e₀>"
         ),
         "expected explicit output impl header, got:\n{rendered}"
     );
     assert!(
         rendered.contains(
-            "impl<A, B, C> Iterator for <Self = TransformIter<A, B, C> |-> Item = C ! NextEffect = ()>"
+            "impl<A, B, C> Iterator for <Self = TransformIter<A, B, C> |-> Item = C ! NextEffect = e₀>"
         ) && rendered.contains("struct PureIterHolder<I, T> where I: Iterator <Item = T ! NextEffect = ()>"),
         "expected impl where clause in module formatting, got:\n{rendered}"
     );

@@ -533,22 +533,17 @@ pub(super) fn refresh_debug_info_for_functions(
 
 /// Default to pure the effect variables that occur only in effects the function performs and
 /// that nothing outside the function determines: their least solution is all callers can see.
-///
-/// `determined_effect_vars` are fixed by context the schemes do not carry yet, such as the
-/// constraints of an enclosing implementation; they are retained like those of the scheme's own
-/// constraints.
 pub(super) fn default_output_effects_in_functions(
     output: &mut Module,
     pending_functions: &mut PendingModuleFunctions,
     associated_lambdas: &FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
     function_ids: &[LocalFunctionId],
-    determined_effect_vars: &FxHashSet<EffectVar>,
 ) {
     for &id in function_ids {
         let effect_subst: FxHashMap<_, _> = {
             let descr = &output.functions[id.as_index()];
             // The published constraints are observable by callers, like the type.
-            let mut retained_effect_vars = determined_effect_vars.clone();
+            let mut retained_effect_vars = FxHashSet::default();
             for constraint in &descr.definition.ty_scheme.constraints {
                 constraint.fill_with_inner_effect_vars(&mut retained_effect_vars);
             }

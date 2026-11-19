@@ -67,7 +67,11 @@ pub enum SubOrSameType {
 
 #[derive(Debug, PartialEq, Eq)]
 enum GivenMatch {
+    /// A given answers the application.
     Resolved,
+    /// Only requirements known without evidence are equal to the application: they gave it
+    /// their outputs, and it is answered as if they were absent.
+    Improved,
     Deferred,
     Absent,
 }
@@ -98,6 +102,10 @@ pub struct UnifiedTypeInference {
     pub(super) publication_inputs: Vec<Type>,
     ty_coverage_constraints: Vec<(Location, Type, Vec<LiteralValue>)>,
     pub(super) given_constraints: Vec<PubTypeConstraint>,
+    /// See [`TypeInference::derived_constraints`].
+    pub(super) derived_constraints: Vec<PubTypeConstraint>,
+    /// See [`TypeInference::contract_constraints`].
+    contract_constraints: Vec<PubTypeConstraint>,
     pub(super) declared_generics: Vec<Type>,
     pub(super) evidence_uses: EvidenceUses,
     pub(super) ty_unification_table: RevisionedTable<TyVarKey>,
@@ -327,21 +335,24 @@ impl UnifiedTypeInference {
         }
     }
 
-    /// Reconcile the supplied evidence after signature equalities are known and
-    /// before solving body obligations. Preserve every slot for stable GivenIds;
-    /// unlike published schemes, this list must not be deduplicated.
+    /// Reconcile the supplied evidence, and the requirements known without it, after
+    /// signature equalities are known and before solving body obligations. Preserve every
+    /// slot for stable GivenIds; unlike published schemes, these lists must not be
+    /// deduplicated.
     fn normalize_given_outputs(
         &mut self,
         polarities: &dyn Fn(TraitId) -> Vec<EffectPolarity>,
     ) -> Result<(), InternalCompilationError> {
         let mut givens = mem::take(&mut self.given_constraints);
+        let mut derived = mem::take(&mut self.derived_constraints);
         let result = (|| {
-            if givens.len() > 1 {
+            if givens.len() + derived.len() > 1 {
                 loop {
-                    let before = givens.clone();
-                    self.aggregate_constraints_for_pass(givens.iter(), polarities)?;
+                    let before = (givens.clone(), derived.clone());
+                    self.aggregate_constraints_for_pass(givens.iter().chain(&derived), polarities)?;
                     self.substitute_in_constraints_in_place(&mut givens);
-                    if givens == before {
+                    self.substitute_in_constraints_in_place(&mut derived);
+                    if (&givens, &derived) == (&before.0, &before.1) {
                         break;
                     }
                 }
@@ -349,6 +360,7 @@ impl UnifiedTypeInference {
             Ok(())
         })();
         self.given_constraints = givens;
+        self.derived_constraints = derived;
         result
     }
 
@@ -492,6 +504,8 @@ impl UnifiedTypeInference {
     ) -> Result<Self, InternalCompilationError> {
         let TypeInference {
             given_constraints,
+            derived_constraints,
+            contract_constraints,
             declared_generics,
             evidence_uses,
             ty_unification_table,
@@ -514,6 +528,8 @@ impl UnifiedTypeInference {
             publication_inputs: Vec::new(),
             ty_coverage_constraints,
             given_constraints,
+            derived_constraints,
+            contract_constraints,
             declared_generics,
             evidence_uses,
             ty_unification_table: ty_unification_table.into(),
@@ -750,10 +766,6 @@ impl UnifiedTypeInference {
             } => self.unify_sub_type(current, current_span, expected, expected_span),
             Pub(_) => unreachable!("public constraints are solved later"),
         }
-    }
-
-    pub fn effect_var_root(&mut self, var: EffectVar) -> EffectVar {
-        self.effects.effect_var_root(var)
     }
 
     pub fn unify_sub_type(
@@ -1447,10 +1459,17 @@ impl UnifiedTypeInference {
     ) -> Result<GivenMatch, InternalCompilationError> {
         // Equal trait/input applications denote the same evidence. Reconcile every
         // matching given's outputs, rather than letting list order select a contract.
+        // A requirement known without evidence gives its outputs alike, but answers nothing.
         let mut matches = Vec::new();
         let mut potential_inputs = Vec::new();
-        for index in 0..self.given_constraints.len() {
-            let given = self.substitute_in_constraint(&self.given_constraints[index].clone());
+        let given_count = self.given_constraints.len();
+        for index in 0..given_count + self.derived_constraints.len() {
+            let (id, given) = if index < given_count {
+                (Some(GivenId(index)), &self.given_constraints[index])
+            } else {
+                (None, &self.derived_constraints[index - given_count])
+            };
+            let given = self.substitute_in_constraint(&given.clone());
             let PubTypeConstraint::HaveTrait {
                 trait_id: given_trait,
                 input_tys: given_inputs,
@@ -1468,7 +1487,7 @@ impl UnifiedTypeInference {
             debug_assert_eq!(given_outputs.len(), output_tys.len());
             debug_assert_eq!(given_effects.len(), output_effs.len());
             if given_inputs == input_tys {
-                matches.push((GivenId(index), given_outputs, given_effects));
+                matches.push((id, given_outputs, given_effects));
             } else {
                 potential_inputs.push(given_inputs);
             }
@@ -1477,6 +1496,7 @@ impl UnifiedTypeInference {
             // Applications with equal trait and inputs in one scope are equal, except that
             // their fixed output effects are bounds, combined as by the constraint merge.
             let mut bounds = vec![Vec::new(); output_effs.len()];
+            let mut answered = false;
             for (given, given_outputs, given_effects) in matches {
                 for (actual, expected) in output_tys.iter().zip(&given_outputs) {
                     self.unify_same_type_with_sub_effects(*actual, span, *expected, span)?;
@@ -1490,7 +1510,10 @@ impl UnifiedTypeInference {
                         bounds.push((expected, span));
                     }
                 }
-                self.evidence_uses.record(origin, given);
+                if let Some(given) = given {
+                    self.evidence_uses.record(origin, given);
+                    answered = true;
+                }
             }
             // Polarities matter only to combine bounds, or to fit a fixed request to a bound.
             let mut trait_polarities = None;
@@ -1520,7 +1543,11 @@ impl UnifiedTypeInference {
                 }
                 self.unify_same_effect(actual, span, &bound, span)?;
             }
-            return Ok(GivenMatch::Resolved);
+            return Ok(if answered {
+                GivenMatch::Resolved
+            } else {
+                GivenMatch::Improved
+            });
         }
         for given_inputs in potential_inputs {
             // Probe compatibility without learning input equalities from evidence.
@@ -1558,9 +1585,9 @@ impl UnifiedTypeInference {
         trait_solver: &mut TraitSolver<'_>,
         arena: &mut NodeArena,
     ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
-        let input_tys = self.normalize_types(input_tys);
-        let output_tys = self.normalize_types(output_tys);
-        let output_effs = self.substitute_in_effect_types(output_effs);
+        let mut input_tys = self.normalize_types(input_tys);
+        let mut output_tys = self.normalize_types(output_tys);
+        let mut output_effs = self.substitute_in_effect_types(output_effs);
         match self.match_given(
             trait_id,
             &input_tys,
@@ -1580,6 +1607,23 @@ impl UnifiedTypeInference {
                     span,
                 )));
             }
+            GivenMatch::Improved => {
+                self.normalize_types_in_place(&mut input_tys);
+                self.normalize_types_in_place(&mut output_tys);
+                self.substitute_in_effect_types_in_place(&mut output_effs);
+                // An application that mentions what the caller chooses is the caller's to
+                // supply: an implementation selected here could fix it. Another one is local
+                // to this use, and is answered as any other.
+                if self.is_callers(trait_id, &input_tys, &output_tys, &output_effs) {
+                    return Ok(Some(PubTypeConstraint::new_have_trait(
+                        trait_id,
+                        input_tys,
+                        output_tys,
+                        output_effs,
+                        span,
+                    )));
+                }
+            }
             GivenMatch::Absent => {}
         }
         let kept = self.answer_trait_application(
@@ -1597,6 +1641,103 @@ impl UnifiedTypeInference {
             self.answered_applications += 1;
         }
         Ok(kept)
+    }
+
+    /// Whether these types or effects mention what the caller chooses: a written generic or
+    /// effect generic, or a type or effect of the written requirements that the derived
+    /// constraints follow from, as inference has them now, wherever it is nested.
+    fn mentions_contract(
+        &mut self,
+        input_tys: &[Type],
+        output_tys: &[Type],
+        output_effs: &[EffType],
+    ) -> bool {
+        let mut ty_roots = self.declared_generic_roots();
+        let mut effect_vars = FxHashSet::default();
+        if !self.contract_constraints.is_empty() {
+            let contract = self.substitute_in_constraints(&self.contract_constraints.clone());
+            for constraint in &contract {
+                ty_roots.extend(constraint.inner_ty_vars().into_iter().map(Type::variable));
+                constraint.fill_with_inner_effect_vars(&mut effect_vars);
+            }
+        }
+        let effect_roots = effect_vars
+            .into_iter()
+            .map(|var| self.effects.class_root(var))
+            .collect::<FxHashSet<_>>();
+        let mut mentioned = FxHashSet::default();
+        for ty in input_tys.iter().chain(output_tys) {
+            if ty
+                .inner_ty_vars()
+                .into_iter()
+                .any(|var| ty_roots.contains(&Type::variable(var)))
+            {
+                return true;
+            }
+            ty.fill_with_inner_effect_vars(&mut mentioned);
+        }
+        for eff in output_effs {
+            eff.fill_with_inner_effect_vars(&mut mentioned);
+        }
+        mentioned.into_iter().any(|var| {
+            self.effects.rigid_name(var).is_some()
+                || effect_roots.contains(&self.effects.class_root(var))
+        })
+    }
+
+    /// Whether an application that derived constraints gave their outputs to is the caller's
+    /// to supply: it, or a derived constraint equal to it, mentions the contract. The derived
+    /// constraint states the application as the contract does, which the application relates
+    /// to by sub-effects: an effect of the contract nested in an output type may appear in the
+    /// derived constraint only.
+    fn is_callers(
+        &mut self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        output_tys: &[Type],
+        output_effs: &[EffType],
+    ) -> bool {
+        if self.mentions_contract(input_tys, output_tys, output_effs) {
+            return true;
+        }
+        let derived = self.substitute_in_constraints(&self.derived_constraints.clone());
+        derived.iter().any(|derived| match derived {
+            PubTypeConstraint::HaveTrait {
+                trait_id: derived_trait,
+                input_tys: derived_inputs,
+                output_tys: derived_outputs,
+                output_effs: derived_effs,
+                ..
+            } if *derived_trait == trait_id && derived_inputs == input_tys => {
+                self.mentions_contract(derived_inputs, derived_outputs, derived_effs)
+            }
+            _ => false,
+        })
+    }
+
+    /// Whether `constraint` is an application that a derived constraint gave its outputs to,
+    /// and that the caller supplies: see [`Self::is_callers`].
+    pub(crate) fn is_callers_application(&mut self, constraint: &PubTypeConstraint) -> bool {
+        if self.derived_constraints.is_empty() {
+            return false;
+        }
+        let PubTypeConstraint::HaveTrait {
+            trait_id,
+            input_tys,
+            output_tys,
+            output_effs,
+            ..
+        } = self.substitute_in_constraint(constraint)
+        else {
+            return false;
+        };
+        let derived = self.substitute_in_constraints(&self.derived_constraints.clone());
+        let improved = derived.iter().any(|derived| {
+            matches!(derived, PubTypeConstraint::HaveTrait {
+                trait_id: derived_trait, input_tys: derived_inputs, ..
+            } if *derived_trait == trait_id && *derived_inputs == input_tys)
+        });
+        improved && self.is_callers(trait_id, &input_tys, &output_tys, &output_effs)
     }
 
     /// Answers a trait application that no given answers, by the structure of its inputs or
@@ -3087,10 +3228,12 @@ impl UnifiedTypeInference {
         observable: FxHashSet<EffectVar>,
     ) -> Result<(), InternalCompilationError> {
         self.normalize_remaining_constraints();
-        // Per requirement on types still to know, the classes of its inputs and of its outputs.
+        // Per requirement on types still to know, or that the caller supplies, the classes of
+        // its inputs and of its outputs.
+        let constraints = self.remaining_ty_constraints.to_vec();
         let mut applications = Vec::new();
-        for constraint in self.remaining_ty_constraints.iter() {
-            if constraint.inner_ty_vars().is_empty() {
+        for constraint in &constraints {
+            if constraint.inner_ty_vars().is_empty() && !self.is_callers_application(constraint) {
                 continue;
             }
             let mut inputs = FxHashSet::default();
