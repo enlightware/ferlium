@@ -31,7 +31,7 @@ use crate::{
             NO_DERIVE_VALUE_ATTRIBUTE, derive_generic_value_code_entries,
             function_value_method_function, function_value_method_name,
             generated_value_evidence_types, generated_value_layout_getter,
-            generated_value_storage_constraints, value_layout_storage_constraints,
+            generated_value_storage_constraints, value_layout_getters_constraints,
             variant_payload_storage_for_type, variant_payload_storage_type,
         },
     },
@@ -324,19 +324,20 @@ fn value_layout_type(output: &Module, others: &Modules, input_ty: Type) -> Type 
     }
 }
 
-/// The payload storages that the generated layout getters of a `Value` impl for `input_ty` read,
-/// as constraints. A written impl requires them too, whatever its methods read, since the getters
-/// receive the impl's evidence.
-pub(super) fn value_layout_getter_storage_constraints(
+/// What the generated layout getters of a `Value` impl for `input_ty` read, as constraints. The
+/// getters receive the impl's evidence, so a written impl requires this as what its methods read.
+pub(super) fn value_layout_getters_requirements(
     output: &Module,
     others: &Modules,
     input_ty: Type,
     span: Location,
 ) -> Result<Vec<PubTypeConstraint>, InternalCompilationError> {
-    value_layout_storage_constraints(
+    let env = ModuleEnv::new(output, others);
+    value_layout_getters_constraints(
         value_layout_type(output, others, input_ty),
+        env.expect_std_trait_id(VALUE_TRAIT_NAME),
         span,
-        &ModuleEnv::new(output, others),
+        &env,
     )
 }
 

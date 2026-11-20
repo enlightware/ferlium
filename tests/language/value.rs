@@ -597,6 +597,156 @@ fn a_failing_prerequisite_fails_a_cycle_of_custom_value_impls() {
     }
 }
 
+/// The layout getters generated for a written `Value` impl are part of its body: the impl requires
+/// what they read, implicitly as for its methods, also when none of its methods reads it.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn written_value_impl_requires_what_its_layout_getters_read() {
+    let value_impl = |name: &str, clause: &str| {
+        format!(
+            "impl<T> Value for {name}<T> {clause} {{
+                fn eq(x: {name}<T>, y: {name}<T>) -> bool {{ true }}
+                fn to_string(x: {name}<T>) -> string {{ \"{name}\" }}
+                fn hash(x: {name}<T>, state: &mut hasher) {{}}
+                fn clone(x: {name}<T>) -> {name}<T> {{ {name}::No }}
+                fn drop(x: &mut {name}<T>) {{}}
+            }}
+            "
+        )
+    };
+    for clause in ["where nothing", ""] {
+        // `V` reads `Value<T>` directly; `W` reads `Value<V<T>>`, which `V`'s impl reduces.
+        let src = format!(
+            "enum V<T> {{ No, Yes(T) }}
+            {}enum W<T> {{ No, Yes(V<T>) }}
+            {}fn size<T>(x: T) -> int {{ Value::<W<T>>::SIZE }}
+            ",
+            value_impl("V", clause),
+            value_impl("W", clause),
+        );
+        let mut session = TestSession::new();
+        session.allow_unsafe();
+        assert_val_eq!(
+            session.run(&format!(
+                "{src}(
+                    Value::<V<(int, int)>>::SIZE - Value::<No | Yes((int, int))>::SIZE,
+                    size((1, 2)) - Value::<No | Yes(No | Yes((int, int)))>::SIZE,
+                )"
+            )),
+            tuple!(int(0), int(0)),
+            "{clause}"
+        );
+    }
+}
+
+/// A written `Value` impl whose layout reads nothing of a parameter does not require its `Value`.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn written_value_impl_requires_only_what_its_layout_getters_read() {
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    assert_val_eq!(
+        session.run(
+            r#"
+            #[no_derive_value]
+            struct Opaque(int)
+            enum V<T> { No, Yes(() -> T) }
+            impl<T> Value for V<T> where nothing {
+                fn eq(x: V<T>, y: V<T>) -> bool { true }
+                fn to_string(x: V<T>) -> string { "V" }
+                fn hash(x: V<T>, state: &mut hasher) {}
+                fn clone(x: V<T>) -> V<T> { V::No }
+                fn drop(x: &mut V<T>) {}
+            }
+            Value::<V<Opaque>>::SIZE - Value::<V<int>>::SIZE
+            "#
+        ),
+        int(0)
+    );
+}
+
+/// A read of the layout getters of a written `Value` impl that its clause cannot answer is an error
+/// at the impl, as it would be in a method.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn written_value_impl_must_answer_what_its_layout_getters_read() {
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    match session
+        .fail_compilation(
+            r#"
+            trait Tag<Self> { fn tag(x: Self) -> int; }
+            enum W<T> { No, Yes(T) }
+            impl<T> Value for W<T> where T: Tag {
+                fn eq(x: W<T>, y: W<T>) -> bool { true }
+                fn to_string(x: W<T>) -> string { "W" }
+                fn hash(x: W<T>, state: &mut hasher) {}
+                fn clone(x: W<T>) -> W<T> { W::No }
+                fn drop(x: &mut W<T>) {}
+            }
+            enum V<T> { No, Yes(W<T>) }
+            impl<T> Value for V<T> where nothing {
+                fn eq(x: V<T>, y: V<T>) -> bool { true }
+                fn to_string(x: V<T>) -> string { "V" }
+                fn hash(x: V<T>, state: &mut hasher) {}
+                fn clone(x: V<T>) -> V<T> { V::No }
+                fn drop(x: &mut V<T>) {}
+            }
+            "#,
+        )
+        .into_inner()
+    {
+        CompilationErrorImpl::UndeclaredRequirement { requirement, .. } => {
+            assert_eq!(requirement, "T: Tag")
+        }
+        other => panic!("expected an undeclared `T: Tag`, got {other:?}"),
+    }
+}
+
+/// A written `Value` impl that writes its layout constants reads nothing for them, so it does not
+/// require what the layout of its type would.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn written_value_layout_constants_require_nothing() {
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    let shape = "No | Yes(No | Yes(() -> int))";
+    let mut layout = |name: &str| {
+        *session
+            .run(&format!("Value::<{shape}>::{name}"))
+            .as_primitive_ty::<isize>()
+            .unwrap()
+    };
+    let (size, align) = (layout("SIZE"), layout("ALIGN"));
+    assert_val_eq!(
+        session.run(&format!(
+            r#"
+            trait Tag<Self> {{ fn tag(x: Self) -> int; }}
+            enum W<T> {{ No, Yes(() -> T) }}
+            impl<T> Value for W<T> where T: Tag {{
+                fn eq(x: W<T>, y: W<T>) -> bool {{ true }}
+                fn to_string(x: W<T>) -> string {{ "W" }}
+                fn hash(x: W<T>, state: &mut hasher) {{}}
+                fn clone(x: W<T>) -> W<T> {{ W::No }}
+                fn drop(x: &mut W<T>) {{}}
+            }}
+            enum V<T> {{ No, Yes(W<T>) }}
+            impl<T> Value for V<T> where nothing {{
+                const SIZE = {size};
+                const ALIGN = {align};
+                fn eq(x: V<T>, y: V<T>) -> bool {{ true }}
+                fn to_string(x: V<T>) -> string {{ "V" }}
+                fn hash(x: V<T>, state: &mut hasher) {{}}
+                fn clone(x: V<T>) -> V<T> {{ V::No }}
+                fn drop(x: &mut V<T>) {{}}
+            }}
+            (Value::<V<int>>::SIZE, Value::<V<int>>::ALIGN)
+            "#
+        )),
+        tuple!(int(size), int(align))
+    );
+}
+
 /// A unit-shaped generic type has no data to copy, so its derived `Value::clone` must construct a
 /// fresh value rather than copy the whole one — a `memcpy` of a generic named type is not
 /// statically trivially copyable, and lowering emitted MIR the verifier rejects. Found by the

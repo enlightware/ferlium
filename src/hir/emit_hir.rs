@@ -1407,6 +1407,7 @@ impl ModuleEmission<'_> {
             for_trait: imp.for_trait.as_ref(),
             impl_constraints: &imp.where_clause,
             impl_where_kind: imp.where_kind,
+            writes_associated_consts: !imp.associated_consts.is_empty(),
         };
         let recursive_function_names = imp
             .function_sccs

@@ -39,7 +39,7 @@ use crate::{
             refresh_debug_info_for_functions, set_pending_function,
             substitute_and_canonicalize_functions,
         },
-        emit_value_impl::value_layout_getter_storage_constraints,
+        emit_value_impl::value_layout_getters_requirements,
         function::{CallableDefinition, arg_conventions_for_args},
         hir_syn,
     },
@@ -94,6 +94,9 @@ pub(super) struct EmitTraitCtx<'a> {
     pub(super) for_trait: Option<&'a ast::DTraitImplFor>,
     pub(super) impl_constraints: &'a [PubTypeConstraint],
     pub(super) impl_where_kind: WhereClauseKind,
+    /// Whether the impl writes its associated constants. Otherwise those of a `Value` impl are
+    /// generated from the layout of its type, and read what that layout reads.
+    pub(super) writes_associated_consts: bool,
 }
 
 pub(crate) struct EmitTraitOutput {
@@ -3782,6 +3785,20 @@ where
             }
         })?;
 
+        // The layout getters generated for a `Value` impl are part of its body, so what they read
+        // is required and reduced as what its methods read. Written constants read nothing.
+        if trait_ctx.trait_id == value_trait_id
+            && !trait_ctx.writes_associated_consts
+            && let [input_ty] = trait_output.input_tys.as_slice()
+        {
+            let input_ty = ty_inf.substitute_in_type(*input_ty);
+            for constraint in
+                value_layout_getters_requirements(output, others, input_ty, trait_ctx.span)?
+            {
+                ty_inf.add_requirement(constraint);
+            }
+        }
+
         let input_tys = ty_inf.substitute_in_types(&trait_output.input_tys);
         let exportable = output.is_trait_impl_exportable(trait_ctx.trait_id, &input_tys, others);
         // A complete clause leaves to the users what it writes, whether the impl is exportable or
@@ -4019,21 +4036,6 @@ where
                     .expect("expected pending function body");
                 pending.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.clone();
                 instantiate_function_descr_in_place(pending, &mut mapper);
-            }
-        }
-    }
-
-    // The layout getters of a `Value` impl are generated with its evidence, and read the payload
-    // storages of the layout, which its methods need not read: the impl requires them too.
-    if trait_ctx.trait_id == value_trait_id
-        && let [input_ty] = trait_output.input_tys.as_slice()
-    {
-        let input_ty = *input_ty;
-        for constraint in
-            value_layout_getter_storage_constraints(output, others, input_ty, trait_ctx.span)?
-        {
-            if !trait_output.constraints.contains(&constraint) {
-                trait_output.constraints.push(constraint);
             }
         }
     }

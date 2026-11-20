@@ -382,20 +382,6 @@ impl ValueLayoutExpr {
             }
         }
     }
-
-    /// The types whose `Value` layout this expression reads.
-    fn evidence_types(&self) -> Vec<Type> {
-        let mut types = Vec::new();
-        self.collect_evidence(&mut types, &mut Vec::new());
-        types
-    }
-
-    /// The payload storages that this expression reads.
-    pub(crate) fn storage_requirements(&self) -> Vec<DictionaryReq> {
-        let mut storages = Vec::new();
-        self.collect_evidence(&mut Vec::new(), &mut storages);
-        storages
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -473,14 +459,6 @@ impl ValueLayoutFormula {
             assert_eq!(index, VALUE_ALIGN_ASSOC_CONST_INDEX);
             self.align
         }
-    }
-
-    /// The payload storages that the size or the alignment reads, in a stable order.
-    fn storage_requirements(&self) -> Vec<DictionaryReq> {
-        let mut storages = Vec::new();
-        self.size.collect_evidence(&mut Vec::new(), &mut storages);
-        self.align.collect_evidence(&mut Vec::new(), &mut storages);
-        storages
     }
 }
 
@@ -1176,12 +1154,21 @@ pub(crate) fn value_layout_formula_for_type(
     value_layout_formula_inner(ty, span, env, &mut FxHashSet::default())
 }
 
-/// What a layout expression reads: the `Value` of its evidence types, then its payload storages.
-fn value_layout_requirements(expr: &ValueLayoutExpr, value_trait: TraitId) -> Vec<DictionaryReq> {
-    expr.evidence_types()
+/// What layout expressions read: the `Value` of the types whose layouts they read, then their
+/// payload storages, each once, in a stable order.
+fn value_layout_requirements<'a>(
+    exprs: impl IntoIterator<Item = &'a ValueLayoutExpr>,
+    value_trait: TraitId,
+) -> Vec<DictionaryReq> {
+    let mut types = Vec::new();
+    let mut storages = Vec::new();
+    for expr in exprs {
+        expr.collect_evidence(&mut types, &mut storages);
+    }
+    types
         .into_iter()
         .map(|ty| DictionaryReq::new_trait_impl(value_trait, vec![ty], vec![], vec![]))
-        .chain(expr.storage_requirements())
+        .chain(storages)
         .collect()
 }
 
@@ -1221,7 +1208,7 @@ pub(crate) fn value_layout_getter_requirements(
     env: &impl TypeLayoutEnv,
 ) -> Result<Vec<DictionaryReq>, InternalCompilationError> {
     Ok(value_layout_requirements(
-        &value_layout_formula_for_type(ty, span, env)?.associated_const(associated_const),
+        [&value_layout_formula_for_type(ty, span, env)?.associated_const(associated_const)],
         value_trait,
     ))
 }
@@ -1303,18 +1290,21 @@ fn named_value_is_compiler_derived(def: TypeDefId, env: &impl TypeLayoutEnv) -> 
             .any(|attribute| attribute.path.0 == ustr(NO_DERIVE_VALUE_ATTRIBUTE))
 }
 
-/// The payload storages that the layout of `ty` reads, as the constraints that require them: what
-/// its generated layout getters need, whatever the methods of a written `Value` impl read.
-pub(crate) fn value_layout_storage_constraints(
+/// What the generated layout getters of `ty` read, its size or its alignment, as the constraints
+/// that require it: see [`value_layout_requirements`].
+pub(crate) fn value_layout_getters_constraints(
     ty: Type,
+    value_trait: TraitId,
     span: Location,
     env: &impl TypeLayoutEnv,
 ) -> Result<Vec<PubTypeConstraint>, InternalCompilationError> {
-    Ok(value_layout_formula_for_type(ty, span, env)?
-        .storage_requirements()
-        .iter()
-        .map(|requirement| requirement_constraint(requirement, span))
-        .collect())
+    let formula = value_layout_formula_for_type(ty, span, env)?;
+    Ok(
+        value_layout_requirements([&formula.size, &formula.align], value_trait)
+            .iter()
+            .map(|requirement| requirement_constraint(requirement, span))
+            .collect(),
+    )
 }
 
 /// As [`generated_value_storage_requirements`], as the constraints that require them.
@@ -2096,7 +2086,7 @@ pub(crate) fn generated_value_layout_getter(
     let expression =
         value_layout_formula_for_type(input_ty, span, solver)?.associated_const(associated_const);
     let value_trait = solver.std_trait_id(VALUE_TRAIT_NAME);
-    let constraints = value_layout_requirements(&expression, value_trait)
+    let constraints = value_layout_requirements([&expression], value_trait)
         .iter()
         .map(|requirement| requirement_constraint(requirement, span))
         .collect::<Vec<_>>();

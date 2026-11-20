@@ -177,6 +177,7 @@ A requirement whose trait and input types match a written one is left to the cal
 Any other is reduced through the impls visible where the item is defined, and one that reaches no leaf is an error at its use.
 A written requirement without generics is checked at the definition and is not published.
 So the same body under a partial clause and under a complete one listing what inference would publish runs the same impls.
+The `SIZE` and `ALIGN` constants that the compiler generates for a written `Value` implementation belong to its body, so they require what they read as its methods do.
 Requirements on the structure of a type, such as a field, an element or a variant, are not trait requirements: they stay inferred and are published with the types they describe.
 
 A written requirement implies the parents and `where` constraints of its trait, transitively, as every impl of the trait satisfies them.
