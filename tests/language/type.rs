@@ -1126,17 +1126,23 @@ fn ever_growing_prerequisites_are_undecided_not_disjoint() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn prerequisite_chains_deeper_than_the_recursion_limit_are_undecided() {
     // `P` holds for any nesting of `W` around `int`, so both `R` impls apply to `B<W<…<int>…>>`,
-    // but checking it exceeds the recursion limit, which must not prove the impls disjoint.
-    let deep = (0..130).fold("int".to_string(), |ty, _| format!("W<{ty}>"));
+    // but checking it exceeds the recursion limit, which must not prove the impls disjoint. Aliases
+    // nest `W` deeper than source may nest a type.
+    let aliases = (1..=130)
+        .map(|depth| format!("type D{depth} = W<D{}>;", depth - 1))
+        .collect::<Vec<_>>()
+        .join("\n");
     expect_overlap(&format!(
         "trait P<Self> {{}}
         trait R<Self> {{}}
         struct W<T>(T)
         struct B<T>(T)
+        type D0 = int;
+        {aliases}
         impl P for int {{}}
         impl<T> P for W<T> where T: P {{}}
         impl<T> R for B<T> where T: P {{}}
-        impl R for B<{deep}> {{}}"
+        impl R for B<D130> {{}}"
     ));
 }
 

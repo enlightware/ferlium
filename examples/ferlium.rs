@@ -716,6 +716,18 @@ fn print_std_optimization_report() {
 }
 
 fn main() {
+    // Compiling source at the nesting limit needs more stack in a debug build than a main thread
+    // has; the test `nesting_at_the_limit_compiles` measures it.
+    let cli = std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(run_cli)
+        .expect("cannot start the command-line thread");
+    if cli.join().is_err() {
+        std::process::exit(101);
+    }
+}
+
+fn run_cli() {
     let args: Vec<String> = env::args().collect();
     // Both REPLs default to optimized MIR. Reporting explicitly selects that mode.
     let optimization_report = args.iter().any(|arg| arg == "--optimization-report");

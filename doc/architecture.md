@@ -63,7 +63,7 @@ lowering with native pointers and runtime wrappers.
 
 The main phases are:
 
-1. Parse source text into parsed AST.
+1. Parse source text into parsed AST. Expressions, patterns, types and `use` trees each nest at most 128 levels (`NESTING_LIMIT`), which bounds the stack that the recursive passes need: the parser checks types, patterns and `use` trees as it builds them, and expressions once parsed.
 2. Validate parsed AST features that are not accepted in user code.
 3. Desugar parsed AST syntax and module declarations.
 4. Resolve symbols and emit typed HIR while collecting type, effect, mutability, and trait constraints. Definite unreachable suffixes are reported as warnings and omitted without constraining inference. Source lints, such as needless returns in function-tail position, are collected alongside those warnings. Some HIR decisions, such as local storage ownership and value argument passing, may remain explicitly unresolved.

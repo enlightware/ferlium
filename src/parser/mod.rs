@@ -6,6 +6,7 @@ use lalrpop_util::lalrpop_mod;
 pub mod escapes;
 pub mod helpers;
 pub mod location;
+pub mod nesting;
 
 lalrpop_mod!(
     #[allow(clippy::ptr_arg,clippy::type_complexity,clippy::needless_return)]

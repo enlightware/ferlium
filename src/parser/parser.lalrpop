@@ -7,6 +7,7 @@ use crate::types::r#type::{
 };
 use crate::module::Visibility;
 use crate::parser::helpers::*;
+use crate::parser::nesting::{nested_literal, nested_pattern, nested_type, nested_use_tree};
 use crate::std::{math::int_type, string::string_type};
 use crate::containers::SVec2;
 use crate::types::mutability::{MutVal};
@@ -245,8 +246,8 @@ UseTree: UseTree = {
     <p:(<Path> "::")?> <w:Sp<"*">> => {
         UseTree::Glob(p, w.1)
     },
-    <p:(<Path> "::")?> "{" <t:Sep<UseTree, ",">> "}" => {
-        UseTree::Group(p, t)
+    <l:@L> <p:(<Path> "::")?> "{" <t:Sep<UseTree, ",">> "}" <r:@R> =>? {
+        nested_use_tree(UseTree::Group(p, t), span(l, r, source_id))
     },
     // TODO: when needed, add "as" renaming support
     <p:Path> => {
@@ -432,17 +433,17 @@ TupleType<P, R>: Type = {
         if let Some(arg) = args.iter().find(|a| a.mut_ty.is_some()) {
             return error("types outside function arguments cannot be &mut".into(), arg.span);
         } else {
-            Ok(Type::Tuple(args.into_iter().map(|a| a.ty).collect::<Vec<_>>()))
+            nested_type(Type::Tuple(args.into_iter().map(|a| a.ty).collect::<Vec<_>>()))
         }
     }
 }
 
 FunctionType<P, R, F>: Type = {
-    "(" ")" <ret:EffFnRet<P, F>> => Type::function_type(FnType::new(vec![], ret.0, ret.1)),
-    "(" <arg:ArgType<P, R, "F">> ")" <ret:EffFnRet<P, F>> =>
-        Type::function_type(FnType::new(vec![arg], ret.0, ret.1)),
-    "(" <arg0:ArgType<P, R, "F">> "," <args:Sep<ArgType<P, R, "F">, ",">> ")" <ret:EffFnRet<P, F>> =>
-        Type::function_type(FnType::new(ext_f(arg0, args), ret.0, ret.1)),
+    "(" ")" <ret:EffFnRet<P, F>> =>? nested_type(Type::function_type(FnType::new(vec![], ret.0, ret.1))),
+    "(" <arg:ArgType<P, R, "F">> ")" <ret:EffFnRet<P, F>> =>?
+        nested_type(Type::function_type(FnType::new(vec![arg], ret.0, ret.1))),
+    "(" <arg0:ArgType<P, R, "F">> "," <args:Sep<ArgType<P, R, "F">, ",">> ")" <ret:EffFnRet<P, F>> =>?
+        nested_type(Type::function_type(FnType::new(ext_f(arg0, args), ret.0, ret.1))),
 }
 
 #[inline]
@@ -498,12 +499,12 @@ PlaceholderType: Type = {
 }
 
 PathType<P>: Type = {
-    <p:Path> "<" <args:TypeApplicationArgs<P>> ">" => Type::path_with_type_and_effect_args(p, args.0, args.1),
+    <p:Path> "<" <args:TypeApplicationArgs<P>> ">" =>? nested_type(Type::path_with_type_and_effect_args(p, args.0, args.1)),
     <p:Path> => Type::Path(p),
 }
 
 ArrayType<P>: Type = {
-    "[" <t:Sp<Type<P, "", "F">>> "]" => Type::Array(Box::new(t))
+    "[" <t:Sp<Type<P, "", "F">>> "]" =>? nested_type(Type::Array(Box::new(t)))
 }
 
 RecordType<P>: Type = {
@@ -512,7 +513,7 @@ RecordType<P>: Type = {
 }
 
 RecordTypeFields<P>: Type = {
-    <fields:Sep1<RecordTypeField<P>, ",">> => Type::Record(fields),
+    <fields:Sep1<RecordTypeField<P>, ",">> =>? nested_type(Type::Record(fields)),
 }
 
 RecordTypeField<P>: (UstrSpan, TypeSpan) = {
@@ -520,13 +521,13 @@ RecordTypeField<P>: (UstrSpan, TypeSpan) = {
 }
 
 VariantType<P, R>: Type = {
-    <f:VariantTypeAlternative<P, "", R>> => Type::Variant(vec![f]),
-    <f:VariantTypeAlternative<P, "U", R>> "|" <n:VariantTypeAlternative<P, "U", R>> <r:("|" <VariantTypeAlternative<P, "U", R>>)*> => Type::Variant(ext_f(f, ext_f(n, r))),
+    <f:VariantTypeAlternative<P, "", R>> =>? nested_type(Type::Variant(vec![f])),
+    <f:VariantTypeAlternative<P, "U", R>> "|" <n:VariantTypeAlternative<P, "U", R>> <r:("|" <VariantTypeAlternative<P, "U", R>>)*> =>? nested_type(Type::Variant(ext_f(f, ext_f(n, r)))),
 }
 
 VariantTypeAlternative<P, U, R>: (UstrSpan, TypeSpan) = {
     <tag:Sp<UIdentifier>> if U != "" => (tag, (Type::Unit, tag.1)),
-    <tag:Sp<UIdentifier>> <l:@L> "(" <args:Sep<Sp<Type<P, R, "F">>, ",">> ")" <r:@R> => (tag, (Type::Tuple(args), span(l, r, source_id))),
+    <tag:Sp<UIdentifier>> <l:@L> "(" <args:Sep<Sp<Type<P, R, "F">>, ",">> ")" <r:@R> =>? Ok((tag, (nested_type(Type::Tuple(args))?, span(l, r, source_id)))),
     <tag:Sp<UIdentifier>> <l:@L> "{" <rec:RecordTypeFields<P>> "}" <r:@R> if R != "" => (tag, (rec, span(l, r, source_id))),
 }
 
@@ -557,19 +558,19 @@ TypeAliasDefinition: TypeAlias = {
 }
 
 StructDefinition: TypeDef = {
-    <doc:DOC_COMMENT*> <attributes:(Attribute)*> <visibility:Visibility> <l:@L> "struct" <name:Sp<UIdentifier>> <generics:GenericParams?> <where_clause:WhereClause?> <shape:StructBody> <r:@R> => {
-        TypeDef {
+    <doc:DOC_COMMENT*> <attributes:(Attribute)*> <visibility:Visibility> <l:@L> "struct" <name:Sp<UIdentifier>> <generics:GenericParams?> <where_clause:WhereClause?> <shape:StructBody> <r:@R> =>? {
+        Ok(TypeDef {
             visibility,
             name,
             generic_params: generics.unwrap_or_default(),
-            shape: shape.0,
+            shape: nested_type(shape.0)?,
             where_clause: where_clause.unwrap_or_default(),
             attributes,
             variant_attributes: vec![],
             shape_docs: TypeDefShapeDocs::Struct(shape.1),
             span: span(l, r, source_id),
             doc_comments: parse_doc_comments(doc).into_iter().collect(),
-        }
+        })
     }
 }
 
@@ -610,20 +611,20 @@ EnumDefinition: TypeDef = {
             doc_comments: parse_doc_comments(doc).into_iter().collect(),
         }
     },
-    <doc:DOC_COMMENT*> <attributes:(Attribute)*> <visibility:Visibility> <l:@L> "enum" <name:Sp<UIdentifier>> <generics:GenericParams?> <where_clause:WhereClause?> "{" <variants:EnumVariants> "}" <r:@R> => {
+    <doc:DOC_COMMENT*> <attributes:(Attribute)*> <visibility:Visibility> <l:@L> "enum" <name:Sp<UIdentifier>> <generics:GenericParams?> <where_clause:WhereClause?> "{" <variants:EnumVariants> "}" <r:@R> =>? {
         let (variant_ty, variant_attributes, shape_docs) = enum_type_from_variants(variants);
-        TypeDef {
+        Ok(TypeDef {
             visibility,
             name,
             generic_params: generics.unwrap_or_default(),
-            shape: variant_ty,
+            shape: nested_type(variant_ty)?,
             where_clause: where_clause.unwrap_or_default(),
             attributes,
             variant_attributes,
             shape_docs,
             span: span(l, r, source_id),
             doc_comments: parse_doc_comments(doc).into_iter().collect(),
-        }
+        })
     }
 }
 
@@ -752,7 +753,7 @@ TypeConstraint: TypeConstraint = {
             trait_name,
             input_types: vec![TypeConstraintInput {
                 name: None,
-                ty: (Type::path_with_type_and_effect_args(path, type_args, effect_args), span(l, app_r, source_id)),
+                ty: (nested_type(Type::path_with_type_and_effect_args(path, type_args, effect_args))?, span(l, app_r, source_id)),
             }],
             output_types,
             output_effects,
@@ -1165,7 +1166,8 @@ LiteralPattern = {
 }
 
 RecordLiteralPattern: (LiteralValue, IrType) = {
-    "{" <f:RecordLiteralField> <r:("," <RecordLiteralField>)*> ","? "}" => record_literal_pattern(ext_f(f, r)),
+    <sl:@L> "{" <f:RecordLiteralField> <r:("," <RecordLiteralField>)*> ","? "}" <sr:@R> =>?
+        nested_literal(record_literal_pattern(ext_f(f, r)), span(sl, sr, source_id)),
 }
 
 RecordLiteralField: (UstrSpan, (LiteralValue, IrType)) = {
@@ -1180,11 +1182,11 @@ ScalarLiteralPattern: (LiteralValue, IrType) = {
 }
 
 TupleLiteralPattern: (LiteralValue, IrType) = {
-    "(" <f:LiteralPattern> "," <r:Sep<LiteralPattern, ",">> ")" => {
+    <l:@L> "(" <f:LiteralPattern> "," <r:Sep<LiteralPattern, ",">> ")" <rr:@R> =>? {
         let (vals, tys): (SVec2<_>, Vec<_>) = ext_f(f, r).into_iter().unzip();
         let val = LiteralValue::new_tuple(vals);
         let ty = IrType::tuple(tys);
-        (val, ty)
+        nested_literal((val, ty), span(l, rr, source_id))
     },
 }
 
@@ -1595,7 +1597,7 @@ Ps<T>: Pattern = {
 // Build a LetPattern out of an LetPatternKind by adding its span
 #[inline]
 Lps<T>: LetPattern = {
-    <pat:Sp<T>> => LetPattern::new(pat.0, pat.1),
+    <pat:Sp<T>> =>? nested_pattern(LetPattern::new(pat.0, pat.1)),
 };
 
 // Return T along with its location

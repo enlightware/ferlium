@@ -28,7 +28,7 @@ use crate::{
         emit_hir::{EmitModuleFrom, emit_module_with_capabilities},
     },
     module::{Module, ModuleEnv, ModuleId, Path, Uses, id::Id},
-    parser::{self, Token, describe_parse_error},
+    parser::{self, Token, describe_parse_error, nesting::check_expr_nesting},
     types::coherence::check_module_coherence,
 };
 
@@ -541,6 +541,7 @@ fn parse_module(
         .map_err(|error| vec![describe_parse_error(error, source_id)])?;
     describe_recovered_errors(errors, source_id)?;
     // TODO: change the last line to an unwrap once the grammar is fully error-tolerant.
+    check_expr_nesting(&arena)?;
     if !accept_unstable {
         validate_no_unstable(&module, [].iter(), &arena)?;
     }
@@ -560,6 +561,7 @@ pub fn parse_module_and_expr(
         .map_err(|error| vec![describe_parse_error(error, source_id)])?;
     describe_recovered_errors(errors, source_id)?;
     // TODO: revisit once the grammar is fully error-tolerant.
+    check_expr_nesting(&arena)?;
     if !accept_unstable {
         validate_no_unstable(&module_and_expr.0, module_and_expr.1.iter(), &arena)?;
     }

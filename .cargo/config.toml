@@ -1,5 +1,8 @@
 [env]
 RUST_TEST_THREADS = "1"
+# Compiling source at the nesting limit needs more stack in a debug build than a test thread's
+# 2 MiB default; the test `nesting_at_the_limit_compiles` measures it.
+RUST_MIN_STACK = "33554432"
 
 # At the 128-frame call-depth limit the unoptimized interpreters need more than the
 # 1 MiB default wasm shadow stack. Generated functions are installed in Rust's function
