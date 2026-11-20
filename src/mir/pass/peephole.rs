@@ -8,7 +8,7 @@ use rustc_hash::FxHashMap;
 use crate::{
     containers::b,
     emit_mir::{lower_static_evidence, static_dictionary_type},
-    hir::value::LiteralValue,
+    hir::value::{LiteralValue, VariantPayloadStorage},
     mir::{
         self, BlockId, Function, Operation, OperationKind,
         edit::FunctionEdit,
@@ -17,6 +17,7 @@ use crate::{
         value::{StaticEvidence, ValueId},
     },
     module::{ModuleEnv, ParentAccessor, TraitDictionaryId, id::Id},
+    std::logic::bool_type,
     types::r#trait::TraitParentSlotIndex,
 };
 
@@ -403,6 +404,83 @@ pub(crate) fn close_static_dictionaries(func: &Function, env: ModuleEnv<'_>) -> 
         }
     });
     changed.then(|| edit.finish(env))
+}
+
+/// Fixes the payload storages that binding made static evidence. Specialization and inlining bind
+/// evidence parameters, as they do dictionaries: a construction then takes the storage statically,
+/// as one whose type closes it does, and a read of the evidence becomes a constant.
+pub(crate) fn fix_static_payload_storages(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
+    let gives_static_storage = func
+        .blocks()
+        .flat_map(|id| func.block(id).operations())
+        .any(|operation| static_payload_storage(operation).is_some());
+    if !gives_static_storage {
+        return None;
+    }
+    let mut edit = FunctionEdit::new(func.clone());
+    fix_static_payload_storages_in(&mut edit, env);
+    Some(edit.finish(env))
+}
+
+/// The storage that a construction or a read of storage evidence is given statically, if so.
+fn static_payload_storage(operation: &Operation) -> Option<bool> {
+    let given = matches!(
+        operation.kind,
+        OperationKind::Variant { storage: None, .. } | OperationKind::PayloadStorageIsIndirect
+    );
+    match operation.operands.first() {
+        Some(mir::Value::Evidence(evidence)) if given => match **evidence {
+            StaticEvidence::VariantPayloadStorage(indirect) => Some(indirect),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// As [`fix_static_payload_storages`], in place.
+pub(crate) fn fix_static_payload_storages_in(edit: &mut FunctionEdit, env: ModuleEnv<'_>) {
+    let mut reads = FxHashMap::default();
+    for block in edit.blocks().collect::<Vec<_>>() {
+        let block = edit.block_mut(block);
+        for operation in &mut block.operations {
+            let Some(indirect) = static_payload_storage(operation) else {
+                continue;
+            };
+            match &mut operation.kind {
+                OperationKind::Variant { storage, .. } => {
+                    *storage = Some(VariantPayloadStorage::from_indirect(indirect));
+                    operation.operands = operation.operands[1..].into();
+                }
+                OperationKind::PayloadStorageIsIndirect => {
+                    if let Some(result) = operation.result_id() {
+                        reads.insert(result, indirect);
+                    }
+                }
+                _ => unreachable!("only constructions and reads take storage evidence"),
+            }
+        }
+        block.operations.retain(|operation| {
+            !matches!(operation.kind, OperationKind::PayloadStorageIsIndirect)
+                || static_payload_storage(operation).is_none()
+        });
+    }
+    if reads.is_empty() {
+        return;
+    }
+    let constants = reads
+        .into_iter()
+        .map(|(result, indirect)| {
+            let constant = edit.add_constant(bool_type(), LiteralValue::new_native(indirect), &env);
+            (result, mir::Value::Constant(constant))
+        })
+        .collect::<FxHashMap<_, _>>();
+    edit.visit_operands_mut(|operand| {
+        if let mir::Value::Register(id) = operand
+            && let Some(constant) = constants.get(id)
+        {
+            *operand = constant.clone();
+        }
+    });
 }
 
 pub(super) fn bool_value(func: &Function, value: &mir::Value) -> Option<bool> {

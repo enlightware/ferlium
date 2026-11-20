@@ -629,6 +629,25 @@ impl<'a> TraitSolver<'a> {
                         // requirements; the case-qualified trigger has no ABI slot.
                         continue;
                     }
+                    if let PubTypeConstraint::VariantPayloadStorage {
+                        variant_ty,
+                        tag,
+                        payload_ty,
+                        ..
+                    } = &substituted_constraint
+                    {
+                        // Where a payload is stored holds for any type, and its evidence is
+                        // resolved from the instantiated type, statically once it is closed.
+                        runtime_requirements.push(MatchedRequirement {
+                            index: *constraint_index,
+                            req: DictionaryReq::new_variant_payload_indirection(
+                                *variant_ty,
+                                *tag,
+                                *payload_ty,
+                            ),
+                        });
+                        continue;
+                    }
                     let runtime_requirement = substituted_constraint.structural_requirement_key();
                     let queued = ty_inf.obligation_count();
                     let bounds = ty_inf.bound_count();

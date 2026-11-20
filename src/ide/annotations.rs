@@ -544,6 +544,9 @@ fn node_variable_type_annotations<Env>(
         GetTraitAssociatedConst(_) => {
             // There is no GetTraitAssociatedConst left in the final IR.
         }
+        GetVariantPayloadStorage(_) => {
+            // There is no GetVariantPayloadStorage left in the final IR.
+        }
         GetTraitDictionary(_) => {
             // There is no GetTraitDictionary left in the final IR.
         }

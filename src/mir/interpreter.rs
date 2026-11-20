@@ -95,6 +95,8 @@ pub(crate) enum CallArgument {
     Value(Value),
     /// A symbolic trait dictionary for a hidden evidence parameter.
     Dictionary(ClosedTraitDictionary),
+    /// The payload storage for a hidden evidence parameter.
+    PayloadStorage(VariantPayloadStorage),
 }
 
 /// Owned call arguments, consumed one at a time as they are bound to parameters.
@@ -458,6 +460,9 @@ impl<'a> Interpreter<'a> {
                     bindings.push(Binding::Place(self.alloc_cell(value, span)?))
                 }
                 CallArgument::Dictionary(id) => bindings.push(Binding::Dictionary(id)),
+                CallArgument::PayloadStorage(storage) => bindings.push(Binding::Place(
+                    self.alloc_cell(Value::native(storage.is_indirect()), span)?,
+                )),
             }
         }
         let ret = if self.function(key).result_convention() == CallResultConvention::NoValue {
@@ -521,6 +526,9 @@ impl<'a> Interpreter<'a> {
                     })
                 }
                 CallArgument::Dictionary(id) => args.push(ValOrMut::Dictionary(id)),
+                CallArgument::PayloadStorage(_) => {
+                    unreachable!("a native takes no payload-storage evidence")
+                }
             }
         }
         self.ctx.call_native(callee, vec![], args, span)
@@ -962,16 +970,8 @@ impl<'a> Interpreter<'a> {
                 // materialized into a temporary. A flat `Uninit` payload grows into the right
                 // aggregate skeleton on the first field store (see `grow_value_to_path`); a unit
                 // payload is written explicitly by the emitter.
-                let storage = storage.unwrap_or_else(|| {
-                    let evidence = self.place_operand(slots, &operation.operands[0]);
-                    VariantPayloadStorage::from_indirect(
-                        *evidence
-                            .target_ref(&self.ctx)
-                            .expect("invalid variant payload-storage evidence place")
-                            .as_primitive_ty::<bool>()
-                            .expect("variant payload-storage evidence must be bool"),
-                    )
-                });
+                let storage = storage
+                    .unwrap_or_else(|| self.payload_storage_operand(slots, &operation.operands[0]));
                 Self::bind(
                     slots,
                     def.unwrap(),
@@ -983,6 +983,14 @@ impl<'a> Interpreter<'a> {
             }
             OperationKind::ExtractTag => {
                 self.exec_extract_tag(func, slots, &operation.operands, def.unwrap());
+            }
+            OperationKind::PayloadStorageIsIndirect => {
+                let storage = self.payload_storage_operand(slots, &operation.operands[0]);
+                Self::bind(
+                    slots,
+                    def.unwrap(),
+                    Binding::Value(Value::native(storage.is_indirect())),
+                );
             }
             OperationKind::Call {
                 ty,
@@ -3109,6 +3117,27 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Resolves a place-typed operand to its `Place`.
+    /// The payload storage that an evidence operand gives: static, or bound as a place.
+    fn payload_storage_operand(
+        &self,
+        slots: &FxHashMap<mir::Value, Binding>,
+        v: &mir::Value,
+    ) -> VariantPayloadStorage {
+        if let mir::Value::Evidence(evidence) = v
+            && let StaticEvidence::VariantPayloadStorage(indirect) = **evidence
+        {
+            return VariantPayloadStorage::from_indirect(indirect);
+        }
+        let evidence = self.place_operand(slots, v);
+        VariantPayloadStorage::from_indirect(
+            *evidence
+                .target_ref(&self.ctx)
+                .expect("invalid variant payload-storage evidence place")
+                .as_primitive_ty::<bool>()
+                .expect("variant payload-storage evidence must be bool"),
+        )
+    }
+
     fn place_operand(&self, slots: &FxHashMap<mir::Value, Binding>, v: &mir::Value) -> Place {
         match v {
             // A constant is bound only while it is a call's value argument; see

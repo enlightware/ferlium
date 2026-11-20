@@ -413,6 +413,7 @@ fn operation_types(kind: &OperationKind, types: &mut Vec<Type>) {
         | DropSubscriptEnv
         | ExtractTag
         | ExtractPayloadIndirection
+        | PayloadStorageIsIndirect
         | IsInitialized
         | Store
         | Clear

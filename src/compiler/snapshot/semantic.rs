@@ -70,6 +70,12 @@ pub(crate) enum SnapshotConstraint {
         payload_ty: SnapshotTypeId,
         payload_span: InstantiableLocation,
     },
+    VariantPayloadStorage {
+        variant_ty: SnapshotTypeId,
+        tag: String,
+        payload_ty: SnapshotTypeId,
+        span: InstantiableLocation,
+    },
     HaveTrait {
         trait_id: TraitId,
         input_tys: Vec<SnapshotTypeId>,
@@ -218,6 +224,18 @@ impl SnapshotConstraint {
                 payload_ty: graph.capture(*payload_ty)?,
                 payload_span: payload_span.clone(),
             },
+            PubTypeConstraint::VariantPayloadStorage {
+                origin: _,
+                variant_ty,
+                tag,
+                payload_ty,
+                span,
+            } => Self::VariantPayloadStorage {
+                variant_ty: graph.capture(*variant_ty)?,
+                tag: tag.to_string(),
+                payload_ty: graph.capture(*payload_ty)?,
+                span: span.clone(),
+            },
             PubTypeConstraint::HaveTrait {
                 origin: _,
                 trait_id,
@@ -296,6 +314,18 @@ impl SnapshotConstraint {
                 tag: tag.as_str().into(),
                 payload_ty: ty(types, *payload_ty)?,
                 payload_span: payload_span.clone(),
+            },
+            Self::VariantPayloadStorage {
+                variant_ty,
+                tag,
+                payload_ty,
+                span,
+            } => PubTypeConstraint::VariantPayloadStorage {
+                origin: Default::default(),
+                variant_ty: ty(types, *variant_ty)?,
+                tag: tag.as_str().into(),
+                payload_ty: ty(types, *payload_ty)?,
+                span: span.clone(),
             },
             Self::HaveTrait {
                 trait_id,

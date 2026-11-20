@@ -629,6 +629,7 @@ pub(crate) fn check_operand_roles(
                 "MIR function `{func_name}` {at}: runtime_dealloc requires a materialized allocation pointer, got {role:?}"
             );
         }
+        OperationKind::PayloadStorageIsIndirect => evidence(0),
         OperationKind::Variant {
             storage,
             has_layout_witness,

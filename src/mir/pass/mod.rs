@@ -322,6 +322,10 @@ fn normalize_semantic(
     // static evidence only; as static evidence, folding devirtualizes its entries.
     let static_dictionaries =
         |f: &Function| peephole::close_static_dictionaries(f, env).map(Rewrite::settled);
+    // Inlining binds payload-storage evidence too, which a construction then takes statically and
+    // which a read of it gives as a constant.
+    let static_payload_storages =
+        |f: &Function| peephole::fix_static_payload_storages(f, env).map(Rewrite::settled);
     // Fold early: it is what makes arguments known. Most folds shrink before the inliner measures
     // the body; constructive folds reserve their setup against the whole-function growth budget. A
     // chain of folds that crosses block boundaries needs the analysis to run again to propagate,
@@ -419,6 +423,11 @@ fn normalize_semantic(
             normalize::Pass {
                 id: NormalizingPass::StaticDictionaries,
                 run: &static_dictionaries,
+                enables: &[],
+            },
+            normalize::Pass {
+                id: NormalizingPass::StaticPayloadStorages,
+                run: &static_payload_storages,
                 enables: &[],
             },
             normalize::Pass {

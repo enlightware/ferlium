@@ -31,6 +31,7 @@ use crate::{
             NO_DERIVE_VALUE_ATTRIBUTE, derive_generic_value_code_entries,
             function_value_method_function, function_value_method_name,
             generated_value_evidence_types, generated_value_layout_getter,
+            generated_value_storage_constraints, value_layout_storage_constraints,
             variant_payload_storage_for_type, variant_payload_storage_type,
         },
     },
@@ -93,9 +94,16 @@ pub(crate) fn generic_value_methods_for_type(
             fn_span: span,
         })
     })?;
+    // The methods read the `Value` of the leaves, and the payload storages, which `clone` reads
+    // to build the cases, in the order of the generated dictionary's requirements.
     let constraints = evidence_tys
         .into_iter()
         .map(|ty| PubTypeConstraint::new_have_trait(trait_id, vec![ty], vec![], vec![], span))
+        .chain(generated_value_storage_constraints(
+            input_tys[0],
+            span,
+            &*solver,
+        ))
         .collect::<Vec<_>>();
     let Some(mut code_entries) =
         derive_generic_value_code_entries(trait_id, input_tys, span, arena, solver)?
@@ -259,6 +267,12 @@ fn auto_value_constraints(
         constraints.insert(constraint);
     }
 
+    // Where the payloads that the layout reads are stored, when that is open: the layout getters
+    // and `clone`, which builds the cases, read it.
+    for constraint in generated_value_storage_constraints(input_ty, span, env) {
+        constraints.insert(constraint);
+    }
+
     for (variant_case, member_ty) in auto_value_direct_members(input_ty, env) {
         if let Some((variant_ty, tag)) = variant_case {
             if variant_payload_storage_for_type(variant_ty, tag, span, env).is_ok() {
@@ -298,6 +312,34 @@ fn has_named_head_for_type_def(ty: Type, type_def: TypeDefId) -> bool {
         .is_some_and(|named| named.def == type_def)
 }
 
+/// The type whose layout the generated layout getters of a `Value` impl for `input_ty` compute: a
+/// named type's shape.
+fn value_layout_type(output: &Module, others: &Modules, input_ty: Type) -> Type {
+    let kind = input_ty.data().clone();
+    match kind {
+        TypeKind::Named(named) => ModuleEnv::new(output, others)
+            .type_def(named.def)
+            .instantiated_shape_with_effects(&named.params, &named.effect_params),
+        _ => input_ty,
+    }
+}
+
+/// The payload storages that the generated layout getters of a `Value` impl for `input_ty` read,
+/// as constraints. A written impl requires them too, whatever its methods read, since the getters
+/// receive the impl's evidence.
+pub(super) fn value_layout_getter_storage_constraints(
+    output: &Module,
+    others: &Modules,
+    input_ty: Type,
+    span: Location,
+) -> Result<Vec<PubTypeConstraint>, InternalCompilationError> {
+    value_layout_storage_constraints(
+        value_layout_type(output, others, input_ty),
+        span,
+        &ModuleEnv::new(output, others),
+    )
+}
+
 /// Build layout entries in the defining scope, with exactly the impl's supplied evidence.
 /// Symbolic constant reads in the body construct private field dictionaries from those leaves.
 pub(super) fn add_value_layout_getters(
@@ -309,13 +351,7 @@ pub(super) fn add_value_layout_getters(
     names: &[Ustr],
     span: Location,
 ) -> Result<Vec<LocalFunctionId>, InternalCompilationError> {
-    let kind = input_ty.data().clone();
-    let layout_ty = match kind {
-        TypeKind::Named(named) => ModuleEnv::new(output, others)
-            .type_def(named.def)
-            .instantiated_shape_with_effects(&named.params, &named.effect_params),
-        _ => input_ty,
-    };
+    let layout_ty = value_layout_type(output, others, input_ty);
     let quantifiers = TypeScheme::list_ty_vars(&input_ty, constraints.iter())
         .into_iter()
         .sorted()

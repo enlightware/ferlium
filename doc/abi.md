@@ -410,11 +410,20 @@ storage evidence together with `Value<B>`:
 - indirect storage uses the target pointer alignment for the case offset and `Value<B>::SIZE` and
   `Value<B>::ALIGN` to allocate the separate payload block.
 
-When the case remains open in unspecialized generic code, construction receives the indirection
-decision as a transient boolean evidence argument and combines it into the tag it writes. This is
-not a separate field in the constructed value. Once a variant value has been constructed, payload
-projection obtains the same classification from the high bit of the stored tag; it does not need a
-second boolean argument.
+The decision depends on the whole variant type, not on the payload alone: `Some(T)` in
+`None | Some(T)` is indirect once `T` holds an `Option<T>`. Code fixes it only when no substitution
+can change it, that is, when the payload is indirect already or the variant has no type variable
+outside callables. Otherwise:
+
+- Code that has a variant value, such as a match, a projection, a clone or a release, reads the
+  decision from the high bit of the stored tag.
+- Code that has none receives it as boolean evidence from where the type is known: a construction,
+  which combines it into the tag it writes, and the size and alignment of the variant. The `Value`
+  dictionary of such a variant therefore carries the decision of each open case.
+
+The evidence names the structural variant and the payload type with effects erased, so cases with
+the same payload share it. It is not a separate field in the constructed value. Specialization and
+inlining make it static, which fixes the decision as for a known type.
 
 A payloadless case writes only its tag and requires no payload layout witness.
 

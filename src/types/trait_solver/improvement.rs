@@ -107,12 +107,17 @@ impl<'a> TraitSolver<'a> {
         fn semantic_constraints(constraints: &[PubTypeConstraint]) -> Vec<PubTypeConstraint> {
             constraints
                 .iter()
-                // Payload layout is code-generation evidence. It has no outputs and cannot make
-                // an implementation applicable or inapplicable, so speculative improvement must
-                // not pay to instantiate and solve it for every candidate. The full constraint
-                // list is still used when the selected blanket implementation is materialized.
+                // Payload layout and storage are code-generation evidence. They have no outputs
+                // and cannot make an implementation applicable or inapplicable, so speculative
+                // improvement must not pay to instantiate and solve them for every candidate. The
+                // full constraint list is still used when the selected blanket implementation is
+                // materialized.
                 .filter(|constraint| {
-                    !matches!(constraint, PubTypeConstraint::VariantPayloadLayout { .. })
+                    !matches!(
+                        constraint,
+                        PubTypeConstraint::VariantPayloadLayout { .. }
+                            | PubTypeConstraint::VariantPayloadStorage { .. }
+                    )
                 })
                 .cloned()
                 .collect()

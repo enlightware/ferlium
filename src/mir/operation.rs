@@ -921,6 +921,24 @@ impl Operation {
         }
     }
 
+    /// Reads variant payload-storage evidence as an ordinary materialized `bool`: whether the
+    /// payload of a case is behind an owning pointer.
+    ///
+    /// Code that has a variant reads its storage from the stored tag, and a construction passes the
+    /// evidence to [`Self::variant`]. Only code that has neither, as the layout of a variant whose
+    /// storage substitution may change, branches on the evidence itself.
+    pub fn payload_storage_is_indirect(
+        span: impl Into<DebugLocation>,
+        evidence: mir::Value,
+    ) -> Self {
+        Operation {
+            result_id: None,
+            span: span.into(),
+            operands: Box::new([evidence]),
+            kind: OperationKind::PayloadStorageIsIndirect,
+        }
+    }
+
     /// Tests whether a physical place currently contains an initialized value.
     ///
     /// Dense executors implement this with the drop flag associated with the place. The operation
@@ -1611,6 +1629,8 @@ pub enum OperationKind {
     ExtractTag,
     /// Read the physical indirection bit of a variant's stored tag.
     ExtractPayloadIndirection,
+    /// Read variant payload-storage evidence as a `bool`.
+    PayloadStorageIsIndirect,
     /// Read the physical initialization flag associated with a place.
     IsInitialized,
     /// Store a value into unoccupied place storage.
@@ -1705,6 +1725,7 @@ impl OperationKind {
             | BuildArray { .. }
             | ExtractTag
             | ExtractPayloadIndirection
+            | PayloadStorageIsIndirect
             | IsInitialized
             | Store
             | Clear
@@ -1772,6 +1793,7 @@ impl OperationKind {
             | BuildArray { .. }
             | ExtractTag
             | ExtractPayloadIndirection
+            | PayloadStorageIsIndirect
             | IsInitialized
             | Store
             | Clear
@@ -1884,7 +1906,9 @@ impl OperationKind {
             BuildClosure { signature, .. } => OperationResult::Lowered(signature.ty),
             Variant { metadata, .. } => OperationResult::Lowered(metadata.ty),
             ExtractTag => OperationResult::VariantTag,
-            ExtractPayloadIndirection => OperationResult::Lowered(cached_primitive_ty!(bool)),
+            ExtractPayloadIndirection | PayloadStorageIsIndirect => {
+                OperationResult::Lowered(cached_primitive_ty!(bool))
+            }
             IsInitialized => OperationResult::Lowered(cached_primitive_ty!(bool)),
             StackSave => OperationResult::StackMarker,
             Call {
@@ -2075,6 +2099,11 @@ impl OperationKind {
                 whole.operands.len(),
                 1,
                 "extract_payload_indirection takes exactly the variant place"
+            ),
+            PayloadStorageIsIndirect => assert_eq!(
+                whole.operands.len(),
+                1,
+                "payload_storage_is_indirect takes exactly the storage evidence"
             ),
             IsInitialized => assert_eq!(
                 whole.operands.len(),
@@ -2377,6 +2406,11 @@ impl OperationKind {
             ExtractPayloadIndirection => write!(
                 f,
                 "extract_payload_indirection {}",
+                whole.operands[0].format_with(env)
+            ),
+            PayloadStorageIsIndirect => write!(
+                f,
+                "payload_storage_is_indirect {}",
                 whole.operands[0].format_with(env)
             ),
             IsInitialized => write!(f, "is_initialized {}", whole.operands[0].format_with(env)),

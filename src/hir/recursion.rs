@@ -190,7 +190,8 @@ impl Collector<'_> {
             | NodeKind::TraitMethodApply(never)
             | NodeKind::GetTraitMethod(never)
             | NodeKind::GetTraitAssociatedConst(never)
-            | NodeKind::GetTraitDictionary(never) => match *never {},
+            | NodeKind::GetTraitDictionary(never)
+            | NodeKind::GetVariantPayloadStorage(never) => match *never {},
         }
     }
 }

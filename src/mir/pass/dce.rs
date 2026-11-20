@@ -837,6 +837,7 @@ pub(super) fn may_leave_frame_storage(
         | OperationKind::BuildArray { .. }
         | OperationKind::ExtractTag
         | OperationKind::ExtractPayloadIndirection
+        | OperationKind::PayloadStorageIsIndirect
         | OperationKind::IsInitialized
         | OperationKind::Store
         | OperationKind::Clear

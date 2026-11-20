@@ -30,7 +30,11 @@ use crate::{
     },
     std::{
         core_traits_names::VALUE_TRAIT_NAME,
-        value::{dynamic_product_member_layouts, generated_value_evidence_types},
+        value::{
+            VariantPayloadStorageDecision, dynamic_product_member_layouts,
+            generated_value_evidence_types, generated_value_storage_constraints,
+            variant_payload_storage_decision,
+        },
     },
     types::{
         effects::{EffType, EffectVar},
@@ -469,9 +473,12 @@ pub(crate) fn is_written_leaf(
         }
         // It is the `Value` of its payload, which is reduced as such.
         PubTypeConstraint::VariantPayloadLayout { .. } => false,
+        // Where a payload is stored is a fact of the representation, as `Value` of a type
+        // variable is, which a clause does not write.
         PubTypeConstraint::TupleAtIndexIs { .. }
         | PubTypeConstraint::ProjectionSubscriptIs { .. }
-        | PubTypeConstraint::TypeHasVariant { .. } => true,
+        | PubTypeConstraint::TypeHasVariant { .. }
+        | PubTypeConstraint::VariantPayloadStorage { .. } => true,
     }
 }
 
@@ -908,6 +915,12 @@ impl TraitSolver<'_> {
     }
 
     pub(crate) fn requirement_is_public(&self, constraint: &PubTypeConstraint) -> bool {
+        // Where a payload is stored follows from the structure of the type alone, as its layout
+        // does, so a caller in any module gives it whatever the visibility of the types: there
+        // is no implementation to find.
+        if let PubTypeConstraint::VariantPayloadStorage { .. } = constraint {
+            return true;
+        }
         if let PubTypeConstraint::HaveTrait { trait_id, .. } = constraint
             && !self.definition_is_public(trait_id.module, DefKind::Trait(trait_id.index))
         {
@@ -973,6 +986,23 @@ impl TraitSolver<'_> {
             ProjectionSubscriptIs { subscript_ty, .. } => head_known(subscript_ty.receiver_ty()),
             TypeHasVariant { variant_ty, .. } => head_known(*variant_ty),
             VariantPayloadLayout { .. } => false,
+            // The type answers where a payload is stored once no substitution can change it.
+            VariantPayloadStorage {
+                variant_ty,
+                tag,
+                payload_ty,
+                span,
+                ..
+            } => matches!(
+                variant_payload_storage_decision(
+                    *variant_ty,
+                    *tag,
+                    *payload_ty,
+                    span.use_site,
+                    self
+                )?,
+                VariantPayloadStorageDecision::Static(_)
+            ),
         })
     }
 
@@ -1613,6 +1643,13 @@ impl TraitSolver<'_> {
                 );
                 member.set_origin(constraint.origin());
                 members.push(evidence.push(member, Some(id)));
+            }
+            // The generated dictionary also reads where its open payloads are stored.
+            for mut storage in
+                generated_value_storage_constraints(input_tys[0], constraint.use_site(), &*self)
+            {
+                storage.set_origin(constraint.origin());
+                members.push(evidence.push(storage, Some(id)));
             }
             evidence.nodes[id].source = EvidencePlanSource::GeneratedValue { members };
             *work -= 1;

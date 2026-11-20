@@ -1616,7 +1616,8 @@ pub(super) fn is_compiler_provided_value_constraint(
     module_env: ModuleEnv<'_>,
 ) -> bool {
     match c {
-        PubTypeConstraint::VariantPayloadLayout { .. } => true,
+        PubTypeConstraint::VariantPayloadLayout { .. }
+        | PubTypeConstraint::VariantPayloadStorage { .. } => true,
         PubTypeConstraint::HaveTrait {
             trait_id,
             input_tys,
@@ -1681,6 +1682,11 @@ pub(super) fn first_unbound_type_in_constraints<'a>(
             }
             PubTypeConstraint::VariantPayloadLayout { payload_ty, .. } => {
                 if let Some(unbound) = in_type(*payload_ty, span) {
+                    return Some(unbound);
+                }
+            }
+            PubTypeConstraint::VariantPayloadStorage { variant_ty, .. } => {
+                if let Some(unbound) = in_type(*variant_ty, span) {
                     return Some(unbound);
                 }
             }

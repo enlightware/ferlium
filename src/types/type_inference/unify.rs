@@ -35,7 +35,10 @@ use crate::{
     parser::location::Location,
     std::{
         core_traits_names::{FROM_ITERATOR_TRAIT_NAME, REPR_TRAIT_NAME, VALUE_TRAIT_NAME},
-        value::{is_compiler_provided_value_trait_application, type_has_static_layout},
+        value::{
+            TypeLayoutEnv, is_compiler_provided_value_trait_application,
+            normalize_variant_payload_storage, type_has_static_layout,
+        },
     },
     types::{
         effect_polarity::EffectPolarity,
@@ -581,9 +584,9 @@ impl UnifiedTypeInference {
         // iterating a hash set here made the diagnostic span and dictionary order depend on the
         // process-local identities assigned by the type interner.
         let mut remaining_constraints = Vec::new();
-        // Case-qualified payload layouts are evidence obligations with no trait outputs, so they
-        // cannot improve inference. Normalize them once after the semantic fixed point instead of
-        // revisiting potentially large recursive `Value<B>` applications on every pass.
+        // Case-qualified payload layouts and storages are evidence obligations with no outputs,
+        // so they cannot improve inference. Normalize them once after the semantic fixed point
+        // instead of revisiting potentially large recursive `Value<B>` applications on every pass.
         let mut variant_layout_constraints = Vec::new();
 
         // First, resolve the explicit mutability constraints, which solving types reads, saving
@@ -648,7 +651,11 @@ impl UnifiedTypeInference {
             for constraint in ty_constraints {
                 match constraint {
                     TypeConstraint::Pub(cst) => {
-                        if matches!(cst, PubTypeConstraint::VariantPayloadLayout { .. }) {
+                        if matches!(
+                            cst,
+                            PubTypeConstraint::VariantPayloadLayout { .. }
+                                | PubTypeConstraint::VariantPayloadStorage { .. }
+                        ) {
                             variant_layout_constraints.push(cst);
                         } else {
                             remaining_constraints.push(cst);
@@ -689,18 +696,24 @@ impl UnifiedTypeInference {
 
             if !variant_layout_constraints.is_empty() {
                 unified_ty_inf.substitute_in_constraints_in_place(&mut variant_layout_constraints);
-                variant_layout_constraints.retain(|constraint| {
-                    let PubTypeConstraint::VariantPayloadLayout {
-                        payload_ty,
-                        payload_span,
-                        ..
-                    } = constraint
-                    else {
-                        unreachable!("only variant layout evidence is deferred")
+                for constraint in variant_layout_constraints {
+                    let kept = match &constraint {
+                        PubTypeConstraint::VariantPayloadLayout {
+                            payload_ty,
+                            payload_span,
+                            ..
+                        } => (!type_has_static_layout(
+                            *payload_ty,
+                            payload_span.use_site,
+                            trait_solver,
+                        ))
+                        .then_some(constraint),
+                        PubTypeConstraint::VariantPayloadStorage { .. } => unified_ty_inf
+                            .normalize_variant_payload_storage(&constraint, trait_solver)?,
+                        _ => unreachable!("only variant layout and storage evidence is deferred"),
                     };
-                    !type_has_static_layout(*payload_ty, payload_span.use_site, trait_solver)
-                });
-                remaining_constraints.extend(variant_layout_constraints);
+                    remaining_constraints.extend(kept);
+                }
                 unified_ty_inf.deduplicate_constraints_in_place(&mut remaining_constraints);
             }
 
@@ -2154,7 +2167,7 @@ impl UnifiedTypeInference {
                     }
                     aggregation.constraints.push(Cow::Borrowed(constraint));
                 }
-                VariantPayloadLayout { .. } => {
+                VariantPayloadLayout { .. } | VariantPayloadStorage { .. } => {
                     aggregation.constraints.push(Cow::Borrowed(constraint));
                 }
                 HaveTrait {
@@ -2453,6 +2466,16 @@ impl UnifiedTypeInference {
         )
     }
 
+    /// Normalize a storage obligation with the current substitution, see
+    /// [`normalize_variant_payload_storage`].
+    pub(crate) fn normalize_variant_payload_storage(
+        &mut self,
+        constraint: &PubTypeConstraint,
+        env: &impl TypeLayoutEnv,
+    ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
+        normalize_variant_payload_storage(&self.substitute_in_constraint(constraint), env)
+    }
+
     pub(crate) fn unify_pub_constraint(
         &mut self,
         constraint: &PubTypeConstraint,
@@ -2501,6 +2524,9 @@ impl UnifiedTypeInference {
                 payload_ty,
                 payload_span: payload_span.clone(),
             }));
+        }
+        if let PubTypeConstraint::VariantPayloadStorage { .. } = constraint {
+            return self.normalize_variant_payload_storage(constraint, trait_solver);
         }
         if let PubTypeConstraint::HaveTrait {
             origin: _,
@@ -2746,7 +2772,7 @@ impl UnifiedTypeInference {
                     Ok(None)
                 }
             }
-            VariantPayloadLayout { .. } | HaveTrait { .. } => {
+            VariantPayloadLayout { .. } | VariantPayloadStorage { .. } | HaveTrait { .. } => {
                 unreachable!("evidence and trait constraints are handled by the caller")
             }
         }
@@ -3483,7 +3509,8 @@ fn constraint_solve_priority(constraint: &PubTypeConstraint, trait_solver: &Trai
             1
         }
         PubTypeConstraint::ProjectionSubscriptIs { .. } => 5,
-        PubTypeConstraint::VariantPayloadLayout { .. } => 95,
+        PubTypeConstraint::VariantPayloadLayout { .. }
+        | PubTypeConstraint::VariantPayloadStorage { .. } => 95,
         PubTypeConstraint::HaveTrait {
             output_tys,
             output_effs,

@@ -1066,6 +1066,7 @@ impl<'a, 's> Body<'a, 's> {
                     | Variant { .. }
                     | ExtractTag
                     | ExtractPayloadIndirection
+                    | PayloadStorageIsIndirect
                     | IsInitialized
                     | Store
                     | Clear
@@ -4163,6 +4164,10 @@ impl<'a, 's> Body<'a, 's> {
                     self.i(I::I32Const(31));
                     self.i(I::I32ShrU);
                 }
+            }
+            // Payload-storage evidence is the `bool` itself, as a shell built from it reads it.
+            PayloadStorageIsIndirect => {
+                self.read(&args[0])?;
             }
             StackSave => self.i(I::GlobalGet(Global::Stack as u32)),
             CompareEqual => {

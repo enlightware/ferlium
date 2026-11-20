@@ -286,6 +286,10 @@ impl UnifiedTypeInference {
                 self.substitute_in_types_in_place(&mut get_const.output_tys);
                 self.substitute_in_effect_types_in_place(&mut get_const.output_effs);
             }
+            GetVariantPayloadStorage(get_storage) => {
+                get_storage.variant_ty = self.substitute_in_type(get_storage.variant_ty);
+                get_storage.payload_ty = self.substitute_in_type(get_storage.payload_ty);
+            }
             GetTraitDictionary(get_dict) => {
                 self.substitute_in_types_in_place(&mut get_dict.input_tys);
                 self.substitute_in_types_in_place(&mut get_dict.output_tys);
@@ -356,6 +360,11 @@ impl UnifiedTypeInference {
                 ..
             }
             | VariantPayloadLayout {
+                variant_ty,
+                payload_ty,
+                ..
+            }
+            | VariantPayloadStorage {
                 variant_ty,
                 payload_ty,
                 ..

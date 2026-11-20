@@ -1942,14 +1942,17 @@ fn try_fold_call(
             mir::Value::Dictionary(id) => {
                 arguments.push(ConstArgument::Dictionary(ClosedTraitDictionary::bare(*id)))
             }
-            mir::Value::Evidence(evidence) => {
-                let HiddenEvidenceArgValue::TraitDictionary(dictionary) =
-                    static_evidence_value(evidence)
-                else {
+            mir::Value::Evidence(evidence) => match static_evidence_value(evidence) {
+                HiddenEvidenceArgValue::TraitDictionary(dictionary) => {
+                    arguments.push(ConstArgument::Dictionary(dictionary))
+                }
+                HiddenEvidenceArgValue::VariantPayloadStorage(storage) => {
+                    arguments.push(ConstArgument::PayloadStorage(storage))
+                }
+                HiddenEvidenceArgValue::Subscript(_) => {
                     return discard(arguments, NotFoldable::EvidenceNotKnown);
-                };
-                arguments.push(ConstArgument::Dictionary(dictionary));
-            }
+                }
+            },
             // A forwarded dictionary parameter is not known here; specialization is a later phase.
             _ => return discard(arguments, NotFoldable::EvidenceNotKnown),
         }

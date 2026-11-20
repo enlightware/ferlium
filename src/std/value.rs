@@ -16,6 +16,7 @@ use crate::{
     containers::b,
     hir::{
         self, CallArgument, NodeArena, NodeId,
+        dictionary::DictionaryReq,
         emit_value_impl::function_value_method,
         function::{CallableDefinition, Function, PendingScriptFunction},
         native_functions::{NativeDropFn, NativeFnN, NativeFnR, NativeOutFnR},
@@ -53,6 +54,7 @@ use crate::{
         trait_solver::TraitSolver,
         r#type::{CallImplType, FnArgType, FnType, Type, TypeDef, TypeKind, tuple_type},
         type_like::TypeLike,
+        type_mapper::EffectErasingMapper,
         type_scheme::PubTypeConstraint,
     },
 };
@@ -256,9 +258,10 @@ impl ValueLayout {
 /// A target-matched `Value` layout expression.
 ///
 /// Static layouts fold to [`Constant`](ValueLayoutExpr::Constant). Open layouts retain only the
-/// associated-constant reads which a generated dictionary getter must perform at run time. The
-/// same expression is evaluated for compile-time layout queries and emitted as HIR for open
-/// generated `Value` dictionaries, keeping the two calculations identical by construction.
+/// associated-constant reads and the payload storages which a generated dictionary getter must
+/// read at run time. The same expression is evaluated for compile-time layout queries and emitted
+/// as HIR for open generated `Value` dictionaries, keeping the two calculations identical by
+/// construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ValueLayoutExpr {
     Constant(isize),
@@ -269,6 +272,14 @@ pub(crate) enum ValueLayoutExpr {
     Add(Box<Self>, Box<Self>),
     Max(Box<Self>, Box<Self>),
     AlignTo(Box<Self>, Box<Self>),
+    /// `indirect` when the payload of a case is behind a pointer, `inline` otherwise. The storage
+    /// is open here, so it is read from the evidence of `storage`, a canonical
+    /// [`DictionaryReq::VariantPayloadIndirection`] (see [`variant_payload_storage_decision`]).
+    PayloadStorage {
+        storage: DictionaryReq,
+        indirect: Box<Self>,
+        inline: Box<Self>,
+    },
 }
 
 impl ValueLayoutExpr {
@@ -325,6 +336,20 @@ impl ValueLayoutExpr {
         }
     }
 
+    /// A choice whose two layouts are equal reads no storage. The methods of a dictionary find the
+    /// storages they read on their own ([`generated_value_storage_requirements`]).
+    fn payload_storage(storage: DictionaryReq, indirect: Self, inline: Self) -> Self {
+        if indirect == inline {
+            inline
+        } else {
+            Self::PayloadStorage {
+                storage,
+                indirect: Box::new(indirect),
+                inline: Box::new(inline),
+            }
+        }
+    }
+
     pub(crate) fn constant_value(&self) -> Option<isize> {
         match self {
             Self::Constant(value) => Some(*value),
@@ -332,25 +357,44 @@ impl ValueLayoutExpr {
         }
     }
 
-    fn collect_evidence_types(&self, evidence: &mut Vec<Type>) {
+    fn collect_evidence(&self, types: &mut Vec<Type>, storages: &mut Vec<DictionaryReq>) {
         match self {
             Self::Constant(_) => {}
             Self::AssociatedConst { ty, .. } => {
-                if !evidence.contains(ty) {
-                    evidence.push(*ty);
+                if !types.contains(ty) {
+                    types.push(*ty);
                 }
             }
             Self::Add(left, right) | Self::Max(left, right) | Self::AlignTo(left, right) => {
-                left.collect_evidence_types(evidence);
-                right.collect_evidence_types(evidence);
+                left.collect_evidence(types, storages);
+                right.collect_evidence(types, storages);
+            }
+            Self::PayloadStorage {
+                storage,
+                indirect,
+                inline,
+            } => {
+                if !storages.contains(storage) {
+                    storages.push(storage.clone());
+                }
+                indirect.collect_evidence(types, storages);
+                inline.collect_evidence(types, storages);
             }
         }
     }
 
+    /// The types whose `Value` layout this expression reads.
     fn evidence_types(&self) -> Vec<Type> {
-        let mut evidence = Vec::new();
-        self.collect_evidence_types(&mut evidence);
-        evidence
+        let mut types = Vec::new();
+        self.collect_evidence(&mut types, &mut Vec::new());
+        types
+    }
+
+    /// The payload storages that this expression reads.
+    pub(crate) fn storage_requirements(&self) -> Vec<DictionaryReq> {
+        let mut storages = Vec::new();
+        self.collect_evidence(&mut Vec::new(), &mut storages);
+        storages
     }
 }
 
@@ -429,6 +473,14 @@ impl ValueLayoutFormula {
             assert_eq!(index, VALUE_ALIGN_ASSOC_CONST_INDEX);
             self.align
         }
+    }
+
+    /// The payload storages that the size or the alignment reads, in a stable order.
+    fn storage_requirements(&self) -> Vec<DictionaryReq> {
+        let mut storages = Vec::new();
+        self.size.collect_evidence(&mut Vec::new(), &mut storages);
+        self.align.collect_evidence(&mut Vec::new(), &mut storages);
+        storages
     }
 }
 
@@ -774,10 +826,158 @@ pub(crate) fn is_tag_scalar(ty: Type, env: &impl TypeLayoutEnv) -> bool {
     })
 }
 
-/// Return the storage mode shared by occurrences of `payload_ty` in `variant_ty`.
+/// Whether `ty` has no type variable outside callables. Substitution then cannot change its
+/// representation, as every callable has one layout whatever its signature (`doc/abi.md`,
+/// "First-class callables"). Effect variables are within callables, so they never count.
+///
+/// The walk follows what [`same_representation`] compares, which includes the arguments of named
+/// and native types, so that a type closed here compares the same under every substitution.
+pub(crate) fn representation_is_closed(ty: Type) -> bool {
+    let mut seen = FxHashSet::default();
+    let mut pending = vec![ty];
+    while let Some(ty) = pending.pop() {
+        if ty.summary().free_ty_vars.is_empty() || !seen.insert(ty) {
+            continue;
+        }
+        let data = ty.data();
+        match &*data {
+            TypeKind::Variable(_) => return false,
+            TypeKind::Function(_) | TypeKind::Subscript(_) | TypeKind::Never => {}
+            TypeKind::Tuple(fields) => pending.extend(fields.iter().copied()),
+            TypeKind::Record(fields) | TypeKind::Variant(fields) => {
+                pending.extend(fields.iter().map(|(_, field)| *field))
+            }
+            TypeKind::Named(named) => pending.extend(named.params.iter().copied()),
+            TypeKind::Native(native) => pending.extend(native.arguments.iter().copied()),
+        }
+    }
+    true
+}
+
+/// Where the payload of a variant case is stored, as far as the code at hand can tell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum VariantPayloadStorageDecision {
+    /// No substitution can change the storage.
+    Static(VariantPayloadStorage),
+    /// A substitution may change the storage, so the code receives it as the evidence of this
+    /// requirement, from where the type is known.
+    Evidence(DictionaryReq),
+}
+
+/// Decide where the payload of the case `tag` of `variant_ty` is stored (`doc/abi.md`, "Tagged
+/// unions"). The storage is fixed only when no substitution can change it: the payload is
+/// indirect already, as substitution only adds paths back to the variant, or the variant has no
+/// type variable outside callables. Otherwise it is evidence, whose requirement is in canonical
+/// form, so that a function and its callers name it alike: the structural variant type with
+/// effects erased, as effects never decide a representation, and the first of its cases with the
+/// same payload, as the storage depends on the payload type and not on the case. The form is
+/// chosen from the erased variant, so that deciding it again gives it back. A variant type that is
+/// a variable keeps the case `tag` and the payload `payload_ty` that inference gave it.
+pub(crate) fn variant_payload_storage_decision(
+    variant_ty: Type,
+    tag: Ustr,
+    payload_ty: Type,
+    span: Location,
+    env: &impl TypeLayoutEnv,
+) -> Result<VariantPayloadStorageDecision, InternalCompilationError> {
+    use VariantPayloadStorageDecision::*;
+    let erase = |ty: Type| ty.map(&mut EffectErasingMapper);
+    if variant_ty.data().is_variable() {
+        if payload_ty == Type::unit() {
+            return Ok(Static(VariantPayloadStorage::Inline));
+        }
+        return Ok(Evidence(DictionaryReq::new_variant_payload_indirection(
+            variant_ty,
+            tag,
+            erase(payload_ty),
+        )));
+    }
+    let (structural_ty, cases) = structural_variant(variant_ty, env).ok_or_else(|| {
+        internal_compilation_error!(Internal {
+            error: format!("cannot resolve variant representation for type {variant_ty:?}"),
+            span,
+        })
+    })?;
+    let payload_ty = cases
+        .into_iter()
+        .find_map(|(case_tag, payload_ty)| (case_tag == tag).then_some(payload_ty))
+        .ok_or_else(|| {
+            internal_compilation_error!(Internal {
+                error: format!("variant type {variant_ty:?} has no case .{tag}"),
+                span,
+            })
+        })?;
+    if payload_ty == Type::unit() {
+        return Ok(Static(VariantPayloadStorage::Inline));
+    }
+    let storage = payload_storage_in_variant(structural_ty, payload_ty, env);
+    if storage.is_indirect() || representation_is_closed(structural_ty) {
+        return Ok(Static(storage));
+    }
+    // Erasing effects changes no representation, hence not the decision either.
+    let structural_ty = erase(structural_ty);
+    let payload_ty = erase(payload_ty);
+    let first_tag = structural_ty
+        .data()
+        .as_variant()
+        .expect("erasing effects keeps a variant")
+        .iter()
+        .find_map(|(case_tag, case_payload_ty)| {
+            (*case_payload_ty == payload_ty).then_some(*case_tag)
+        })
+        .expect("the case itself has this payload");
+    Ok(Evidence(DictionaryReq::new_variant_payload_indirection(
+        structural_ty,
+        first_tag,
+        payload_ty,
+    )))
+}
+
+/// Normalize a storage obligation whose types are substituted already: `None` once no
+/// substitution can change the storage, otherwise the obligation in the canonical form of
+/// [`variant_payload_storage_decision`], with its origin and location.
+pub(crate) fn normalize_variant_payload_storage(
+    constraint: &PubTypeConstraint,
+    env: &impl TypeLayoutEnv,
+) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
+    let PubTypeConstraint::VariantPayloadStorage {
+        origin,
+        variant_ty,
+        tag,
+        payload_ty,
+        span,
+    } = constraint
+    else {
+        unreachable!("only a storage obligation is normalized as such, not {constraint:?}")
+    };
+    Ok(
+        match variant_payload_storage_decision(*variant_ty, *tag, *payload_ty, span.use_site, env)?
+        {
+            VariantPayloadStorageDecision::Static(_) => None,
+            VariantPayloadStorageDecision::Evidence(DictionaryReq::VariantPayloadIndirection {
+                variant_ty,
+                tag,
+                payload_ty,
+            }) => Some(PubTypeConstraint::VariantPayloadStorage {
+                origin: *origin,
+                variant_ty,
+                tag,
+                payload_ty,
+                span: span.clone(),
+            }),
+            VariantPayloadStorageDecision::Evidence(requirement) => {
+                unreachable!("storage evidence has a storage requirement, not {requirement:?}")
+            }
+        },
+    )
+}
+
+/// Return the storage mode shared by occurrences of `payload_ty` in `variant_ty`, when no
+/// substitution can change it, as in [`variant_payload_storage_decision`].
 ///
 /// Storage is a function of the structural variant and payload type, so the case tag does not
-/// participate. `None` means the variant remains open or does not contain that payload type.
+/// participate. `None` means that the storage may still change or that the variant does not
+/// contain that payload type: the code reads it from the stored tag.
 pub(crate) fn variant_payload_storage_for_payload_type(
     variant_ty: Type,
     payload_ty: Type,
@@ -788,10 +988,7 @@ pub(crate) fn variant_payload_storage_for_payload_type(
         return None;
     }
     let storage = payload_storage_in_variant(structural_ty, payload_ty, env);
-    // Substitution may introduce a recursive path through an open payload (for example
-    // Option<T> with T = List, where List contains Option<List>). Its active tag already carries
-    // the representation choice; use that at runtime until inline storage is known to be stable.
-    (storage.is_indirect() || variant_ty.is_constant()).then_some(storage)
+    (storage.is_indirect() || representation_is_closed(structural_ty)).then_some(storage)
 }
 
 /// Return one possibly indirect payload type for representation cleanup.
@@ -806,7 +1003,7 @@ pub(crate) fn variant_indirect_payload_type(
     let (structural_ty, cases) = structural_variant(variant_ty, env)?;
     cases.into_iter().find_map(|(_, payload_ty)| {
         (payload_storage_in_variant(structural_ty, payload_ty, env).is_indirect()
-            || (!variant_ty.is_constant() && payload_ty != Type::unit()))
+            || (!representation_is_closed(structural_ty) && payload_ty != Type::unit()))
         .then_some(payload_ty)
     })
 }
@@ -896,18 +1093,35 @@ fn value_layout_formula_inner(
             return ValueLayoutFormula::product(fields, span);
         }
         Variant(variants) => {
-            let payload_tys = variants
-                .iter()
-                .map(|(_, payload_ty)| *payload_ty)
-                .collect::<Vec<_>>();
+            let payload_tys = variants.clone();
             drop(ty_data);
             let payloads = payload_tys
                 .into_iter()
-                .map(|payload_ty| {
-                    if payload_storage_in_variant(ty, payload_ty, env).is_indirect() {
-                        ValueLayoutFormula::constant(ValueLayout::native::<usize>(), span)
-                    } else {
-                        value_layout_formula_inner(payload_ty, span, env, active)
+                .map(|(tag, payload_ty)| {
+                    let pointer =
+                        || ValueLayoutFormula::constant(ValueLayout::native::<usize>(), span);
+                    use VariantPayloadStorageDecision::*;
+                    match variant_payload_storage_decision(ty, tag, payload_ty, span, env)? {
+                        Static(VariantPayloadStorage::Indirect) => pointer(),
+                        Static(VariantPayloadStorage::Inline) => {
+                            value_layout_formula_inner(payload_ty, span, env, active)
+                        }
+                        Evidence(storage) => {
+                            let pointer = pointer()?;
+                            let inline = value_layout_formula_inner(payload_ty, span, env, active)?;
+                            Ok(ValueLayoutFormula {
+                                size: ValueLayoutExpr::payload_storage(
+                                    storage.clone(),
+                                    pointer.size,
+                                    inline.size,
+                                ),
+                                align: ValueLayoutExpr::payload_storage(
+                                    storage,
+                                    pointer.align,
+                                    inline.align,
+                                ),
+                            })
+                        }
                     }
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -962,15 +1176,157 @@ pub(crate) fn value_layout_formula_for_type(
     value_layout_formula_inner(ty, span, env, &mut FxHashSet::default())
 }
 
-pub(crate) fn value_layout_getter_evidence_types(
+/// What a layout expression reads: the `Value` of its evidence types, then its payload storages.
+fn value_layout_requirements(expr: &ValueLayoutExpr, value_trait: TraitId) -> Vec<DictionaryReq> {
+    expr.evidence_types()
+        .into_iter()
+        .map(|ty| DictionaryReq::new_trait_impl(value_trait, vec![ty], vec![], vec![]))
+        .chain(expr.storage_requirements())
+        .collect()
+}
+
+/// The constraint whose evidence is `requirement`, which is a `Value` or a payload storage.
+fn requirement_constraint(requirement: &DictionaryReq, span: Location) -> PubTypeConstraint {
+    match requirement {
+        DictionaryReq::TraitImpl {
+            trait_id,
+            input_tys,
+            output_tys,
+            output_effs,
+        } => PubTypeConstraint::new_have_trait(
+            *trait_id,
+            input_tys.clone(),
+            output_tys.clone(),
+            output_effs.clone(),
+            span,
+        ),
+        DictionaryReq::VariantPayloadIndirection {
+            variant_ty,
+            tag,
+            payload_ty,
+        } => PubTypeConstraint::new_variant_payload_storage(*variant_ty, *tag, *payload_ty, span),
+        DictionaryReq::ProjectionSubscript { .. } => {
+            unreachable!("a layout reads no field: {requirement:?}")
+        }
+    }
+}
+
+/// What the getter of the layout constant `associated_const` of `ty` reads, in the order of its
+/// constraints: see [`generated_value_layout_getter`].
+pub(crate) fn value_layout_getter_requirements(
     ty: Type,
     associated_const: TraitAssociatedConstIndex,
+    value_trait: TraitId,
     span: Location,
     env: &impl TypeLayoutEnv,
-) -> Result<Vec<Type>, InternalCompilationError> {
+) -> Result<Vec<DictionaryReq>, InternalCompilationError> {
+    Ok(value_layout_requirements(
+        &value_layout_formula_for_type(ty, span, env)?.associated_const(associated_const),
+        value_trait,
+    ))
+}
+
+/// The payload storages that the generated `Value` dictionary of `ty` reads: those of every open
+/// case of the variants it holds, down to the leaves of [`generated_value_evidence_types`], whose
+/// own dictionaries read theirs. Its layout reads those it does not hide behind a pointer, but its
+/// methods read them all: `clone` builds the cases and the dictionaries of their payloads. Each is
+/// in the canonical form of [`variant_payload_storage_decision`].
+pub(crate) fn generated_value_storage_requirements(
+    ty: Type,
+    span: Location,
+    env: &impl TypeLayoutEnv,
+) -> Vec<DictionaryReq> {
+    let mut storages = Vec::new();
+    collect_generated_value_storages(ty, span, env, &mut FxHashSet::default(), &mut storages);
+    storages
+}
+
+fn collect_generated_value_storages(
+    ty: Type,
+    span: Location,
+    env: &impl TypeLayoutEnv,
+    active: &mut FxHashSet<Type>,
+    storages: &mut Vec<DictionaryReq>,
+) {
+    // A closed type fixes every storage within it, and recursive types lead back to an active one.
+    if representation_is_closed(ty) || !active.insert(ty) {
+        return;
+    }
+    let data = ty.data().clone();
+    match data {
+        TypeKind::Tuple(fields) => {
+            for field in fields {
+                collect_generated_value_storages(field, span, env, active, storages);
+            }
+        }
+        TypeKind::Record(fields) => {
+            for (_, field) in fields {
+                collect_generated_value_storages(field, span, env, active, storages);
+            }
+        }
+        TypeKind::Variant(cases) => {
+            for (tag, payload_ty) in cases {
+                if let Ok(VariantPayloadStorageDecision::Evidence(storage)) =
+                    variant_payload_storage_decision(ty, tag, payload_ty, span, env)
+                    && !storages.contains(&storage)
+                {
+                    storages.push(storage);
+                }
+                collect_generated_value_storages(payload_ty, span, env, active, storages);
+            }
+        }
+        TypeKind::Named(named) => {
+            if named_value_is_compiler_derived(named.def, env) {
+                let shape = env
+                    .type_def(named.def)
+                    .instantiated_shape_with_effects(&named.params, &named.effect_params);
+                collect_generated_value_storages(shape, span, env, active, storages);
+            }
+        }
+        TypeKind::Variable(_)
+        | TypeKind::Native(_)
+        | TypeKind::Function(_)
+        | TypeKind::Subscript(_)
+        | TypeKind::Never => {}
+    }
+}
+
+/// Whether the `Value` dictionary of the named type `def` is generated here from its shape, as
+/// [`generated_value_evidence_types`] walks through it, rather than a leaf of its own.
+fn named_value_is_compiler_derived(def: TypeDefId, env: &impl TypeLayoutEnv) -> bool {
+    let type_def = env.type_def(def);
+    def.module == env.current_module_id()
+        && !type_def.has_custom_value_impl
+        && !type_def
+            .attributes
+            .iter()
+            .any(|attribute| attribute.path.0 == ustr(NO_DERIVE_VALUE_ATTRIBUTE))
+}
+
+/// The payload storages that the layout of `ty` reads, as the constraints that require them: what
+/// its generated layout getters need, whatever the methods of a written `Value` impl read.
+pub(crate) fn value_layout_storage_constraints(
+    ty: Type,
+    span: Location,
+    env: &impl TypeLayoutEnv,
+) -> Result<Vec<PubTypeConstraint>, InternalCompilationError> {
     Ok(value_layout_formula_for_type(ty, span, env)?
-        .associated_const(associated_const)
-        .evidence_types())
+        .storage_requirements()
+        .iter()
+        .map(|requirement| requirement_constraint(requirement, span))
+        .collect())
+}
+
+/// As [`generated_value_storage_requirements`], as the constraints that require them.
+pub(crate) fn generated_value_storage_constraints(
+    ty: Type,
+    span: Location,
+    env: &impl TypeLayoutEnv,
+) -> Vec<PubTypeConstraint> {
+    generated_value_storage_requirements(ty, span, env)
+        .iter()
+        .map(|requirement| requirement_constraint(requirement, span))
+        .collect()
 }
 
 fn collect_generated_value_evidence_types(
@@ -1001,16 +1357,10 @@ fn collect_generated_value_evidence_types(
             })
         }
         TypeKind::Named(named) => {
-            let type_def = env.type_def(named.def);
-            let compiler_derived = named.def.module == env.current_module_id()
-                && !type_def.has_custom_value_impl
-                && !type_def
-                    .attributes
-                    .iter()
-                    .any(|attribute| attribute.path.0 == ustr(NO_DERIVE_VALUE_ATTRIBUTE));
-            if compiler_derived {
-                let shape =
-                    type_def.instantiated_shape_with_effects(&named.params, &named.effect_params);
+            if named_value_is_compiler_derived(named.def, env) {
+                let shape = env
+                    .type_def(named.def)
+                    .instantiated_shape_with_effects(&named.params, &named.effect_params);
                 collect_generated_value_evidence_types(shape, root, env, active, evidence)
             } else {
                 if !evidence.contains(&ty) {
@@ -1552,6 +1902,73 @@ fn value_layout_expr_node(
                 int_type(),
             )
         }
+        ValueLayoutExpr::PayloadStorage {
+            storage,
+            indirect,
+            inline,
+        } => {
+            let DictionaryReq::VariantPayloadIndirection {
+                variant_ty,
+                tag,
+                payload_ty,
+            } = storage
+            else {
+                unreachable!("a payload storage reads a storage requirement, not {storage:?}")
+            };
+            let is_indirect = alloc_synth_node(
+                arena,
+                hir::NodeKind::GetVariantPayloadStorage(hir::GetVariantPayloadStorage {
+                    variant_ty: *variant_ty,
+                    tag: *tag,
+                    payload_ty: *payload_ty,
+                }),
+                bool_type(),
+            );
+            // Both layouts are computed before the choice, which then only reads one of them:
+            // a branch that computed its layout would make the paths through nested choices
+            // diverge in the storage they allocate.
+            use hir::hir_syn::*;
+            let indirect = value_layout_expr_node(indirect, ctx, arena, locals, span)?;
+            let inline = value_layout_expr_node(inline, ctx, arena, locals, span)?;
+            let local_slot = locals.len();
+            let (store_indirect, indirect_id) = store_new_local(
+                indirect,
+                local_slot,
+                "$layout_indirect",
+                MutVal::constant(),
+                int_type(),
+                locals,
+            );
+            let store_indirect = alloc_synth_node(arena, store_indirect, Type::unit());
+            let (store_inline, inline_id) = store_new_local(
+                inline,
+                local_slot + 1,
+                "$layout_inline",
+                MutVal::constant(),
+                int_type(),
+                locals,
+            );
+            let store_inline = alloc_synth_node(arena, store_inline, Type::unit());
+            let take_indirect = alloc_synth_node(arena, load_local(indirect_id), int_type());
+            let take_inline = alloc_synth_node(arena, load_local(inline_id), int_type());
+            let chosen = alloc_synth_node(
+                arena,
+                case(
+                    is_indirect,
+                    vec![(LiteralValue::new_native(true), take_indirect)],
+                    take_inline,
+                ),
+                int_type(),
+            );
+            alloc_synth_node(
+                arena,
+                block_with_cleanup(
+                    [store_indirect, store_inline, chosen],
+                    vec![indirect_id, inline_id],
+                ),
+                int_type(),
+            )
+        }
         ValueLayoutExpr::Add(left, right) => {
             let left = value_layout_expr_node(left, ctx, arena, locals, span)?;
             let right = value_layout_expr_node(right, ctx, arena, locals, span)?;
@@ -1678,14 +2095,10 @@ pub(crate) fn generated_value_layout_getter(
 ) -> Result<PendingModuleFunction, InternalCompilationError> {
     let expression =
         value_layout_formula_for_type(input_ty, span, solver)?.associated_const(associated_const);
-    let evidence_tys = expression.evidence_types();
     let value_trait = solver.std_trait_id(VALUE_TRAIT_NAME);
-    let constraints = evidence_tys
+    let constraints = value_layout_requirements(&expression, value_trait)
         .iter()
-        .copied()
-        .map(|ty| {
-            PubTypeConstraint::new_have_trait(value_trait, vec![ty], Vec::new(), Vec::new(), span)
-        })
+        .map(|requirement| requirement_constraint(requirement, span))
         .collect::<Vec<_>>();
     let definition = CallableDefinition::new_infer_quantifiers_with_constraints(
         FnType::new_by_val([], int_type(), EffType::empty()),
@@ -3586,6 +3999,46 @@ mod tests {
         assert!(!is_tag_scalar(named("WithPayload"), &env));
         assert!(!is_tag_scalar(named("Small"), &env));
         assert!(!is_tag_scalar(Type::variable_id(0), &env));
+    }
+
+    /// A storage decision has one identity: deciding a canonical key again gives it back, even
+    /// when cases differ only in effects, which the key erases.
+    #[test]
+    fn canonical_payload_storage_keys_are_stable() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let callback = |effects| Type::function_type(FnType::new_by_val([], int_type(), effects));
+        let variant = Type::variant([
+            (ustr("A"), callback(EffType::empty())),
+            (
+                ustr("B"),
+                callback(EffType::single_primitive(PrimitiveEffect::Fallible)),
+            ),
+            (ustr("C"), Type::variable_id(0)),
+        ]);
+        let decide = |variant_ty, tag, payload_ty| {
+            variant_payload_storage_decision(variant_ty, tag, payload_ty, span, &env).unwrap()
+        };
+        let cases = variant.data().as_variant().unwrap().clone();
+        for (tag, payload_ty) in cases {
+            let VariantPayloadStorageDecision::Evidence(key) = decide(variant, tag, payload_ty)
+            else {
+                panic!("the storage of case {tag} is open");
+            };
+            let DictionaryReq::VariantPayloadIndirection {
+                variant_ty,
+                tag,
+                payload_ty,
+            } = key.clone()
+            else {
+                unreachable!()
+            };
+            assert_eq!(
+                decide(variant_ty, tag, payload_ty),
+                VariantPayloadStorageDecision::Evidence(key)
+            );
+        }
     }
 
     #[test]

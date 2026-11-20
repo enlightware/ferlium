@@ -97,7 +97,7 @@ use crate::{
         dynamic_product_member_layouts, generated_value_evidence_types,
         is_function_surface_only_value_trait_application, is_value_trait,
         is_value_trait_for_function_type, type_has_static_layout,
-        value_layout_associated_const_values, variant_payload_storage_for_type,
+        value_layout_associated_const_values, variant_payload_storage_decision,
     },
     types::{
         effects::{EffType, Effect, EffectsInstSubst, no_effects},
@@ -974,6 +974,40 @@ fn structural_projection_field_index(
     index.map(ProjectionIndex::from_index)
 }
 
+/// Where the payload of the case `tag` of `variant_ty` is stored for the code being elaborated:
+/// fixed when no substitution can change it, otherwise the evidence that the code is given by
+/// where the type is known.
+fn variant_payload_storage_source(
+    variant_ty: Type,
+    tag: Ustr,
+    payload_ty: Type,
+    span: Location,
+    ctx: &mut DictElaborationCtx<'_, '_, '_>,
+) -> Result<VariantPayloadStorageSource, InternalCompilationError> {
+    use crate::std::value::VariantPayloadStorageDecision::*;
+    Ok(
+        match variant_payload_storage_decision(variant_ty, tag, payload_ty, span, ctx.trait_solver)?
+        {
+            Static(storage) => VariantPayloadStorageSource::Static(storage),
+            Evidence(requirement) => {
+                let index = ctx
+                    .dicts
+                    .given_variant_payload_storage(&requirement, ctx.trait_solver)
+                    .ok_or_else(|| {
+                        internal_compilation_error!(Internal {
+                            error: format!(
+                                "variant payload storage evidence {requirement:?} not found in requirements {:?}",
+                                ctx.dicts.requirements
+                            ),
+                            span,
+                        })
+                    })?;
+                VariantPayloadStorageSource::Evidence(EvidenceBindingId::from_index(index))
+            }
+        },
+    )
+}
+
 fn extra_arg_kind_from_inst_data(
     inst_data: &hir::FnInstData,
     span: Location,
@@ -1081,35 +1115,19 @@ fn extra_arg_kind_from_inst_data(
                 VariantPayloadIndirection {
                     variant_ty,
                     tag,
-                    ..
+                    payload_ty,
                 } => {
                     let node_ty = Type::primitive::<bool>();
-                    if matches!(&*variant_ty.data(), TypeKind::Variable(_)) {
-                        let index = ctx.dicts.given_variant_payload(*variant_ty, *tag).ok_or_else(|| {
-                            internal_compilation_error!(Internal {
-                                error: format!(
-                                    "variant payload-indirection evidence {dict:?} not found in generic caller requirements {:?}",
-                                    ctx.dicts.requirements
-                                ),
-                                span,
-                            })
-                        })?;
-                        (
+                    match variant_payload_storage_source(*variant_ty, *tag, *payload_ty, span, ctx)? {
+                        VariantPayloadStorageSource::Evidence(extra_parameter) => (
                             K::LoadVariantPayloadStorageEvidence(
-                                hir::LoadVariantPayloadStorageEvidence {
-                                    extra_parameter: EvidenceBindingId::from_index(index),
-                                },
+                                hir::LoadVariantPayloadStorageEvidence { extra_parameter },
                             ),
                             node_ty,
-                        )
-                    } else {
-                        let storage = variant_payload_storage_for_type(
-                            *variant_ty,
-                            *tag,
-                            span,
-                            ctx.trait_solver,
-                        )?;
-                        (K::Immediate(LiteralValue::new_native(storage.is_indirect())), node_ty)
+                        ),
+                        VariantPayloadStorageSource::Static(storage) => {
+                            (K::Immediate(LiteralValue::new_native(storage.is_indirect())), node_ty)
+                        }
                     }
                 }
                 TraitImpl { trait_id, input_tys, output_tys, output_effs } => {
@@ -3134,6 +3152,25 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     })
                 }
             }
+            GetVariantPayloadStorage(get_storage) => {
+                let hir::GetVariantPayloadStorage {
+                    variant_ty,
+                    tag,
+                    payload_ty,
+                } = *get_storage;
+                match variant_payload_storage_source(
+                    variant_ty, tag, payload_ty, node_span, self.ctx,
+                )? {
+                    VariantPayloadStorageSource::Evidence(extra_parameter) => {
+                        LoadVariantPayloadStorageEvidence(hir::LoadVariantPayloadStorageEvidence {
+                            extra_parameter,
+                        })
+                    }
+                    VariantPayloadStorageSource::Static(storage) => {
+                        Immediate(LiteralValue::new_native(storage.is_indirect()))
+                    }
+                }
+            }
             GetTraitAssociatedConst(get_const) => {
                 let trait_id = get_const.trait_id;
                 let associated_const_index = get_const.associated_const_index;
@@ -3419,25 +3456,13 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             Variant(variant) => {
                 let payload_ty = src[variant.payload].ty;
                 self.ensure_value_layout_evidence(payload_ty, node_span)?;
-                let payload_storage = if matches!(&*node_ty.data(), TypeKind::Variable(_)) {
-                    let index = self.ctx.dicts.given_variant_payload(node_ty, variant.tag).ok_or_else(|| {
-                        internal_compilation_error!(Internal {
-                            error: format!(
-                                "variant payload-indirection evidence for type {node_ty:?} and case .{} not found for generic construction",
-                                variant.tag
-                            ),
-                            span: node_span,
-                        })
-                    })?;
-                    VariantPayloadStorageSource::Evidence(EvidenceBindingId::from_index(index))
-                } else {
-                    VariantPayloadStorageSource::Static(variant_payload_storage_for_type(
-                        node_ty,
-                        variant.tag,
-                        node_span,
-                        self.ctx.trait_solver,
-                    )?)
-                };
+                let payload_storage = variant_payload_storage_source(
+                    node_ty,
+                    variant.tag,
+                    payload_ty,
+                    node_span,
+                    self.ctx,
+                )?;
                 let mut payload = self.elaborate_node(src, variant.payload)?;
                 // A custom destructor only accepts complete receivers. Stage interruptible
                 // payloads before publishing the shell; the local owns any partial construction.

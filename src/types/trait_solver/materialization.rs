@@ -31,9 +31,9 @@ use crate::{
     std::{
         core_traits_names::VALUE_TRAIT_NAME,
         value::{
-            generated_value_evidence_types, generated_value_layout_getter, is_value_trait,
-            is_value_trait_for_function_type, value_layout_associated_const_values,
-            value_layout_getter_evidence_types,
+            generated_value_evidence_types, generated_value_layout_getter,
+            generated_value_storage_requirements, is_value_trait, is_value_trait_for_function_type,
+            value_layout_associated_const_values, value_layout_getter_requirements,
         },
     },
     types::{
@@ -554,9 +554,8 @@ impl<'a> TraitSolver<'a> {
                     variant_ty,
                     tag,
                     payload_ty,
-                } => PubTypeConstraint::new_type_has_variant(
+                } => PubTypeConstraint::new_variant_payload_storage(
                     *variant_ty,
-                    span,
                     *tag,
                     *payload_ty,
                     span,
@@ -728,10 +727,17 @@ impl<'a> TraitSolver<'a> {
         }
         let associated_const_names =
             self.impl_associated_const_names(trait_id, &canonical_input_tys, &[], &[], 0, 0, &[]);
+        // The methods read the `Value` of the leaves, and the payload storages, which `clone`
+        // reads to build the cases.
         let requirements = generated_value_evidence_types(canonical_input_tys[0], self)
             .unwrap_or_default()
             .into_iter()
             .map(|ty| DictionaryReq::new_trait_impl(trait_id, vec![ty], vec![], vec![]))
+            .chain(generated_value_storage_requirements(
+                canonical_input_tys[0],
+                span,
+                self,
+            ))
             .collect::<Vec<_>>();
         let static_values =
             value_layout_associated_const_values(canonical_input_tys[0], span, self).ok();
@@ -755,17 +761,13 @@ impl<'a> TraitSolver<'a> {
                 for index in
                     (0..associated_const_tys.len()).map(TraitAssociatedConstIndex::from_index)
                 {
-                    getter_requirements.push(
-                        value_layout_getter_evidence_types(
-                            canonical_input_tys[0],
-                            index,
-                            span,
-                            self,
-                        )?
-                        .into_iter()
-                        .map(|ty| DictionaryReq::new_trait_impl(trait_id, vec![ty], vec![], vec![]))
-                        .collect(),
-                    );
+                    getter_requirements.push(value_layout_getter_requirements(
+                        canonical_input_tys[0],
+                        index,
+                        trait_id,
+                        span,
+                        self,
+                    )?);
                     let getter =
                         generated_value_layout_getter(canonical_input_tys[0], index, span, self)?;
                     let id = self.fn_collector.next_id();

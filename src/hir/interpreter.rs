@@ -680,7 +680,8 @@ fn eval_node_with_ctx(
         TraitMethodApply(_)
         | GetTraitMethod(_)
         | GetTraitAssociatedConst(_)
-        | GetTraitDictionary(_) => {
+        | GetTraitDictionary(_)
+        | GetVariantPayloadStorage(_) => {
             panic!("unelaborated trait operation should not be executed");
         }
         GetFunction(get_fn) => cont(Value::function(get_fn.function)),

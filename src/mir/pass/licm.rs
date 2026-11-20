@@ -1128,6 +1128,7 @@ fn record_writes(
         | OperationKind::Variant { .. }
         | OperationKind::ExtractTag
         | OperationKind::ExtractPayloadIndirection
+        | OperationKind::PayloadStorageIsIndirect
         | OperationKind::IsInitialized
         | OperationKind::StackSave
         | OperationKind::StackRestore

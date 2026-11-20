@@ -1328,6 +1328,7 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             | RuntimeDealloc
             | ExtractTag
             | ExtractPayloadIndirection
+            | PayloadStorageIsIndirect
             | MoveBytes { .. }
             | MoveRange { .. }
             | BlackBox { .. }
@@ -2476,6 +2477,12 @@ impl<'a, 'p> Interpreter<'a, 'p> {
             ExtractPayloadIndirection => Some(Binding::Scalar(Scalar::Bool(
                 self.memory.tag(place(0)?)?.1.is_indirect(),
             ))),
+            PayloadStorageIsIndirect => {
+                let Scalar::Bool(indirect) = operand(0)?.scalar(&self.memory)? else {
+                    return Err(invalid("expected variant storage evidence"));
+                };
+                Some(Binding::Scalar(Scalar::Bool(indirect)))
+            }
             StackSave => Some(Binding::StackMarker(self.memory.len())),
             StackRestore => {
                 let Binding::StackMarker(marker) = operand(0)? else {

@@ -76,6 +76,7 @@ pub trait HirPhase: Sized + fmt::Debug + Clone {
     type GetTraitMethod: HirPayload<Self>;
     type GetTraitAssociatedConst: HirPayload<Self>;
     type GetTraitDictionary: HirPayload<Self>;
+    type GetVariantPayloadStorage: HirPayload<Self>;
     /// Clone metadata carried by local declarations and clone nodes in this phase.
     type LocalClone: fmt::Debug + Clone + Copy + LocalCloneMetadata;
     /// Drop metadata carried by local declarations, assignment nodes, and explicit value drops in
@@ -107,6 +108,7 @@ impl HirPhase for Unelaborated {
     type GetTraitMethod = B<GetTraitMethod>;
     type GetTraitAssociatedConst = B<GetTraitAssociatedConst>;
     type GetTraitDictionary = B<GetTraitDictionary>;
+    type GetVariantPayloadStorage = GetVariantPayloadStorage;
     type LocalClone = PendingLocalClone;
     type LocalDrop = PendingLocalDrop;
     type TakeLocalValueMode = PendingTakeLocalValueMode;
@@ -122,6 +124,7 @@ impl HirPhase for Elaborated {
     type GetTraitMethod = Never;
     type GetTraitAssociatedConst = Never;
     type GetTraitDictionary = Never;
+    type GetVariantPayloadStorage = Never;
     type LocalClone = ResolvedLocalClone;
     type LocalDrop = ResolvedLocalDrop;
     type TakeLocalValueMode = ResolvedTakeLocalValueMode;
@@ -229,7 +232,8 @@ pub(crate) fn elaborated_node_is_place_reference(arena: &ENodeArena, node_id: EN
         | NodeKind::TraitMethodApply(never)
         | NodeKind::GetTraitMethod(never)
         | NodeKind::GetTraitAssociatedConst(never)
-        | NodeKind::GetTraitDictionary(never) => match *never {},
+        | NodeKind::GetTraitDictionary(never)
+        | NodeKind::GetVariantPayloadStorage(never) => match *never {},
         _ => false,
     }
 }
@@ -842,6 +846,16 @@ pub struct GetTraitAssociatedConst {
     pub output_effs: Vec<EffType>,
 }
 
+/// Whether the payload of the case `tag` of `variant_ty` is behind a pointer, before dictionary
+/// passing resolves it: a constant when no substitution can change it, otherwise the evidence
+/// that the function is given (`doc/abi.md`, "Tagged unions").
+#[derive(Debug, Clone, Copy)]
+pub struct GetVariantPayloadStorage {
+    pub variant_ty: Type,
+    pub tag: Ustr,
+    pub payload_ty: Type,
+}
+
 /// Load a trait dictionary before dictionary passing resolves it.
 #[derive(Debug, Clone)]
 pub struct GetTraitDictionary {
@@ -1027,6 +1041,8 @@ pub enum NodeKind<P: HirPhase = Unelaborated> {
     GetTraitAssociatedConst(P::GetTraitAssociatedConst),
     /// Load a trait dictionary before dictionary passing resolves it.
     GetTraitDictionary(P::GetTraitDictionary),
+    /// Load whether a variant case's payload is indirect before dictionary passing resolves it.
+    GetVariantPayloadStorage(P::GetVariantPayloadStorage),
     /// Get a trait dictionary selected by static trait resolution.
     GetDictionary(GetDictionary<P>),
     /// Load a trait dictionary from a function hidden argument.
@@ -1079,6 +1095,7 @@ impl<P: HirPhase> NodeKind<P> {
             | GetTraitMethod(_)
             | GetTraitAssociatedConst(_)
             | GetTraitDictionary(_)
+            | GetVariantPayloadStorage(_)
             | LoadDictionary(_)
             | LoadSubscriptEvidence(_)
             | LoadVariantPayloadStorageEvidence(_)
@@ -1362,6 +1379,26 @@ impl<P: HirPhase> HirPayload<P> for B<GetTraitMethod> {
     }
 }
 
+impl<P: HirPhase> HirPayload<P> for GetVariantPayloadStorage {
+    fn format_ind(
+        &self,
+        _arena: &NodeArena<P>,
+        f: &mut fmt::Formatter,
+        _locals: &[LocalDecl<P>],
+        env: &ModuleEnv<'_>,
+        _spacing: usize,
+        _indent: usize,
+        indent_str: &str,
+    ) -> fmt::Result {
+        writeln!(
+            f,
+            "{indent_str}get payload storage of case {} of {}",
+            self.tag,
+            self.variant_ty.format_with(env)
+        )
+    }
+}
+
 impl<P: HirPhase> HirPayload<P> for B<GetTraitAssociatedConst> {
     fn format_ind(
         &self,
@@ -1620,6 +1657,9 @@ impl<P: HirPhase> Node<P> {
             }
             GetTraitAssociatedConst(get_const) => {
                 get_const.format_ind(arena, f, locals, env, spacing, indent, &indent_str)?;
+            }
+            GetVariantPayloadStorage(get_storage) => {
+                get_storage.format_ind(arena, f, locals, env, spacing, indent, &indent_str)?;
             }
             GetTraitDictionary(get_dict) => {
                 get_dict.format_ind(arena, f, locals, env, spacing, indent, &indent_str)?;
@@ -1964,6 +2004,9 @@ impl<P: HirPhase> Node<P> {
             GetTraitAssociatedConst(_) => {
                 // GetTraitAssociatedConst nodes don't contain child expressions with types
             }
+            GetVariantPayloadStorage(_) => {
+                // GetVariantPayloadStorage nodes don't contain child expressions with types
+            }
             GetTraitDictionary(_) => {
                 // GetTraitDictionary nodes don't contain child expressions with types
             }
@@ -2167,6 +2210,10 @@ impl Node {
                     self.unbound_ty_vars_in_ty(ty, result, ignore);
                 }
             }
+            GetVariantPayloadStorage(get_storage) => {
+                self.unbound_ty_vars_in_ty(&get_storage.variant_ty, result, ignore);
+                self.unbound_ty_vars_in_ty(&get_storage.payload_ty, result, ignore);
+            }
             GetTraitDictionary(get_dict) => {
                 for ty in &get_dict.input_tys {
                     self.unbound_ty_vars_in_ty(ty, result, ignore);
@@ -2321,6 +2368,10 @@ pub(crate) fn instantiate_node_in_place<M: TypeMapper>(
             instantiate_types_in_place(&mut get_const.input_tys, mapper);
             instantiate_types_in_place(&mut get_const.output_tys, mapper);
             instantiate_effect_types_in_place(&mut get_const.output_effs, mapper);
+        }
+        GetVariantPayloadStorage(get_storage) => {
+            get_storage.variant_ty = get_storage.variant_ty.map(mapper);
+            get_storage.payload_ty = get_storage.payload_ty.map(mapper);
         }
         GetTraitDictionary(get_dict) => {
             instantiate_types_in_place(&mut get_dict.input_tys, mapper);

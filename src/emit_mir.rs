@@ -2607,6 +2607,12 @@ impl<'a> Emitter<'a> {
             K::LoadVariantPayloadStorageEvidence(n) => {
                 self.context.evidence_bindings[&n.extra_parameter].clone()
             }
+            // A payload storage known here is static evidence, as a dictionary known here is, so
+            // that specialization can bind it.
+            K::Immediate(_) => match self.static_evidence_node(node) {
+                Some(evidence) => mir::Value::Evidence(Box::new(evidence)),
+                None => self.lower_as_place(node),
+            },
             _ => self.lower_as_place(node),
         }
     }
@@ -3852,8 +3858,11 @@ impl<'a> Emitter<'a> {
 
             K::LoadVariantPayloadStorageEvidence(n) => {
                 if destination.is_some() {
-                    let p = self.context.evidence_bindings[&n.extra_parameter].clone();
-                    self.memcpy_into_if_needed(node.span, p, destination);
+                    let evidence = self.context.evidence_bindings[&n.extra_parameter].clone();
+                    let indirect = self
+                        .insert(Operation::payload_storage_is_indirect(node.span, evidence))
+                        .unwrap();
+                    self.store_into_if_needed(node.span, indirect, destination);
                 }
             }
 
@@ -3959,6 +3968,7 @@ impl<'a> Emitter<'a> {
             | K::GetTraitMethod(never)
             | K::GetTraitAssociatedConst(never)
             | K::GetTraitDictionary(never)
+            | K::GetVariantPayloadStorage(never)
             | K::PendingAssignment(never) => match *never {},
         }
     }

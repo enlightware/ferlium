@@ -29,6 +29,7 @@ use crate::{
         value::{
             is_compiler_provided_value_trait_application,
             is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
+            normalize_variant_payload_storage,
         },
     },
     types::{
@@ -134,6 +135,19 @@ pub enum PubTypeConstraint {
         payload_ty: Type,
         payload_span: InstantiableLocation,
     },
+    /// Where the payload of one variant case is stored, inline or behind a pointer, when
+    /// substitution may still change it (`doc/abi.md`, "Tagged unions"). The decision depends on
+    /// the whole variant type, so code that has no stored tag to read it from, as a construction
+    /// or the layout of the variant, receives it as evidence. Inference keeps this obligation
+    /// only while the decision is open, in the canonical form of
+    /// [`variant_payload_storage_decision`](crate::std::value::variant_payload_storage_decision).
+    VariantPayloadStorage {
+        origin: ConstraintOrigin,
+        variant_ty: Type,
+        tag: Ustr,
+        payload_ty: Type,
+        span: InstantiableLocation,
+    },
     /// Types have trait
     HaveTrait {
         origin: ConstraintOrigin,
@@ -156,6 +170,7 @@ impl PubTypeConstraint {
             | Self::ProjectionSubscriptIs { origin, .. }
             | Self::TypeHasVariant { origin, .. }
             | Self::VariantPayloadLayout { origin, .. }
+            | Self::VariantPayloadStorage { origin, .. }
             | Self::HaveTrait { origin, .. } => *origin,
         }
     }
@@ -166,6 +181,7 @@ impl PubTypeConstraint {
             | Self::ProjectionSubscriptIs { origin, .. }
             | Self::TypeHasVariant { origin, .. }
             | Self::VariantPayloadLayout { origin, .. }
+            | Self::VariantPayloadStorage { origin, .. }
             | Self::HaveTrait { origin, .. } => *origin = value,
         }
     }
@@ -204,14 +220,26 @@ impl PubTypeConstraint {
                 Vec::new(),
             )),
             Self::HaveTrait { .. } => self.trait_requirement(),
+            Self::VariantPayloadStorage {
+                variant_ty,
+                tag,
+                payload_ty,
+                ..
+            } => Some(DictionaryReq::new_variant_payload_indirection(
+                *variant_ty,
+                *tag,
+                *payload_ty,
+            )),
             Self::ProjectionSubscriptIs { .. }
             | Self::TypeHasVariant { .. }
             | Self::TupleAtIndexIs { .. } => self.structural_requirement_key(),
         }
     }
 
-    /// The dictionary key of a constraint on the structure of a type: a field, an element of a
-    /// tuple, which is the field of its index, or a variant. None for another constraint.
+    /// The dictionary key of a constraint on the structure of a type: a field or an element of a
+    /// tuple, which is the field of its index. None for another constraint, including a variant,
+    /// which code reads from the stored tag: where a payload is stored is a requirement of its own,
+    /// [`Self::VariantPayloadStorage`].
     pub(crate) fn structural_requirement_key(&self) -> Option<DictionaryReq> {
         match self {
             Self::ProjectionSubscriptIs {
@@ -223,16 +251,6 @@ impl PubTypeConstraint {
                 *requirement,
                 *field,
                 subscript_ty.clone(),
-            )),
-            Self::TypeHasVariant {
-                variant_ty,
-                tag,
-                payload_ty,
-                ..
-            } => Some(DictionaryReq::new_variant_payload_indirection(
-                *variant_ty,
-                *tag,
-                *payload_ty,
             )),
             Self::TupleAtIndexIs {
                 origin: _,
@@ -249,7 +267,10 @@ impl PubTypeConstraint {
                 *element_ty,
             )
             .structural_requirement_key(),
-            Self::VariantPayloadLayout { .. } | Self::HaveTrait { .. } => None,
+            Self::TypeHasVariant { .. }
+            | Self::VariantPayloadLayout { .. }
+            | Self::VariantPayloadStorage { .. }
+            | Self::HaveTrait { .. } => None,
         }
     }
 
@@ -360,6 +381,21 @@ impl PubTypeConstraint {
         }
     }
 
+    pub fn new_variant_payload_storage(
+        variant_ty: Type,
+        tag: Ustr,
+        payload_ty: Type,
+        span: Location,
+    ) -> Self {
+        Self::VariantPayloadStorage {
+            origin: ConstraintOrigin::default(),
+            variant_ty,
+            tag,
+            payload_ty,
+            span: InstantiableLocation::new(span),
+        }
+    }
+
     pub fn use_site(&self) -> Location {
         use PubTypeConstraint::*;
         match self {
@@ -367,6 +403,7 @@ impl PubTypeConstraint {
             ProjectionSubscriptIs { receiver_span, .. } => receiver_span.use_site,
             TypeHasVariant { variant_span, .. } => variant_span.use_site,
             VariantPayloadLayout { payload_span, .. } => payload_span.use_site,
+            VariantPayloadStorage { span, .. } => span.use_site,
             HaveTrait { span, .. } => span.use_site,
         }
     }
@@ -395,7 +432,8 @@ impl PubTypeConstraint {
             }
             | VariantPayloadLayout {
                 payload_span: span, ..
-            } => {
+            }
+            | VariantPayloadStorage { span, .. } => {
                 span.instantiate(use_site);
             }
             HaveTrait { span, .. } => {
@@ -451,6 +489,11 @@ impl PubTypeConstraint {
                 }
             }
             VariantPayloadLayout { .. } => Some(constraint),
+            // Instantiation may close the storage; the code that it applies to resolves the
+            // evidence then, from the instantiated type.
+            VariantPayloadStorage { .. } => {
+                normalize_variant_payload_storage(&constraint, &*trait_solver)?
+            }
             HaveTrait {
                 trait_id,
                 input_tys,
@@ -591,6 +634,19 @@ impl TypeLike for PubTypeConstraint {
                 payload_ty: payload_ty.map(f),
                 payload_span: payload_span.clone(),
             },
+            VariantPayloadStorage {
+                origin,
+                variant_ty,
+                tag,
+                payload_ty,
+                span,
+            } => VariantPayloadStorage {
+                origin: *origin,
+                variant_ty: variant_ty.map(f),
+                tag: *tag,
+                payload_ty: payload_ty.map(f),
+                span: span.clone(),
+            },
             HaveTrait {
                 origin,
                 trait_id,
@@ -639,6 +695,16 @@ impl TypeLike for PubTypeConstraint {
                 // graph is mapped above to keep evidence identity current, while only `payload_ty`
                 // determines accessibility and quantification, exactly like the `Value<B>` this
                 // requirement supplies at runtime.
+                payload_ty.data().visit(visitor);
+            }
+            VariantPayloadStorage {
+                variant_ty,
+                payload_ty,
+                ..
+            } => {
+                // The whole variant type decides the storage, so its variables are those of
+                // the obligation.
+                variant_ty.data().visit(visitor);
                 payload_ty.data().visit(visitor);
             }
             HaveTrait {
@@ -734,6 +800,20 @@ impl PartialEq for PubTypeConstraint {
                 },
             ) => v_ty1 == v_ty2 && tag1 == tag2 && p_ty1 == p_ty2,
             (
+                VariantPayloadStorage {
+                    variant_ty: v_ty1,
+                    tag: tag1,
+                    payload_ty: p_ty1,
+                    ..
+                },
+                VariantPayloadStorage {
+                    variant_ty: v_ty2,
+                    tag: tag2,
+                    payload_ty: p_ty2,
+                    ..
+                },
+            ) => v_ty1 == v_ty2 && tag1 == tag2 && p_ty1 == p_ty2,
+            (
                 HaveTrait {
                     trait_id: t1,
                     input_tys: i1,
@@ -789,6 +869,12 @@ impl Hash for PubTypeConstraint {
                 payload_ty.hash(state);
             }
             VariantPayloadLayout {
+                variant_ty,
+                tag,
+                payload_ty,
+                ..
+            }
+            | VariantPayloadStorage {
                 variant_ty,
                 tag,
                 payload_ty,
@@ -1292,9 +1378,12 @@ pub(crate) fn extra_parameters_from_constraints_with<'t>(
     let mut requirements = Vec::new();
     for constraint in constraints {
         let requirement = match constraint {
-            TupleAtIndexIs { .. } | ProjectionSubscriptIs { .. } | TypeHasVariant { .. } => {
+            TupleAtIndexIs { .. } | ProjectionSubscriptIs { .. } | VariantPayloadStorage { .. } => {
                 constraint.dictionary_requirement_key(value_trait_id)
             }
+            // A variant is read from the stored tag; where a payload is stored, when that is
+            // still open, is a requirement of its own.
+            TypeHasVariant { .. } => None,
             // This inference-only obligation activates the external `Value` leaves of the payload.
             // Elaboration constructs the closed payload dictionary from those leaves, so the
             // case-qualified constraint itself has no calling-convention slot.

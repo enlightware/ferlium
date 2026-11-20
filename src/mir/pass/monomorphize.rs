@@ -50,7 +50,7 @@ use super::{
     OptimizationStats, budget, cost,
     dataflow::{self, Analysis, Const, State, static_evidence_operand},
     local_cells::{Access, LocalCells, Write},
-    scalar_arguments,
+    peephole, scalar_arguments,
     site::{OperationIndex, OperationSite},
     stage::SemanticCallees,
     value_cells,
@@ -1265,6 +1265,7 @@ pub(crate) fn store_value_parameters(edit: &mut FunctionEdit, original: &Functio
 /// variable resolved to a concrete effect can make a conservatively-fallible call infallible, a
 /// concrete type can have a static layout, and a concrete type can own nothing.
 fn simplify_after_substitution(edit: &mut FunctionEdit, env: ModuleEnv<'_>) {
+    peephole::fix_static_payload_storages_in(edit, env);
     demote_infallible_invokes(edit, env);
     drop_redundant_layout_witnesses(edit, env);
     elide_trivial_ownership_operations(edit, env);
@@ -1914,6 +1915,7 @@ fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapp
         | OperationKind::Load
         | OperationKind::ExtractTag
         | OperationKind::ExtractPayloadIndirection
+        | OperationKind::PayloadStorageIsIndirect
         | OperationKind::IsInitialized
         | OperationKind::Store
         | OperationKind::Clear

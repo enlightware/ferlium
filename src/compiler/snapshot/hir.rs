@@ -635,6 +635,7 @@ impl SnapshotNodeKind {
             NodeKind::GetTraitMethod(value) => match *value {},
             NodeKind::GetTraitAssociatedConst(value) => match *value {},
             NodeKind::GetTraitDictionary(value) => match *value {},
+            NodeKind::GetVariantPayloadStorage(value) => match *value {},
             NodeKind::GetDictionary(value) => Self::GetDictionary {
                 dictionary: value.dictionary,
                 ty_args: capture_types(&value.ty_args, graph)?,

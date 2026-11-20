@@ -285,7 +285,7 @@ fn undetermined_output(
                     payload_ty,
                     ..
                 } => (variant_ty.inner_ty_vars(), payload_ty.inner_ty_vars()),
-                VariantPayloadLayout { .. } => continue,
+                VariantPayloadLayout { .. } | VariantPayloadStorage { .. } => continue,
             };
             if from.iter().all(|var| determined.contains(var)) {
                 for var in to {

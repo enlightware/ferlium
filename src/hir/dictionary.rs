@@ -13,6 +13,7 @@ use crate::{
         PendingGeneratedStructuralProjectionSubscripts, SubscriptId, TraitDictionaryId, TraitId,
         TraitImplId, id::Id,
     },
+    std::value::{TypeLayoutEnv, VariantPayloadStorageDecision, variant_payload_storage_decision},
     types::{
         effects::{EffType, EffectVar},
         r#trait::{Trait, TraitParentSlotIndex},
@@ -457,9 +458,10 @@ impl ExtraParameters {
                 subscript_ty,
                 ..
             } => self.given_field(subscript_ty.receiver_ty(), field),
-            DictionaryReq::VariantPayloadIndirection {
-                variant_ty, tag, ..
-            } => self.given_variant_payload(*variant_ty, *tag),
+            DictionaryReq::VariantPayloadIndirection { .. } => self
+                .requirements
+                .iter()
+                .position(|given| given == requirement),
             DictionaryReq::TraitImpl {
                 trait_id,
                 input_tys,
@@ -489,17 +491,35 @@ impl ExtraParameters {
         })
     }
 
-    /// As [`Self::given`], for where the payload of the case `tag` of `variant_ty` is stored.
-    pub fn given_variant_payload(&self, variant_ty: Type, tag: Ustr) -> Option<usize> {
-        self.requirements.iter().position(|requirement| {
-            matches!(
-                requirement,
-                DictionaryReq::VariantPayloadIndirection {
-                    variant_ty: given_variant_ty,
-                    tag: given_tag,
-                    ..
-                } if *given_variant_ty == variant_ty && *given_tag == tag
-            )
+    /// As [`Self::given`], for where a payload is stored: `requirement` is in the canonical form
+    /// of [`variant_payload_storage_decision`]. A given requirement is the same decision when its
+    /// canonical form is equal, as a scheme may name the variant otherwise, such as `Option<T>`
+    /// for its shape.
+    pub(crate) fn given_variant_payload_storage(
+        &self,
+        requirement: &DictionaryReq,
+        env: &impl TypeLayoutEnv,
+    ) -> Option<usize> {
+        self.requirements.iter().position(|given| {
+            let DictionaryReq::VariantPayloadIndirection {
+                variant_ty,
+                tag,
+                payload_ty,
+            } = given
+            else {
+                return false;
+            };
+            given == requirement
+                || matches!(
+                    variant_payload_storage_decision(
+                        *variant_ty,
+                        *tag,
+                        *payload_ty,
+                        Location::new_synthesized(),
+                        env,
+                    ),
+                    Ok(VariantPayloadStorageDecision::Evidence(canonical)) if canonical == *requirement
+                )
         })
     }
 

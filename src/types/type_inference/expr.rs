@@ -738,6 +738,27 @@ impl TypeInference {
         ));
     }
 
+    /// Add what building the case `tag` of `variant_ty` requires: the layout of its payload, and
+    /// where the payload is stored, which a construction has no stored tag to read.
+    fn add_variant_construction_constraints(
+        &mut self,
+        variant_ty: Type,
+        tag: Ustr,
+        payload_ty: Type,
+        payload_span: Location,
+    ) {
+        if payload_ty == Type::unit() {
+            return;
+        }
+        self.add_variant_payload_value_constraint(variant_ty, tag, payload_ty, payload_span);
+        self.add_pub_constraint(PubTypeConstraint::new_variant_payload_storage(
+            variant_ty,
+            tag,
+            payload_ty,
+            payload_span,
+        ));
+    }
+
     pub fn add_ty_coverage_constraint(
         &mut self,
         span: Location,
@@ -2048,7 +2069,7 @@ impl TypeInference {
                     } else {
                         let nodes = self.materialize_owned_values(env, nodes, expr_span);
                         let node = if let Some(tag) = tag {
-                            self.add_variant_payload_value_constraint(
+                            self.add_variant_construction_constraints(
                                 ty, tag, payload_ty, expr_span,
                             );
                             let record_node_id = env.ir_arena.alloc(N::new(
@@ -2085,7 +2106,7 @@ impl TypeInference {
                     let tag = data.path.segments[0].0;
                     let variant_ty = self.fresh_type_var_ty();
                     let payload_span = env.ir_arena[payload_node_id].span;
-                    self.add_variant_payload_value_constraint(
+                    self.add_variant_construction_constraints(
                         variant_ty,
                         tag,
                         record_ty,
@@ -6308,7 +6329,7 @@ impl TypeInference {
                         K::Tuple(b(SVec2::from_vec(node_ids)))
                     };
                     let node = if let Some(tag) = tag {
-                        self.add_variant_payload_value_constraint(ty, tag, payload_ty, expr_span);
+                        self.add_variant_construction_constraints(ty, tag, payload_ty, expr_span);
                         let inner_node_id = env.ir_arena.alloc(N::new(
                             inner_kind,
                             payload_ty,
@@ -6367,7 +6388,7 @@ impl TypeInference {
                     let tag = path.segments[0].0;
                     let variant_ty = self.fresh_type_var_ty();
                     let payload_span = env.ir_arena[payload_node_id].span;
-                    self.add_variant_payload_value_constraint(
+                    self.add_variant_construction_constraints(
                         variant_ty,
                         tag,
                         payload_ty,

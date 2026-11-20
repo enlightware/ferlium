@@ -138,6 +138,7 @@ impl MirInstructionKind {
                 Op::CompareEqual
                 | Op::ExtractTag
                 | Op::ExtractPayloadIndirection
+                | Op::PayloadStorageIsIndirect
                 | Op::IsInitialized,
             ) => Cost::Scalar,
             Self::Operation(

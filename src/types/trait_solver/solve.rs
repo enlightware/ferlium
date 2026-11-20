@@ -1364,7 +1364,8 @@ impl<'a> TraitSolver<'a> {
                     output_effs,
                     ..
                 } => !output_tys.is_empty() || !output_effs.is_empty(),
-                PubTypeConstraint::VariantPayloadLayout { .. } => false,
+                PubTypeConstraint::VariantPayloadLayout { .. }
+                | PubTypeConstraint::VariantPayloadStorage { .. } => false,
                 _ => true,
             })
             .map(|constraint| constraint.map(&mut mapper))

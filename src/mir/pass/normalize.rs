@@ -28,6 +28,7 @@ use crate::mir::Function;
 pub(super) enum NormalizingPass {
     CommonLoads,
     StaticDictionaries,
+    StaticPayloadStorages,
     Fold,
     CommonCalls,
     RedundantStorage,

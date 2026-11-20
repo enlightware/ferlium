@@ -81,6 +81,302 @@ fn types_differing_only_within_callables_have_the_same_layout() {
     );
 }
 
+/// The type of a generic construction may be the recursive type itself once instantiated, whose
+/// payload is behind a pointer.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_construction_of_an_instance_of_a_recursive_type() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            type V = End | Next(V);
+            fn mk(n: int) -> V {
+                if n > 0 {
+                    Next(mk(n - 1))
+                } else {
+                    End
+                }
+            }
+            fn next<A>(x: A) -> End | Next(A) { Next(x) }
+            fn depth(v: V) -> int {
+                match v {
+                    End => 0,
+                    Next(w) => 1 + depth(w),
+                }
+            }
+            depth(next(mk(black_box(2))))
+        "# }),
+        int(3)
+    );
+}
+
+/// A payload stored inline in generic code may be behind a pointer once instantiated: `List`
+/// holds an `Option<List>`.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_construction_of_a_payload_that_becomes_recursive() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            type List = Nil | Cons(int, Option<List>);
+            fn mkl(n: int) -> List {
+                if n > 0 {
+                    Cons(n, Some(mkl(n - 1)))
+                } else {
+                    Nil
+                }
+            }
+            fn sum(l: List) -> int {
+                match l {
+                    Nil => 0,
+                    Cons(n, t) => match t {
+                        Some(r) => n + sum(r),
+                        None => n,
+                    },
+                }
+            }
+            fn wrap<T>(x: T) -> Option<T> { Some(x) }
+            sum(Cons(10, wrap(mkl(black_box(3)))))
+        "# }),
+        int(16)
+    );
+}
+
+/// The storage of a closed payload may depend on another payload: `Next` is behind a pointer
+/// only once `Other` holds an `int`.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_construction_of_a_closed_payload_whose_variant_becomes_recursive() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            type V = End | Next(V) | Other(int);
+            fn mk<T>(v: V, x: T, which: bool) -> End | Next(V) | Other(T) {
+                if which {
+                    Next(v)
+                } else {
+                    Other(x)
+                }
+            }
+            fn depth(v: V) -> int {
+                match v {
+                    End => 0,
+                    Next(w) => 1 + depth(w),
+                    Other(n) => n,
+                }
+            }
+            let v: V = Next(End);
+            let n = black_box(0);
+            (depth(mk(v, n + 5, n == 0)), depth(mk(v, n + 5, n != 0)))
+        "# }),
+        tuple!(int(2), int(5))
+    );
+}
+
+/// Generic code computes the layout of a variant as the instance does.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_layout_of_a_variant_that_becomes_recursive() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            type List = Nil | Cons(int, Option<List>);
+            fn layout<T>(x: T) -> (int, int) { (Value::<Option<T>>::SIZE, Value::<Option<T>>::ALIGN) }
+            fn structural<T>(x: T) -> int { Value::<(bool, None | Some(T))>::SIZE }
+            let l: List = Nil;
+            let (size, align) = layout(l);
+            (
+                size - Value::<Option<List>>::SIZE,
+                align - Value::<Option<List>>::ALIGN,
+                structural(l) - Value::<(bool, None | Some(List))>::SIZE,
+            )
+        "# }),
+        tuple!(int(0), int(0), int(0))
+    );
+}
+
+/// Generic code that keeps, copies and captures a variant of an open type uses the layout and
+/// storage of the instance.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_code_handles_a_variant_that_becomes_recursive() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            type List = Nil | Cons(int, Option<List>);
+            fn mkl(n: int) -> List {
+                if n > 0 {
+                    Cons(n, Some(mkl(n - 1)))
+                } else {
+                    Nil
+                }
+            }
+            fn sum(l: List) -> int {
+                match l {
+                    Nil => 0,
+                    Cons(n, t) => match t {
+                        Some(r) => n + sum(r),
+                        None => n,
+                    },
+                }
+            }
+            #[inline(never)]
+            fn copies<T>(x: T) -> [Option<T>] {
+                let o = Some(x);
+                [o, o]
+            }
+            #[inline(never)]
+            fn captures<T>(x: T) -> () -> Option<T> {
+                let o = Some(x);
+                || o
+            }
+            fn sum_option(o: Option<List>) -> int {
+                match o {
+                    Some(l) => sum(l),
+                    None => 0,
+                }
+            }
+            let l = mkl(black_box(3));
+            let a = copies(l);
+            sum_option(a[0]) + sum_option(a[1]) + sum_option(captures(l)())
+        "# }),
+        int(18)
+    );
+}
+
+/// A closure capturing a variant of an open type lays its capture out as the instance does,
+/// also when the variant's layout is built here from its cases.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_closure_captures_a_variant_that_becomes_recursive() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            enum Opt<T> { No, Yes(T) }
+            type List = Nil | Cons(int, Opt<List>);
+            fn mkl(n: int) -> List {
+                if n > 0 {
+                    Cons(n, Opt::Yes(mkl(n - 1)))
+                } else {
+                    Nil
+                }
+            }
+            fn sum(l: List) -> int {
+                match l {
+                    Nil => 0,
+                    Cons(n, t) => match t {
+                        Yes(r) => n + sum(r),
+                        No => n,
+                    },
+                }
+            }
+            #[inline(never)]
+            fn captures<T>(x: T, y: T) -> () -> (Opt<T>, None | Some(T)) {
+                let o = Opt::Yes(x);
+                let p = Some(y);
+                || (o, p)
+            }
+            let (o, p) = captures(mkl(black_box(3)), mkl(black_box(2)))();
+            let first = match o {
+                Yes(l) => sum(l),
+                No => 0,
+            };
+            let second = match p {
+                Some(l) => sum(l),
+                None => 0,
+            };
+            first + second
+        "# }),
+        int(9)
+    );
+}
+
+/// The dictionary of a variant needs the storage of the cases of a payload stored behind a
+/// pointer too: its layout stops at the pointer, but its `clone` copies the payload.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_clone_reaches_cases_behind_an_indirect_payload() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            enum Tree<T> { Leaf(T), Node(A(Tree<T>) | B(T)) }
+            fn both<T>(x: Tree<T>) -> (Tree<T>, Tree<T>) { (x, x) }
+            let (x, y) = both(Tree::Node(B(3)));
+            match y {
+                Leaf(n) => n,
+                Node(k) => match k {
+                    A(unused) => 0,
+                    B(n) => n,
+                },
+            }
+        "# }),
+        int(3)
+    );
+}
+
+/// A written `Value` impl requires the storages that its generated layout getters read, even
+/// when none of its methods reads them.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn written_value_impl_supplies_the_storage_its_layout_reads() {
+    let mut session = TestSession::new();
+    session.allow_unsafe();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            enum V<T> { No, Yes(T) }
+            impl<T> Value for V<T> where T: Value {
+                fn eq(x: V<T>, y: V<T>) -> bool { true }
+                fn to_string(x: V<T>) -> string { "V" }
+                fn hash(x: V<T>, state: &mut hasher) {}
+                fn clone(x: V<T>) -> V<T> { V::No }
+                fn drop(x: &mut V<T>) {}
+            }
+            type L = Nil | Cons(V<L>);
+            fn size<T>(x: T) -> int { Value::<V<T>>::SIZE }
+            let l: L = Nil;
+            (
+                Value::<V<int>>::SIZE - Value::<No | Yes(int)>::SIZE,
+                size(l) - Value::<V<L>>::SIZE,
+            )
+        "# }),
+        tuple!(int(0), int(0))
+    );
+}
+
+/// Cases whose payloads differ only in effects share their storage evidence, whichever of them
+/// is built.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_construction_of_a_case_whose_payload_differs_only_in_effects() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            enum V<T> { A(() -> int ! ()), B(() -> int ! fallible), C(T) }
+            #[inline(never)]
+            fn make_b<T>(x: T, f: () -> int ! fallible) -> V<T> { V::B(f) }
+            let v = make_b(black_box(1), || 3);
+            match v {
+                A(f) => f(),
+                B(f) => f(),
+                C(x) => x,
+            }
+        "# }),
+        int(3)
+    );
+}
+
+/// A generated layout getter chooses between layouts computed beforehand, so its paths through
+/// the choices of nested open cases do not multiply. Found by fuzzing: verifying this getter took
+/// minutes in a debug build when each choice computed its own layout.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn layout_getters_of_nested_open_cases_stay_small() {
+    let mut session = TestSession::new();
+    session
+        .try_compile("enum A<a> {None(None([a]) | Ok, None | Some), Ok(Err(a, a) | Some, a), Some}")
+        .expect("the enum compiles");
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn recursive_comparison_checks_payload_after_cycle() {

@@ -16,7 +16,7 @@ use crate::{
         core_traits_names::{NUM_TRAIT_NAME, VALUE_TRAIT_NAME},
         value::{
             dynamic_product_member_layouts, generated_value_evidence_types,
-            value_type_needs_layout_witness,
+            generated_value_storage_constraints, value_type_needs_layout_witness,
         },
     },
     types::{
@@ -240,7 +240,8 @@ fn determining_ty_vars(constraint: &PubTypeConstraint) -> Vec<TypeVar> {
             .unique()
             .collect(),
         PubTypeConstraint::TypeHasVariant { .. }
-        | PubTypeConstraint::VariantPayloadLayout { .. } => constraint.inner_ty_vars(),
+        | PubTypeConstraint::VariantPayloadLayout { .. }
+        | PubTypeConstraint::VariantPayloadStorage { .. } => constraint.inner_ty_vars(),
     }
 }
 
@@ -575,7 +576,14 @@ impl UnifiedTypeInference {
         if ty.is_function() {
             return;
         }
-        let evidence_tys = generated_value_evidence_types(ty, &env)
+        let generated = generated_value_evidence_types(ty, &env);
+        // The generated dictionary also reads where its open payloads are stored.
+        if generated.is_some() {
+            for constraint in generated_value_storage_constraints(ty, span, &env) {
+                self.add_requirement(constraint);
+            }
+        }
+        let evidence_tys = generated
             .map(|evidence| {
                 evidence
                     .into_iter()
@@ -723,6 +731,7 @@ impl UnifiedTypeInference {
                     );
                 }
                 PubTypeConstraint::VariantPayloadLayout { .. }
+                | PubTypeConstraint::VariantPayloadStorage { .. }
                 | PubTypeConstraint::HaveTrait { .. } => {}
                 _ => {
                     invalid_ty_vars.extend(constraint.inner_ty_vars());
@@ -929,7 +938,10 @@ impl UnifiedTypeInference {
             );
 
             for constraint in &constraints {
-                if !constraint.contains_any_type_var(ty_var) {
+                // Where a payload is stored holds for any type.
+                if !constraint.contains_any_type_var(ty_var)
+                    || matches!(constraint, PubTypeConstraint::VariantPayloadStorage { .. })
+                {
                     continue;
                 }
 

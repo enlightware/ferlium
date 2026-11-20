@@ -20,7 +20,7 @@ use crate::{
     compiler::MirOptimization,
     eval::RuntimeError,
     execution::{ExecutionLimits, ReferenceInterpreterLimits},
-    hir::value::{ClosedTraitDictionary, Value},
+    hir::value::{ClosedTraitDictionary, Value, VariantPayloadStorage},
     mir::interpreter::{CallArgument, Interpreter},
     module::{FunctionId, ModuleId},
     types::{
@@ -219,6 +219,8 @@ pub(crate) enum ConstArgument {
     Value(Value),
     /// A symbolic trait dictionary for a hidden evidence parameter.
     Dictionary(ClosedTraitDictionary),
+    /// The payload storage for a hidden evidence parameter.
+    PayloadStorage(VariantPayloadStorage),
 }
 
 impl ConstArgument {
@@ -287,6 +289,7 @@ impl<'a> ConstEvaluator<'a> {
             .map(|argument| match argument {
                 ConstArgument::Value(value) => CallArgument::Value(value),
                 ConstArgument::Dictionary(dictionary) => CallArgument::Dictionary(dictionary),
+                ConstArgument::PayloadStorage(storage) => CallArgument::PayloadStorage(storage),
             })
             .collect();
         let result = interpreter.call_with_known_arguments(callee, arguments, result_ty, span);

@@ -147,6 +147,14 @@ where
             tag,
             payload_ty.format_with(env)
         ),
+        VariantPayloadStorage {
+            variant_ty, tag, ..
+        } => write!(
+            f,
+            "{} case {} payload storage",
+            variant_ty.format_with(env),
+            tag,
+        ),
         HaveTrait {
             trait_id,
             input_tys,
@@ -241,7 +249,7 @@ fn collect_aggregated_constraint(
                 .unwrap()
                 .insert(*tag, *payload_ty);
         }
-        VariantPayloadLayout { .. } | HaveTrait { .. } => {}
+        VariantPayloadLayout { .. } | VariantPayloadStorage { .. } | HaveTrait { .. } => {}
     }
 }
 
@@ -455,7 +463,8 @@ impl<'a> DisplayConstraints<'a> {
             | PubTypeConstraint::ProjectionSubscriptIs { .. } => {
                 collect_aggregated_constraint(&mut self.structural_constraints, constraint);
             }
-            PubTypeConstraint::VariantPayloadLayout { .. } => {}
+            PubTypeConstraint::VariantPayloadLayout { .. }
+            | PubTypeConstraint::VariantPayloadStorage { .. } => {}
         }
     }
 
@@ -606,7 +615,8 @@ impl ConstraintDisplayItem<'_> {
 
 fn is_hidden_light_constraint(constraint: &PubTypeConstraint, env: &ModuleEnv<'_>) -> bool {
     match constraint {
-        PubTypeConstraint::VariantPayloadLayout { .. } => true,
+        PubTypeConstraint::VariantPayloadLayout { .. }
+        | PubTypeConstraint::VariantPayloadStorage { .. } => true,
         PubTypeConstraint::HaveTrait {
             trait_id,
             input_tys,

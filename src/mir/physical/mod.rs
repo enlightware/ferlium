@@ -3061,6 +3061,7 @@ fn verify_physical_operation(
         | OperationKind::BuildArray { .. }
         | OperationKind::ExtractTag
         | OperationKind::ExtractPayloadIndirection
+        | OperationKind::PayloadStorageIsIndirect
         | OperationKind::Store
         | OperationKind::Clear
         | OperationKind::Memcpy

@@ -8,7 +8,8 @@ use std::mem::offset_of;
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction as I, MemArg, ValType};
 
 use crate::{
-    CompilerSession, FxHashMap, FxHashSet,
+    CompilerSession, FxHashMap, FxHashSet, Location,
+    hir::dictionary::DictionaryReq,
     mir::{
         Function, Operation, OperationKind, Value, ValueId,
         physical::{DictionaryReference, program::ResolvedPhysicalProgram},
@@ -20,7 +21,8 @@ use crate::{
         logic::bool_type,
         value::{
             ProductLayoutSpec, ProductMemberLayout, VALUE_SIZE_ASSOC_CONST_INDEX, ValueLayoutExpr,
-            product_layout_spec, value_layout_formula_for_type,
+            VariantPayloadStorageDecision, product_layout_spec, value_layout_formula_for_type,
+            variant_payload_storage_decision,
         },
     },
     types::{r#trait::TraitDictionaryEntryIndex, r#type::Type},
@@ -71,6 +73,9 @@ pub(super) struct CaptureLayout {
 #[derive(Default)]
 struct CaptureFallbacks {
     leaves: Vec<(Type, Value, WasmLocalId, WasmLocalId)>,
+    /// The payload storages that the layouts read: their requirement, the operand that gives
+    /// them, and the local holding whether the payload is indirect.
+    storages: Vec<(DictionaryReq, Value, WasmLocalId)>,
     expressions: Vec<(ValueLayoutExpr, WasmLocalId)>,
     layouts: FxHashMap<Type, (WasmLocalId, WasmLocalId)>,
 }
@@ -573,6 +578,61 @@ impl Body<'_, '_> {
         None
     }
 
+    /// The operand among `roots` that gives the payload storage `storage`, a canonical requirement
+    /// (see [`variant_payload_storage_decision`]). As [`Self::capture_witness`] finds a dictionary
+    /// by its type, this finds a storage by its requirement among the captures of a dictionary
+    /// built here, read at the dictionary's type arguments.
+    fn capture_storage(&self, storage: &DictionaryReq, roots: &[Value]) -> Option<Value> {
+        let mut pending = roots.to_vec();
+        let mut seen = FxHashSet::default();
+        while let Some(value) = pending.pop() {
+            if !seen.insert(value.clone()) {
+                continue;
+            }
+            let Value::Register(id) = &value else {
+                continue;
+            };
+            let Some(op) = self.dictionary_definitions.get(id) else {
+                continue;
+            };
+            let OperationKind::BuildDictionary { definition, ty } = op.kind else {
+                continue;
+            };
+            if let Some(imp) = self
+                .env
+                .module_by_id(definition.module_id)
+                .and_then(|module| module.get_impl_data(definition.impl_id))
+            {
+                let ty_args = imp.ty_args_of_dictionary_ty(ty);
+                let schema = imp.dictionary_value.capture_schema();
+                for (requirement, operand) in schema.iter().zip(op.operands.iter()) {
+                    let DictionaryReq::VariantPayloadIndirection {
+                        variant_ty,
+                        tag,
+                        payload_ty,
+                    } = requirement
+                    else {
+                        continue;
+                    };
+                    if matches!(
+                        variant_payload_storage_decision(
+                            imp.instantiate(*variant_ty, &ty_args),
+                            *tag,
+                            imp.instantiate(*payload_ty, &ty_args),
+                            Location::new_synthesized(),
+                            &self.env,
+                        ),
+                        Ok(VariantPayloadStorageDecision::Evidence(canonical)) if canonical == *storage
+                    ) {
+                        return Some(operand.clone());
+                    }
+                }
+            }
+            pending.extend(op.operands.iter().cloned());
+        }
+        None
+    }
+
     pub(super) fn plan_closure_captures(&self, op: &Operation) -> Result<CaptureLayout, String> {
         let captures = closure_value_captures(op);
         let capture_types = captures
@@ -663,6 +723,22 @@ impl Body<'_, '_> {
                 self.plan_capture_layout_expr(right, operands, plan)?;
                 self.local(ValType::I32)
             }
+            ValueLayoutExpr::PayloadStorage {
+                storage,
+                indirect,
+                inline,
+            } => {
+                if !plan.storages.iter().any(|(planned, ..)| planned == storage) {
+                    let evidence = self.capture_storage(storage, operands).ok_or_else(|| {
+                        format!("missing closure capture payload storage {storage:?}")
+                    })?;
+                    let local = self.local(ValType::I32);
+                    plan.storages.push((storage.clone(), evidence, local));
+                }
+                self.plan_capture_layout_expr(indirect, operands, plan)?;
+                self.plan_capture_layout_expr(inline, operands, plan)?;
+                self.local(ValType::I32)
+            }
         };
         plan.expressions.push((expr.clone(), local));
         Ok(local)
@@ -702,6 +778,11 @@ impl Body<'_, '_> {
             self.i(I::LocalGet(helpers.get(DynamicAlign).as_u32()));
             self.i(I::LocalSet(align.as_u32()));
         }
+        // Payload-storage evidence is the `bool` itself.
+        for (_, evidence, local) in &plan.storages {
+            self.read(evidence)?;
+            self.i(I::LocalSet(local.as_u32()));
+        }
         // Postorder planning gives each expression already-computed operands. Shared
         // subtrees and evidence leaves are evaluated once per closure construction.
         for (expr, result) in &plan.expressions {
@@ -709,6 +790,21 @@ impl Body<'_, '_> {
             match expr {
                 ValueLayoutExpr::Constant(value) => self.i(I::I32Const(*value as i32)),
                 ValueLayoutExpr::AssociatedConst { .. } => continue,
+                ValueLayoutExpr::PayloadStorage {
+                    storage,
+                    indirect,
+                    inline,
+                } => {
+                    let flag = plan
+                        .storages
+                        .iter()
+                        .find_map(|(planned, _, local)| (planned == storage).then_some(*local))
+                        .expect("every payload storage is planned");
+                    self.i(I::LocalGet(operand(indirect)));
+                    self.i(I::LocalGet(operand(inline)));
+                    self.i(I::LocalGet(flag.as_u32()));
+                    self.i(I::Select);
+                }
                 ValueLayoutExpr::Add(left, right) => {
                     self.i(I::LocalGet(operand(left)));
                     self.i(I::LocalGet(operand(right)));

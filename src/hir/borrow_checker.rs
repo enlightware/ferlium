@@ -1521,7 +1521,8 @@ pub(super) fn elaborated_child_node_ids(kind: &NodeKind<Elaborated>) -> SVec4<EN
         | TraitMethodApply(never)
         | GetTraitMethod(never)
         | GetTraitAssociatedConst(never)
-        | GetTraitDictionary(never) => match *never {},
+        | GetTraitDictionary(never)
+        | GetVariantPayloadStorage(never) => match *never {},
     }
 }
 

@@ -188,6 +188,7 @@ pub(super) fn operation_calls_only(
         | OperationKind::BuildArray { .. }
         | OperationKind::ExtractTag
         | OperationKind::ExtractPayloadIndirection
+        | OperationKind::PayloadStorageIsIndirect
         | OperationKind::IsInitialized
         | OperationKind::Store
         | OperationKind::Clear
