@@ -583,7 +583,68 @@ pub(crate) trait TypeLayoutEnv {
     fn current_module_id(&self) -> crate::module::ModuleId;
 }
 
-/// Whether following the representation-bearing fields of `start` can return to `target`.
+/// Whether `left` and `right` have the same representation: they are equal once every callable is
+/// taken as one leaf. A callable has one layout whatever its signature, effects or argument access
+/// modes (`doc/abi.md`, "First-class callables"), so a value keeps its bytes when a callable within
+/// it is widened, at any depth.
+fn same_representation(left: Type, right: Type) -> bool {
+    if left == right {
+        return true;
+    }
+    // The first pair allocates nothing when it already differs or has no children, as when a
+    // search compares a tuple with a variant.
+    let mut pending = Vec::new();
+    if !push_representation_children(left, right, &mut pending) {
+        return false;
+    }
+    if pending.is_empty() {
+        return true;
+    }
+    // Pairs being compared are assumed equal when met again: recursive types lead back to them.
+    let mut seen = FxHashSet::default();
+    seen.insert((left, right));
+    while let Some((left, right)) = pending.pop() {
+        if left == right || !seen.insert((left, right)) {
+            continue;
+        }
+        if !push_representation_children(left, right, &mut pending) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether `left` and `right` have the same constructor for [`same_representation`]; if so, push
+/// the pairs of their children that must have the same representation too.
+fn push_representation_children(left: Type, right: Type, pending: &mut Vec<(Type, Type)>) -> bool {
+    let left = left.data();
+    let right = right.data();
+    use TypeKind::*;
+    match (&*left, &*right) {
+        (Function(_) | Subscript(_), Function(_) | Subscript(_)) => {}
+        (Tuple(a), Tuple(b)) if a.len() == b.len() => {
+            pending.extend(a.iter().copied().zip(b.iter().copied()))
+        }
+        (Record(a), Record(b)) | (Variant(a), Variant(b))
+            if a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.0 == b.0) =>
+        {
+            pending.extend(a.iter().zip(b).map(|(a, b)| (a.1, b.1)))
+        }
+        (Named(a), Named(b)) if a.def == b.def && a.params.len() == b.params.len() => {
+            pending.extend(a.params.iter().copied().zip(b.params.iter().copied()))
+        }
+        (Native(a), Native(b))
+            if a.bare_ty == b.bare_ty && a.arguments.len() == b.arguments.len() =>
+        {
+            pending.extend(a.arguments.iter().copied().zip(b.arguments.iter().copied()))
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// Whether following the representation-bearing fields of `start` can return to `target`, up to
+/// [`same_representation`].
 ///
 /// Native, function, and subscript type arguments are not embedded fields of those values. Named
 /// types, conversely, are transparent wrappers around their instantiated structural shape.
@@ -593,7 +654,7 @@ fn representation_reaches(
     env: &impl TypeLayoutEnv,
     seen: &mut FxHashSet<Type>,
 ) -> bool {
-    if start == target {
+    if same_representation(start, target) {
         return true;
     }
     if !seen.insert(start) {
@@ -624,6 +685,8 @@ fn representation_reaches(
 
 /// Classify one variant payload occurrence. A recursive payload is indirect; every other payload
 /// is inline. Products always own their members inline, so recursion is cut only at variant edges.
+/// Recursion is found up to callables, so types that differ only within callables, such as by a
+/// widened effect, have the same layout.
 fn payload_storage_in_variant(
     variant: Type,
     payload: Type,

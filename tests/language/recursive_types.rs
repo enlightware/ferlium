@@ -31,6 +31,56 @@ fn recursive_comparison_widens_callback_effects() {
     );
 }
 
+/// Widening the effect of a callback keeps a value's bytes, so a variant that holds the recursive
+/// type in a payload must keep that payload behind a pointer, as the recursive type does.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn widening_a_callback_effect_keeps_the_layout_of_a_recursive_variant() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            type V = End | Next(V) | Other(() -> int ! ());
+            #[inline(never)]
+            fn initial(n: int) -> V {
+                if n > 0 {
+                    Next(initial(n - 1))
+                } else {
+                    End
+                }
+            }
+            #[inline(never)]
+            fn widen(x: V) -> End | Next(V) | Other(() -> int ! fallible) { x }
+            #[inline(never)]
+            fn depth(x: V) -> int {
+                match x { End => 0, Next(t) => 1 + depth(t), Other(callback) => 7 }
+            }
+            #[inline(never)]
+            fn f(n: int) -> int {
+                match widen(initial(n)) { End => 0, Next(t) => 1 + depth(t), Other(callback) => 7 }
+            }
+            f(black_box(3))
+        "# }),
+        int(3)
+    );
+}
+
+/// Types that differ only within callables, at any depth, have the same layout.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn types_differing_only_within_callables_have_the_same_layout() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            type V = End | Next(V) | Other(() -> int);
+            type Top = End | Next(V) | Other(() -> int ! fallible);
+            type Deep = End | Next(End | Next(V) | Other(() -> int ! fallible)) | Other(() -> int);
+            fn widen_deep(x: V) -> Deep { x }
+            (Value::<Top>::SIZE - Value::<V>::SIZE, Value::<Deep>::SIZE - Value::<V>::SIZE)
+        "# }),
+        tuple!(int(0), int(0))
+    );
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn recursive_comparison_checks_payload_after_cycle() {

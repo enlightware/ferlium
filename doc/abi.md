@@ -329,7 +329,8 @@ Tuple indices retain their logical meaning regardless of physical field order.
 
 Tagged unions store their payloads inline unless the payload edge belongs to the same recursive
 representation component. Such recursive edges are represented by an owning pointer, making
-recursive layouts finite.
+recursive layouts finite. Components are found up to callables: every callable has one layout,
+so types that differ only within callables, such as by a widened effect, have the same layout.
 
 Tagged unions can be named:
 
