@@ -71,11 +71,7 @@ jobs:
     outputs:
       wasm_bindgen: ${{ steps.versions.outputs.wasm_bindgen }}
     env:
-      # The language test binary is large enough that loading its full DWARF data can leave Chrome's renderer unresponsive to WebDriver.
-      # Keep debug assertions, omit debuginfo, and use light optimization so browsers do not
-      # spend minutes compiling the otherwise very large opt-level-0 test module.
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_PROFILE_TEST_OPT_LEVEL: "1"
+      WASM_BROWSER_TEST_DIR: wasm-tests/test
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -105,17 +101,7 @@ jobs:
       - name: Build WASM test binaries
         # The Wasm test binaries do not depend on the host, so they are built once here and run by
         # the jobs below.
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p wasm-tests/test
-          cargo test --target wasm32-unknown-unknown --no-run --message-format=json-render-diagnostics -p ferlium -p script-api --lib --test language \
-            | jq -r 'select(.reason == "compiler-artifact" and .executable != null) | "\(.target.name) \(.executable)"' \
-            | while read -r name executable; do cp "$executable" "wasm-tests/test/$name.wasm"; done
-          for file in ferlium language script_api; do
-            test -f "wasm-tests/test/$file.wasm"
-          done
-          ls -l wasm-tests/test
+        run: make -f wasm-tests/browser.mk build-wasm-browser-tests
 
       - name: Determine wasm-bindgen version
         id: versions
@@ -128,6 +114,7 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wasm-tests-test
+          # Browser jobs download browser.mk and webdriver.json alongside the binaries.
           path: wasm-tests
           if-no-files-found: error
           retention-days: 1
@@ -205,9 +192,7 @@ jobs:
             os: macos-latest
             webdriver: SAFARIDRIVER=/usr/bin/safaridriver
     env:
-      WASM_BINDGEN_USE_BROWSER: "1"
-      WASM_BINDGEN_TEST_TIMEOUT: "600"
-      WASM_BINDGEN_TEST_WEBDRIVER_JSON: wasm-tests/webdriver.json
+      WASM_BROWSER_TEST_DIR: wasm-tests/test
     steps:
       - name: Download WASM test binaries
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -225,13 +210,13 @@ jobs:
         run: echo "${{ matrix.webdriver }}" >> "$GITHUB_ENV"
 
       - name: Run WASM library tests (${{ matrix.browser }})
-        run: wasm-bindgen-test-runner wasm-tests/test/ferlium.wasm
+        run: make -f wasm-tests/browser.mk run-wasm-browser-tests WASM_BROWSER_SUITES=ferlium
 
       - name: Run WASM language tests (${{ matrix.browser }})
-        run: wasm-bindgen-test-runner wasm-tests/test/language.wasm
+        run: make -f wasm-tests/browser.mk run-wasm-browser-tests WASM_BROWSER_SUITES=language
 
       - name: Run Playground WASM tests (${{ matrix.browser }})
-        run: wasm-bindgen-test-runner wasm-tests/test/script_api.wasm
+        run: make -f wasm-tests/browser.mk run-wasm-browser-tests WASM_BROWSER_SUITES=script_api
 
   wasm_node:
     name: Optimized WASM tests (Node)

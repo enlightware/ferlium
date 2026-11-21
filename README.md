@@ -119,6 +119,8 @@ scripted Wasm sessions.
 
 `make test-local` runs the suite via [`nextest`](https://nexte.st/), which is significantly faster than `cargo test`.
 
+`make test-wasm` runs the Chrome and Firefox suites through `wasm-pack`.
+
 ### Running benchmarks
 
 Run `make bench` for instruction counts, `make profile-mir` for a quick optimizer comparison, or `make bench-wasm` for WebAssembly timings.
