@@ -71,7 +71,9 @@ use crate::{
         r#type::{SubscriptType, Type, TypeDef},
         type_inference::effect_solver::EffectConstraintOrigin,
         type_like::TypeLike,
-        type_properties::{TypePropertyEnv, concrete_type_is_trivial_copy, trivial_copy_impl_key},
+        type_properties::{
+            TypeDefEnv, TypePropertyEnv, concrete_type_is_trivial_copy, trivial_copy_impl_key,
+        },
         type_scheme::{PubTypeConstraint, TypeScheme},
     },
 };
@@ -869,7 +871,9 @@ impl TypePropertyEnv for TraitSolver<'_> {
         let key = trivial_copy_impl_key(self.std_trait_id(TRIVIAL_COPY_TRAIT_NAME), ty);
         self.has_canonical_trait_impl(&key)
     }
+}
 
+impl TypeDefEnv for TraitSolver<'_> {
     fn type_def(&self, id: TypeDefId) -> &TypeDef {
         TraitSolver::type_def(self, id)
     }

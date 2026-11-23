@@ -91,6 +91,9 @@ pub trait HirPhase: Sized + fmt::Debug + Clone {
     /// The argument whose call is built within a yielded binding's accessor, carried by local
     /// declarations until elaboration knows whether that accessor yields.
     type DrivenArgument: fmt::Debug + Clone + Copy + Default;
+    /// The value that a local holds under another view of its type, carried by local declarations
+    /// until elaboration has checked their representations.
+    type ViewedValue: fmt::Debug + Clone + Copy + Default;
 }
 
 /// HIR before dictionary passing and final ownership/call elaboration.
@@ -115,6 +118,7 @@ impl HirPhase for Unelaborated {
     type CallArgConvention = ArgConvention;
     type DeferredLocalStorage = DeferredLocalStorage;
     type DrivenArgument = Option<DrivenArgument>;
+    type ViewedValue = Option<UNodeId>;
 }
 
 impl HirPhase for Elaborated {
@@ -131,6 +135,7 @@ impl HirPhase for Elaborated {
     type CallArgConvention = ArgConvention;
     type DeferredLocalStorage = Never;
     type DrivenArgument = ();
+    type ViewedValue = ();
 }
 
 /// An index to a node in the HIR arena.

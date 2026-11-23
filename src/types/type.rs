@@ -1751,6 +1751,34 @@ pub struct TypeDef {
     pub default_variant: Option<Ustr>,
     /// Whether this type constructor has an explicit, non-derived `Value` impl.
     pub has_custom_value_impl: bool,
+    /// The summary of its representation, computed once its module's types are desugared.
+    pub representation: RepresentationSummary,
+}
+
+/// The summary of the representation of a type definition's shape: the shape with each named type
+/// in it replaced by its own definition's shape, down to the leaves whose layout does not depend on
+/// what they hold, natives, callables and variables (`RepresentationMetrics`). Parameters count as no
+/// part, so that a named type's representation follows from its definition's summary and those of
+/// its arguments, without expanding anything.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RepresentationSummary {
+    /// The height of the representation.
+    pub height: u32,
+    /// The number of its parts, counting a repeated part at each occurrence.
+    pub size: u32,
+    /// The occurrences of each parameter.
+    pub params: Box<[RepresentationParam]>,
+}
+
+/// The occurrences of a parameter in the representation of a type definition's shape.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RepresentationParam {
+    /// The depth of its deepest occurrence, the shape being at depth 0, if it occurs.
+    pub depth: Option<u32>,
+    /// Its number of occurrences.
+    pub count: u32,
 }
 
 /// Documentation attached to the declared product shape of a struct or enum variant.
@@ -3020,6 +3048,17 @@ pub const TYPE_HEIGHT_LIMIT: u32 = 128;
 /// recursive type, which it measures with each member once, it bounds only walks that process
 /// each member once.
 pub const TYPE_SIZE_LIMIT: u32 = 4096;
+
+/// The largest height of the representation of a type: its height with the named types in it
+/// expanded into their shapes (`RepresentationMetrics`). It bounds the stack used by the recursive
+/// walks that expand named types, which the type height limit does not: a named type is one level
+/// high whatever it stands for.
+pub const REPRESENTATION_HEIGHT_LIMIT: u32 = 256;
+
+/// The largest size of the representation of a type, counting a repeated part at each occurrence
+/// (`RepresentationMetrics`). It bounds the work of the walks that expand named types without
+/// sharing repeated parts, such as building the layout formulas of generated `Value` dictionaries.
+pub const REPRESENTATION_SIZE_LIMIT: u32 = 4096;
 
 /// A type would exceed one of the limits on the types that the compiler builds, with the value
 /// it would reach, or at least reach when the builder stopped early. It has no span: the caller that

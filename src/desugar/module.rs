@@ -16,6 +16,7 @@ use crate::{
     },
     hir::function::CallableDefinition,
     module::{TraitId, Visibility, check_public_declarations, id::Id},
+    std::value::{check_representation_metrics, value_layout_formula_for_type},
     types::{
         effects::EffectVar,
         never::reject_reserved_name,
@@ -23,6 +24,7 @@ use crate::{
             SEALED_ATTRIBUTE, Trait, TraitAssociatedConst, TraitImplPolicy, TraitMethodIndex,
             TraitMethodSpans, TraitSpans, TraitValidationError,
         },
+        type_properties::{summarize_module_type_defs, type_def_representation_metrics},
     },
 };
 
@@ -634,8 +636,38 @@ impl NamedTypeGraph {
                 }
             }
         }
+        summarize_module_type_defs(output, others);
+        check_type_def_representations(output, others, capabilities)?;
         Ok(modules_used)
     }
+}
+
+/// Check the representation of each type definition against the limits on representations, and
+/// the size of its values where it does not depend on parameters. The first definition reported
+/// is the first one too large in the source.
+fn check_type_def_representations(
+    output: &Module,
+    others: &Modules,
+    capabilities: CompilationCapabilities,
+) -> Result<(), InternalCompilationError> {
+    let env = ModuleEnv::new(output, others).with_capabilities(capabilities);
+    let mut type_defs = output
+        .type_def_ids()
+        .map(|id| output.type_def(id))
+        .collect::<Vec<_>>();
+    type_defs.sort_by_key(|type_def| type_def.span.start());
+    for type_def in type_defs {
+        let (height, size) = type_def_representation_metrics(type_def, &env);
+        check_representation_metrics(height, size, type_def.span)?;
+        if type_def.shape.ty_quantifiers.is_empty() {
+            InternalCompilationError::attempt(value_layout_formula_for_type(
+                type_def.shape_ty(),
+                type_def.span,
+                &env,
+            ))?;
+        }
+    }
+    Ok(())
 }
 
 fn build_named_type_graph(

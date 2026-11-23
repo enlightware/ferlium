@@ -125,6 +125,10 @@ pub struct LocalDecl<P: HirPhase = Unelaborated> {
     /// For the binding of a yielded accessor, the argument whose call is built within it.
     #[new(default)]
     pub driven_argument: P::DrivenArgument,
+    /// For a local holding a value under another view of its type, such as a match's condition
+    /// under the cases of its enum, the node of that value: the local has its representation.
+    #[new(default)]
+    pub viewed_value: P::ViewedValue,
 }
 
 /// A local declaration before local ownership/value elaboration.
@@ -210,6 +214,7 @@ impl LocalDecl<Unelaborated> {
             assignment_mode: self.assignment_mode,
             clone: self.clone.map(PendingLocalClone::into_elaborated),
             driven_argument: (),
+            viewed_value: (),
         }
     }
 }

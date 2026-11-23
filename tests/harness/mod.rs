@@ -731,6 +731,7 @@ fn option_type_def() -> TypeDef {
         attributes: vec![],
         default_variant: None,
         has_custom_value_impl: false,
+        representation: Default::default(),
     }
 }
 
@@ -767,6 +768,7 @@ fn map_iterator_type_def(iterator_trait: TraitId) -> TypeDef {
         attributes: vec![],
         default_variant: None,
         has_custom_value_impl: false,
+        representation: Default::default(),
     }
 }
 
@@ -796,6 +798,7 @@ fn witnessed_type_def(test_assoc_trait: TraitId) -> TypeDef {
         attributes: vec![],
         default_variant: None,
         has_custom_value_impl: false,
+        representation: Default::default(),
     }
 }
 

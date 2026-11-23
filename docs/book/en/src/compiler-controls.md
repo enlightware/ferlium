@@ -32,7 +32,9 @@ This keeps deeply nested source from exhausting the compiler's stack.
 ## Type limits
 
 A type can be at most 128 levels deep and have at most 4096 parts, a repeated part counting each time it appears.
-A larger type is a compilation error, whether written or inferred.
+Counting the fields and variants of the structs and enums it contains, a type can be at most 256 levels deep and have at most 4096 parts, a recursive type counting each of its definitions once.
+A value must be smaller than 2 GiB.
+A larger type or value is a compilation error, whether written or inferred.
 This keeps types that grow without bound from exhausting the compiler.
 
 ## Embedding Ferlium

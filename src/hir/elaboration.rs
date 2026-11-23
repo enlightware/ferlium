@@ -94,10 +94,11 @@ use crate::{
         emit_value_impl::function_value_method, value::LiteralValue,
     },
     std::value::{
-        dynamic_product_member_layouts, generated_value_evidence_types,
+        check_representation, dynamic_product_member_layouts, generated_value_evidence_types,
         is_function_surface_only_value_trait_application, is_value_trait,
         is_value_trait_for_function_type, type_has_static_layout,
-        value_layout_associated_const_values, variant_payload_storage_decision,
+        value_layout_associated_const_values, value_layout_formula_for_type,
+        variant_payload_storage_decision,
     },
     types::{
         effects::{EffType, Effect, EffectsInstSubst, no_effects},
@@ -1409,6 +1410,12 @@ pub(crate) fn elaborate_hir_with_warnings<'d, 'sr, 'sm>(
     hir::assignment::lower_pending_assignments(src, root, &mut locals);
     hir::value_dispatch::elaborate_local_ownership_and_value_dispatches(src, &mut locals, ctx)?;
     let mut elaboration = HirElaboration::new(dst, ctx, locals, warnings);
+    // A parameter that no node uses still has a value laid out by the back ends.
+    for index in 0..elaboration.locals.len() {
+        let local = &elaboration.locals[index];
+        let ty = local.viewed_value.map_or(local.ty, |value| src[value].ty);
+        elaboration.check_representation(ty, local.name.1)?;
+    }
     let root = elaboration.elaborate_node(src, root)?;
     LocalDecl::assign_sequential_slots(&mut elaboration.locals);
     Ok(ElaboratedHir {
@@ -1636,6 +1643,8 @@ struct HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
     /// For each call built within the accessors of its arguments, those of its arguments found
     /// with a yielded accessor suspended around it.
     suspended_arguments: FxHashMap<u32, Vec<DrivenArgument>>,
+    /// The types of the nodes whose representation was checked.
+    checked_types: FxHashSet<Type>,
 }
 
 /// An elaborated source loop.
@@ -1716,6 +1725,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             loops: FxHashMap::default(),
             next_loop_id: LoopId::from_index(0),
             suspended_arguments: FxHashMap::default(),
+            checked_types: FxHashSet::default(),
         }
     }
 
@@ -2058,6 +2068,14 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
         let old_ty = old_node.ty;
         let old_effects = old_node.effects.clone();
         let old_span = old_node.span;
+        // A value is charged at its own type, not at another view of it.
+        let value_ty = match &old_node.kind {
+            NodeKind::LoadLocal(load) => self.locals[load.id.as_index()]
+                .viewed_value
+                .map_or(old_ty, |value| src[value].ty),
+            _ => old_ty,
+        };
+        self.check_representation(value_ty, old_span)?;
         let kind = self.elaborate_source_kind(src, old, old_ty, &old_effects, old_span)?;
         let new = self
             .dst
@@ -2065,6 +2083,31 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
         self.in_progress.remove(&old);
         self.remap.insert(old, new);
         Ok(new)
+    }
+
+    /// Check, once per type, the representation of the values of a node: that it is within
+    /// `REPRESENTATION_HEIGHT_LIMIT` and `REPRESENTATION_SIZE_LIMIT`, and that a value of concrete
+    /// type fits `VALUE_SIZE_LIMIT`.
+    /// MIR lowering and the back ends walk representations and lay out a value of concrete type as
+    /// static, and have no error to report: the probes before them take a representation too
+    /// large as one needing evidence. A value of open type is laid out through its `Value`
+    /// evidence.
+    fn check_representation(
+        &mut self,
+        ty: Type,
+        span: Location,
+    ) -> Result<(), InternalCompilationError> {
+        if self.checked_types.insert(ty) {
+            check_representation(ty, span, self.ctx.trait_solver)?;
+            if ty.is_constant() {
+                InternalCompilationError::attempt(value_layout_formula_for_type(
+                    ty,
+                    span,
+                    self.ctx.trait_solver,
+                ))?;
+            }
+        }
+        Ok(())
     }
 
     /// Keep completed fields owned until every field has evaluated, then transfer them together.

@@ -30,7 +30,7 @@ use crate::{
             BareNativeTypeB, FnArgType, NativeType, Type, TypeAliasEntry, TypeAliases, TypeDef,
             TypeDefSlot,
         },
-        type_properties::{TypePropertyEnv, trivial_copy_impl_key},
+        type_properties::{TypeDefEnv, TypePropertyEnv, trivial_copy_impl_key},
         type_scheme::PubTypeConstraint,
         typing_env::TraitMethodDescription,
     },
@@ -1313,7 +1313,9 @@ impl TypePropertyEnv for ModuleEnv<'_> {
         self.module_by_id(trait_id.module)
             .is_some_and(|module| module.impls.concrete_key_to_id.contains_key(&key))
     }
+}
 
+impl TypeDefEnv for ModuleEnv<'_> {
     fn type_def(&self, id: TypeDefId) -> &TypeDef {
         ModuleEnv::type_def(self, id)
     }

@@ -43,6 +43,12 @@ pub enum CompilerLimitKind {
     TypeHeight,
     /// See `TYPE_SIZE_LIMIT`.
     TypeSize,
+    /// See `REPRESENTATION_HEIGHT_LIMIT`.
+    RepresentationHeight,
+    /// See `REPRESENTATION_SIZE_LIMIT`.
+    RepresentationSize,
+    /// See `VALUE_SIZE_LIMIT`.
+    ValueSize,
 }
 
 impl Display for CompilerLimitKind {
@@ -52,6 +58,9 @@ impl Display for CompilerLimitKind {
             Self::ZeroSizedResultDepth => "zero-sized result nesting depth",
             Self::TypeHeight => "type height",
             Self::TypeSize => "type size",
+            Self::RepresentationHeight => "representation height",
+            Self::RepresentationSize => "representation size",
+            Self::ValueSize => "value size",
         })
     }
 }

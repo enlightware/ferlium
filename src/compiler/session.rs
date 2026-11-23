@@ -72,7 +72,7 @@ use crate::{
         STD_MODULE_ID, new_module_using_std, string::String as NativeString,
         value::value_layout_for_type,
     },
-    types::r#type::Type,
+    types::{r#type::Type, type_properties::summarize_module_type_defs},
 };
 
 /// A compiled module and an expression (if any).
@@ -541,8 +541,10 @@ impl<'a> ModuleRegistry<'a> {
 /// # Stack
 ///
 /// Compilation recurses over the source, whose nesting the language limits to
-/// [`NESTING_LIMIT`](crate::parser::nesting::NESTING_LIMIT) levels, and over types, whose height
-/// it limits to [`TYPE_HEIGHT_LIMIT`](crate::types::r#type::TYPE_HEIGHT_LIMIT). A host should
+/// [`NESTING_LIMIT`](crate::parser::nesting::NESTING_LIMIT) levels, over types, whose height it
+/// limits to [`TYPE_HEIGHT_LIMIT`](crate::types::r#type::TYPE_HEIGHT_LIMIT), and over the
+/// representations of type definitions, whose height it limits to
+/// [`REPRESENTATION_HEIGHT_LIMIT`](crate::types::r#type::REPRESENTATION_HEIGHT_LIMIT). A host should
 /// compile on a thread with a generous stack, for instance 4 MiB in a release build and 32 MiB in
 /// a debug build. Rust gives a spawned thread 2 MiB by default, and Windows gives a main thread
 /// 1 MiB. The test `nesting_at_the_limit_compiles` checks a stack size: run it with
@@ -1131,6 +1133,7 @@ impl CompilerSession {
             "native registration requires fresh dependencies"
         );
         environment.install(&mut module);
+        summarize_module_type_defs(&mut module, self.raw_modules());
         module.derive_impl_visibility(self.raw_modules());
         module.validate_native_optional_results(ModuleEnv::new(&module, self.raw_modules()));
         if let Err(error) = resolve_pending_parent_accessors(&mut module, self.raw_modules()) {
@@ -2008,6 +2011,7 @@ mod tests {
             attributes: vec![],
             default_variant: None,
             has_custom_value_impl: false,
+            representation: Default::default(),
         };
         let hidden =
             module.add_type_def_with_visibility(definition.name, definition, Visibility::Module);
@@ -2172,6 +2176,7 @@ mod tests {
             attributes: Vec::new(),
             default_variant: None,
             has_custom_value_impl: false,
+            representation: Default::default(),
         };
         let definition = module.add_type_def(name, definition);
         assert_eq!(session.register_module(path, module), module_id);

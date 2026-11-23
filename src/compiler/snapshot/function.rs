@@ -233,6 +233,7 @@ impl SnapshotLocalDecl {
             assignment_mode: self.assignment_mode,
             clone: self.clone,
             driven_argument: (),
+            viewed_value: (),
         })
     }
 }

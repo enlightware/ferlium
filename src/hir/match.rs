@@ -346,6 +346,8 @@ impl TypeInference {
                 pattern_ty,
                 match_span,
             );
+            // It holds the condition's value under the view of its cases.
+            env.all_locals[l_match_condition.as_index()].viewed_value = Some(condition_node_id);
             let store_variant_node_id = env.ir_arena.alloc(N::new(
                 store_variant,
                 Type::unit(),

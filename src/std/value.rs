@@ -10,9 +10,9 @@ use std::{
 use ustr::{Ustr, ustr};
 
 use crate::{
-    FxHashSet, Location,
+    FxHashMap, FxHashSet, Location,
     ast::{Path, UnnamedArg},
-    compiler::error::InternalCompilationError,
+    compiler::error::{CompilerLimit, CompilerLimitKind, InternalCompilationError},
     containers::b,
     hir::{
         self, CallArgument, NodeArena, NodeId,
@@ -52,9 +52,13 @@ use crate::{
             TraitDictionaryEntryIndex, TraitMethodIndex, structural_members,
         },
         trait_solver::TraitSolver,
-        r#type::{CallImplType, FnArgType, FnType, Type, TypeDef, TypeKind, tuple_type},
+        r#type::{
+            CallImplType, FnArgType, FnType, REPRESENTATION_HEIGHT_LIMIT,
+            REPRESENTATION_SIZE_LIMIT, Type, TypeKind, tuple_type,
+        },
         type_like::TypeLike,
         type_mapper::EffectErasingMapper,
+        type_properties::{RepresentationMetrics, TypeDefEnv},
         type_scheme::PubTypeConstraint,
     },
 };
@@ -282,14 +286,25 @@ pub(crate) enum ValueLayoutExpr {
     },
 }
 
+/// The largest size of a value. Layout components are signed sizes, which have 32 bits on a 32-bit
+/// host such as Wasm.
+pub const VALUE_SIZE_LIMIT: usize = i32::MAX as usize;
+
 impl ValueLayoutExpr {
+    /// A layout component, which is a size, an alignment or an offset, so at most
+    /// [`VALUE_SIZE_LIMIT`].
     fn constant(value: usize, span: Location) -> Result<Self, InternalCompilationError> {
-        isize::try_from(value).map(Self::Constant).map_err(|_| {
-            internal_compilation_error!(Internal {
-                error: format!("Value layout component {value} does not fit in int"),
-                span,
-            })
-        })
+        if value > VALUE_SIZE_LIMIT {
+            return Err(internal_compilation_error!(CompilerLimitExceeded(
+                CompilerLimit {
+                    kind: CompilerLimitKind::ValueSize,
+                    actual: value,
+                    limit: VALUE_SIZE_LIMIT,
+                    span,
+                }
+            )));
+        }
+        Ok(Self::Constant(value as isize))
     }
 
     fn associated_const(ty: Type, index: TraitAssociatedConstIndex) -> Self {
@@ -301,12 +316,8 @@ impl ValueLayoutExpr {
             (Self::Constant(0), _) => Ok(right),
             (_, Self::Constant(0)) => Ok(left),
             (Self::Constant(left), Self::Constant(right)) => {
-                left.checked_add(*right).map(Self::Constant).ok_or_else(|| {
-                    internal_compilation_error!(Internal {
-                        error: "Value size does not fit in int".to_owned(),
-                        span,
-                    })
-                })
+                // Both are at most `VALUE_SIZE_LIMIT`, so their sum fits in `usize` on every host.
+                Self::constant(*left as usize + *right as usize, span)
             }
             _ => Ok(Self::Add(Box::new(left), Box::new(right))),
         }
@@ -450,6 +461,18 @@ impl ValueLayoutFormula {
         let size = usize::try_from(size).expect("layout sizes are non-negative");
         let align = usize::try_from(align).expect("layout alignments are positive");
         Ok(ValueLayout::new(size, align))
+    }
+
+    fn is_constant(&self) -> bool {
+        self.size.constant_value().is_some() && self.align.constant_value().is_some()
+    }
+
+    /// The layout that `ty`'s own `Value` evidence gives.
+    fn symbolic(ty: Type) -> Self {
+        Self {
+            size: ValueLayoutExpr::associated_const(ty, VALUE_SIZE_ASSOC_CONST_INDEX),
+            align: ValueLayoutExpr::associated_const(ty, VALUE_ALIGN_ASSOC_CONST_INDEX),
+        }
     }
 
     fn associated_const(self, index: TraitAssociatedConstIndex) -> ValueLayoutExpr {
@@ -608,8 +631,7 @@ impl ProductLayoutSpec {
     }
 }
 
-pub(crate) trait TypeLayoutEnv {
-    fn type_def(&self, id: TypeDefId) -> &TypeDef;
+pub(crate) trait TypeLayoutEnv: TypeDefEnv {
     fn current_module_id(&self) -> crate::module::ModuleId;
 }
 
@@ -1017,133 +1039,167 @@ pub(crate) fn variant_payload_storage_for_type(
 }
 
 impl TypeLayoutEnv for ModuleEnv<'_> {
-    fn type_def(&self, id: TypeDefId) -> &TypeDef {
-        ModuleEnv::type_def(self, id)
-    }
-
     fn current_module_id(&self) -> crate::module::ModuleId {
         self.current.module_id()
     }
 }
 
 impl TypeLayoutEnv for TraitSolver<'_> {
-    fn type_def(&self, id: TypeDefId) -> &TypeDef {
-        TraitSolver::type_def(self, id)
-    }
-
     fn current_module_id(&self) -> crate::module::ModuleId {
         self.current_type_items.module.id
     }
 }
 
-fn value_layout_formula_inner(
+/// One layout query, which computes the layout of each named type whose layout is constant once.
+///
+/// A constant layout does not depend on where it is asked from, and costs nothing to copy. A
+/// symbolic one can: a type met again while it is being walked gets a symbolic formula, so the
+/// formula of a type on a cycle depends on where the cycle is entered.
+#[derive(Default)]
+struct LayoutWalk {
+    /// The types being walked.
+    active: FxHashSet<Type>,
+    constants: FxHashMap<Type, ValueLayoutFormula>,
+}
+
+impl LayoutWalk {
+    fn formula(
+        &mut self,
+        ty: Type,
+        span: Location,
+        env: &impl TypeLayoutEnv,
+    ) -> Result<ValueLayoutFormula, InternalCompilationError> {
+        if let Some(formula) = leaf_formula(ty, span) {
+            return formula;
+        }
+        if let Some(formula) = self.constants.get(&ty) {
+            return Ok(formula.clone());
+        }
+        if !self.active.insert(ty) {
+            // Valid recursive representations encounter a variant payload before returning here,
+            // and that payload contributes a pointer-sized constant instead. Keeping any remaining
+            // cycle symbolic lets the type/module cycle diagnostics reject it at their proper
+            // boundary.
+            return Ok(ValueLayoutFormula::symbolic(ty));
+        }
+        // The types being walked are as many as the walk is deep. A type whose representation was
+        // checked never reaches the limit; one first built when specializing can.
+        if self.active.len() > REPRESENTATION_HEIGHT_LIMIT as usize {
+            return Err(representation_height_exceeded(
+                REPRESENTATION_HEIGHT_LIMIT as usize + 1,
+                span,
+            ));
+        }
+        let formula = self.uncached_formula(ty, span, env)?;
+        self.active.remove(&ty);
+        // A walk meets a type again through the named types that hold it, and the query's own
+        // type not once it returns.
+        if formula.is_constant() && !self.active.is_empty() && ty.data().is_named() {
+            self.constants.insert(ty, formula.clone());
+        }
+        Ok(formula)
+    }
+
+    fn uncached_formula(
+        &mut self,
+        ty: Type,
+        span: Location,
+        env: &impl TypeLayoutEnv,
+    ) -> Result<ValueLayoutFormula, InternalCompilationError> {
+        let ty_data = ty.data();
+        use TypeKind::*;
+        match &*ty_data {
+            Tuple(_) | Record(_) => {
+                let member_tys = direct_product_member_types(&ty_data).expect("product members");
+                drop(ty_data);
+                let fields = member_tys
+                    .into_iter()
+                    .map(|member_ty| self.formula(member_ty, span, env))
+                    .collect::<Result<Vec<_>, _>>()?;
+                // Decreasing alignment removes interior padding. Tie-breakers affect offsets,
+                // but total size is the aligned sum of member sizes for both product kinds.
+                ValueLayoutFormula::product(fields, span)
+            }
+            Variant(variants) => {
+                let payload_tys = variants.clone();
+                drop(ty_data);
+                let payloads = payload_tys
+                    .into_iter()
+                    .map(|(tag, payload_ty)| {
+                        let pointer =
+                            || ValueLayoutFormula::constant(ValueLayout::native::<usize>(), span);
+                        use VariantPayloadStorageDecision::*;
+                        match variant_payload_storage_decision(ty, tag, payload_ty, span, env)? {
+                            Static(VariantPayloadStorage::Indirect) => pointer(),
+                            Static(VariantPayloadStorage::Inline) => {
+                                self.formula(payload_ty, span, env)
+                            }
+                            Evidence(storage) => {
+                                let pointer = pointer()?;
+                                let inline = self.formula(payload_ty, span, env)?;
+                                Ok(ValueLayoutFormula {
+                                    size: ValueLayoutExpr::payload_storage(
+                                        storage.clone(),
+                                        pointer.size,
+                                        inline.size,
+                                    ),
+                                    align: ValueLayoutExpr::payload_storage(
+                                        storage,
+                                        pointer.align,
+                                        inline.align,
+                                    ),
+                                })
+                            }
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                ValueLayoutFormula::variant(payloads, span)
+            }
+            Named(named) => {
+                let named = named.clone();
+                drop(ty_data);
+                let type_def = env.type_def(named.def);
+                // A representation-open foreign type is an opaque layout leaf supplied by its
+                // owner-provided Value dictionary. Effect variables confined to callable fields do
+                // not make the representation open, so their fixed layout remains computable here.
+                if !ty.is_trait_input_resolved()
+                    && (type_def.has_custom_value_impl
+                        || type_def
+                            .attributes
+                            .iter()
+                            .any(|attribute| attribute.path.0 == ustr(NO_DERIVE_VALUE_ATTRIBUTE))
+                        || (named.def.module != env.current_module_id()
+                            && value_type_needs_layout_witness(ty)))
+                {
+                    return Ok(ValueLayoutFormula::symbolic(ty));
+                }
+                let shape_ty =
+                    type_def.instantiated_shape_with_effects(&named.params, &named.effect_params);
+                self.formula(shape_ty, span, env)
+            }
+            Native(_) | Function(_) | Subscript(_) | Never | Variable(_) => {
+                unreachable!("a leaf's formula needs no walk")
+            }
+        }
+    }
+}
+
+/// The formula of a type without members, which needs no walk, or `None` for other types.
+fn leaf_formula(
     ty: Type,
     span: Location,
-    env: &impl TypeLayoutEnv,
-    active: &mut FxHashSet<Type>,
-) -> Result<ValueLayoutFormula, InternalCompilationError> {
-    if !active.insert(ty) {
-        // Valid recursive representations encounter a variant payload before returning here, and
-        // that payload contributes a pointer-sized constant instead. Keeping any remaining cycle
-        // symbolic lets the type/module cycle diagnostics reject it at their proper boundary.
-        return Ok(ValueLayoutFormula {
-            size: ValueLayoutExpr::associated_const(ty, VALUE_SIZE_ASSOC_CONST_INDEX),
-            align: ValueLayoutExpr::associated_const(ty, VALUE_ALIGN_ASSOC_CONST_INDEX),
-        });
-    }
-    let ty_data = ty.data();
+) -> Option<Result<ValueLayoutFormula, InternalCompilationError>> {
     use TypeKind::*;
-    let layout = match &*ty_data {
+    Some(match &*ty.data() {
         Native(native) => ValueLayoutFormula::constant(
             ValueLayout::new(native.bare_ty.value_size(), native.bare_ty.value_align()),
             span,
-        )?,
-        Tuple(_) | Record(_) => {
-            let member_tys = direct_product_member_types(&ty_data).expect("product members");
-            drop(ty_data);
-            let fields = member_tys
-                .into_iter()
-                .map(|member_ty| value_layout_formula_inner(member_ty, span, env, active))
-                .collect::<Result<Vec<_>, _>>()?;
-            active.remove(&ty);
-            // Decreasing alignment removes interior padding. Tie-breakers affect offsets,
-            // but total size is the aligned sum of member sizes for both product kinds.
-            return ValueLayoutFormula::product(fields, span);
-        }
-        Variant(variants) => {
-            let payload_tys = variants.clone();
-            drop(ty_data);
-            let payloads = payload_tys
-                .into_iter()
-                .map(|(tag, payload_ty)| {
-                    let pointer =
-                        || ValueLayoutFormula::constant(ValueLayout::native::<usize>(), span);
-                    use VariantPayloadStorageDecision::*;
-                    match variant_payload_storage_decision(ty, tag, payload_ty, span, env)? {
-                        Static(VariantPayloadStorage::Indirect) => pointer(),
-                        Static(VariantPayloadStorage::Inline) => {
-                            value_layout_formula_inner(payload_ty, span, env, active)
-                        }
-                        Evidence(storage) => {
-                            let pointer = pointer()?;
-                            let inline = value_layout_formula_inner(payload_ty, span, env, active)?;
-                            Ok(ValueLayoutFormula {
-                                size: ValueLayoutExpr::payload_storage(
-                                    storage.clone(),
-                                    pointer.size,
-                                    inline.size,
-                                ),
-                                align: ValueLayoutExpr::payload_storage(
-                                    storage,
-                                    pointer.align,
-                                    inline.align,
-                                ),
-                            })
-                        }
-                    }
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            active.remove(&ty);
-            return ValueLayoutFormula::variant(payloads, span);
-        }
-        Named(named) => {
-            let named = named.clone();
-            drop(ty_data);
-            let type_def = env.type_def(named.def);
-            // A representation-open foreign type is an opaque layout leaf supplied by its
-            // owner-provided Value dictionary. Effect variables confined to callable fields do
-            // not make the representation open, so their fixed layout remains computable here.
-            if !ty.is_trait_input_resolved()
-                && (type_def.has_custom_value_impl
-                    || type_def
-                        .attributes
-                        .iter()
-                        .any(|attribute| attribute.path.0 == ustr(NO_DERIVE_VALUE_ATTRIBUTE))
-                    || (named.def.module != env.current_module_id()
-                        && value_type_needs_layout_witness(ty)))
-            {
-                active.remove(&ty);
-                return Ok(ValueLayoutFormula {
-                    size: ValueLayoutExpr::associated_const(ty, VALUE_SIZE_ASSOC_CONST_INDEX),
-                    align: ValueLayoutExpr::associated_const(ty, VALUE_ALIGN_ASSOC_CONST_INDEX),
-                });
-            }
-            let shape_ty =
-                type_def.instantiated_shape_with_effects(&named.params, &named.effect_params);
-            let layout = value_layout_formula_inner(shape_ty, span, env, active)?;
-            active.remove(&ty);
-            return Ok(layout);
-        }
-        Function(_) | Subscript(_) => ValueLayoutFormula::constant(ValueLayout::callable(), span)?,
-        Never => ValueLayoutFormula::product([], span)?,
-        Variable(_) => ValueLayoutFormula {
-            size: ValueLayoutExpr::associated_const(ty, VALUE_SIZE_ASSOC_CONST_INDEX),
-            align: ValueLayoutExpr::associated_const(ty, VALUE_ALIGN_ASSOC_CONST_INDEX),
-        },
-    };
-    drop(ty_data);
-    active.remove(&ty);
-    Ok(layout)
+        ),
+        Function(_) | Subscript(_) => ValueLayoutFormula::constant(ValueLayout::callable(), span),
+        Never => ValueLayoutFormula::product([], span),
+        Variable(_) => Ok(ValueLayoutFormula::symbolic(ty)),
+        Tuple(_) | Record(_) | Variant(_) | Named(_) => return None,
+    })
 }
 
 pub(crate) fn value_layout_formula_for_type(
@@ -1151,7 +1207,50 @@ pub(crate) fn value_layout_formula_for_type(
     span: Location,
     env: &impl TypeLayoutEnv,
 ) -> Result<ValueLayoutFormula, InternalCompilationError> {
-    value_layout_formula_inner(ty, span, env, &mut FxHashSet::default())
+    LayoutWalk::default().formula(ty, span, env)
+}
+
+/// Check that the representation of `ty` is within `REPRESENTATION_HEIGHT_LIMIT` and
+/// `REPRESENTATION_SIZE_LIMIT`: the type limits do not bound it, as a named type is one level high
+/// and one part whatever it stands for.
+pub(crate) fn check_representation(
+    ty: Type,
+    span: Location,
+    env: &impl TypeDefEnv,
+) -> Result<(), InternalCompilationError> {
+    let (height, size) = RepresentationMetrics::new(env).height_and_size(ty);
+    check_representation_metrics(height, size, span)
+}
+
+/// Check the `height` and the `size` of a representation against their limits.
+pub(crate) fn check_representation_metrics(
+    height: u32,
+    size: u32,
+    span: Location,
+) -> Result<(), InternalCompilationError> {
+    if height > REPRESENTATION_HEIGHT_LIMIT {
+        return Err(representation_height_exceeded(height as usize, span));
+    }
+    if size > REPRESENTATION_SIZE_LIMIT {
+        return Err(internal_compilation_error!(CompilerLimitExceeded(
+            CompilerLimit {
+                kind: CompilerLimitKind::RepresentationSize,
+                actual: size as usize,
+                limit: REPRESENTATION_SIZE_LIMIT as usize,
+                span,
+            }
+        )));
+    }
+    Ok(())
+}
+
+fn representation_height_exceeded(actual: usize, span: Location) -> InternalCompilationError {
+    internal_compilation_error!(CompilerLimitExceeded(CompilerLimit {
+        kind: CompilerLimitKind::RepresentationHeight,
+        actual,
+        limit: REPRESENTATION_HEIGHT_LIMIT as usize,
+        span,
+    }))
 }
 
 /// What layout expressions read: the `Value` of the types whose layouts they read, then their
@@ -1430,19 +1529,10 @@ pub(crate) fn value_layout_for_type(
     env: &impl TypeLayoutEnv,
 ) -> Result<ResolvedValueLayout, InternalCompilationError> {
     let layout = layout_for_value_type(ty, span, env)?;
-    let size = u32::try_from(layout.size).map_err(|_| {
-        internal_compilation_error!(Internal {
-            error: format!("Value size {} does not fit in u32", layout.size),
-            span,
-        })
-    })?;
-    let align = u32::try_from(layout.align).map_err(|_| {
-        internal_compilation_error!(Internal {
-            error: format!("Value alignment {} does not fit in u32", layout.align),
-            span,
-        })
-    })?;
-    Ok(ResolvedValueLayout { size, align })
+    Ok(ResolvedValueLayout {
+        size: u32::try_from(layout.size).expect("layout sizes are within VALUE_SIZE_LIMIT"),
+        align: u32::try_from(layout.align).expect("layout alignments are within VALUE_SIZE_LIMIT"),
+    })
 }
 
 pub(crate) fn value_layout_associated_const_values(

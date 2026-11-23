@@ -12,8 +12,8 @@ use crate::{
     types::{
         r#trait::{Trait, TraitAssociatedConst, TraitDefaultMethod, TraitImplPolicy, TraitSpans},
         r#type::{
-            Type, TypeAliasEntry, TypeDef, TypeDefProductDocs, TypeDefShapeDocs, TypeDefSlot,
-            TypeDefVariantDocs,
+            RepresentationSummary, Type, TypeAliasEntry, TypeDef, TypeDefProductDocs,
+            TypeDefShapeDocs, TypeDefSlot, TypeDefVariantDocs,
         },
     },
 };
@@ -56,6 +56,7 @@ pub(crate) struct SnapshotTypeDef {
     attributes: Vec<SnapshotAttribute>,
     default_variant: Option<String>,
     has_custom_value_impl: bool,
+    representation: Box<RepresentationSummary>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -222,6 +223,7 @@ impl SnapshotTypeDef {
             attributes: value.attributes.iter().map(capture_attribute).collect(),
             default_variant: value.default_variant.map(|name| name.to_string()),
             has_custom_value_impl: value.has_custom_value_impl,
+            representation: Box::new(value.representation.clone()),
         })
     }
 
@@ -237,6 +239,7 @@ impl SnapshotTypeDef {
             attributes: self.attributes.iter().map(materialize_attribute).collect(),
             default_variant: self.default_variant.as_deref().map(Into::into),
             has_custom_value_impl: self.has_custom_value_impl,
+            representation: (*self.representation).clone(),
         })
     }
 }

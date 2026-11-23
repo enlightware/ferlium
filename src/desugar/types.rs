@@ -1110,6 +1110,7 @@ impl PTypeDef {
             attributes: self.attributes.clone(),
             default_variant,
             has_custom_value_impl: false,
+            representation: Default::default(),
         })
     }
 
