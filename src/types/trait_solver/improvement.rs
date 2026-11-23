@@ -220,14 +220,13 @@ impl<'a> TraitSolver<'a> {
                 output_effs: candidate_output_effs,
             } => {
                 for (candidate_input, input_ty) in candidate_inputs.iter().zip(input_tys.iter()) {
-                    if ty_inf
-                        .unify_same_type_with_sub_effects(
-                            *candidate_input,
-                            fn_span,
-                            *input_ty,
-                            fn_span,
-                        )
-                        .is_err()
+                    if InternalCompilationError::attempt(ty_inf.unify_same_type_with_sub_effects(
+                        *candidate_input,
+                        fn_span,
+                        *input_ty,
+                        fn_span,
+                    ))?
+                    .is_none()
                     {
                         return Ok(TraitImprovementMatch::No);
                     }
@@ -236,14 +235,15 @@ impl<'a> TraitSolver<'a> {
                     for (candidate_output, output_ty) in
                         candidate_outputs.iter().zip(output_tys.iter())
                     {
-                        if ty_inf
-                            .unify_same_type_with_sub_effects(
+                        if InternalCompilationError::attempt(
+                            ty_inf.unify_same_type_with_sub_effects(
                                 *candidate_output,
                                 fn_span,
                                 *output_ty,
                                 fn_span,
-                            )
-                            .is_err()
+                            ),
+                        )?
+                        .is_none()
                         {
                             return Ok(TraitImprovementMatch::No);
                         }
@@ -511,17 +511,21 @@ impl<'a> TraitSolver<'a> {
         let key = TraitImprovementKey {
             trait_id,
             input_tys: ty_inf
-                .substitute_in_types(input_tys)
+                .substitute_in_types(input_tys)?
                 .into_iter()
                 .map(|ty| ty.map(&mut key_mapper))
                 .collect(),
-            output_tys: output_tys.map(|output_tys| {
-                ty_inf
-                    .substitute_in_types(output_tys)
-                    .into_iter()
-                    .map(|ty| ty.map(&mut key_mapper))
-                    .collect()
-            }),
+            output_tys: output_tys
+                .map(|output_tys| {
+                    Ok::<_, InternalCompilationError>(
+                        ty_inf
+                            .substitute_in_types(output_tys)?
+                            .into_iter()
+                            .map(|ty| ty.map(&mut key_mapper))
+                            .collect(),
+                    )
+                })
+                .transpose()?,
             output_effs: output_effs.map(|output_effs| {
                 output_effs
                     .iter()
@@ -568,10 +572,10 @@ impl<'a> TraitSolver<'a> {
     ) -> Result<TraitImprovementMatch, InternalCompilationError> {
         // Resolve current input bindings before testing heads. Candidate variables
         // belong to the impl's own namespace and must remain wildcards here.
-        let normalized_inputs = ty_inf.substitute_in_types(input_tys);
+        let normalized_inputs = ty_inf.substitute_in_types(input_tys)?;
         // A written generic stands for every type: an impl that fits only by narrowing it may
         // apply to some instances, but cannot be selected.
-        let generics = ty_inf.declared_generic_roots();
+        let generics = ty_inf.declared_generic_roots()?;
         // When only written generics are unknown and nobody reads the answer, the requirement stays
         // on the caller's signature whatever impls exist, so no impl needs to be looked at. In
         // particular, this does not wait for a pending impl that calls this function.
@@ -584,7 +588,7 @@ impl<'a> TraitSolver<'a> {
                 output_tys,
                 output_effs,
                 &generics,
-            )
+            )?
         {
             return Ok(TraitImprovementMatch::Unknown);
         }
@@ -611,14 +615,14 @@ impl<'a> TraitSolver<'a> {
         let last = candidates.len().saturating_sub(1);
 
         for (index, candidate) in candidates.into_iter().enumerate() {
-            let mut snapshot = ty_inf.snapshot();
+            let mut speculation = ty_inf.speculate();
             let mut probe_deps = None;
             // Concrete candidates only run unification against `ty_inf` and never reach `match_blanket_impl`, so they do not need a probe.
             // Skipping the probe avoids cloning the impl table once per concrete candidate, which is the dominant cost of this loop.
             let matched = match &candidate {
                 TraitImprovementCandidate::Concrete { .. } => Self::improvement_candidate_matches(
                     &mut NeverProbe,
-                    ty_inf,
+                    &mut speculation,
                     &candidate,
                     &output_polarities,
                     input_tys,
@@ -632,7 +636,7 @@ impl<'a> TraitSolver<'a> {
                     let mut query = LazyTraitSolverProbe::new(self);
                     let matched = Self::improvement_candidate_matches(
                         &mut query,
-                        ty_inf,
+                        &mut speculation,
                         &candidate,
                         &output_polarities,
                         input_tys,
@@ -654,8 +658,9 @@ impl<'a> TraitSolver<'a> {
                 && !found_multiple_candidates
                 && unique_candidate.is_none()
                 && matches!(matched, TraitImprovementMatch::Yes)
-                && ty_inf.declared_generics_intact(&generics)
+                && speculation.declared_generics_intact(&generics)?
             {
+                speculation.keep();
                 if let Some(deps) = probe_deps {
                     self.deps.extend(deps);
                 }
@@ -664,13 +669,12 @@ impl<'a> TraitSolver<'a> {
             // Effects never decide which candidates there are: one ruled out by them alone remains,
             // with what it would teach unknown.
             let matched = if matches!(matched, TraitImprovementMatch::No) {
-                ty_inf.rollback_to(snapshot);
-                let structural_snapshot = ty_inf.snapshot();
+                speculation.restart();
                 let by_structure = match &candidate {
                     TraitImprovementCandidate::Concrete { .. } => {
                         Self::improvement_candidate_applies_by_structure(
                             &mut NeverProbe,
-                            ty_inf,
+                            &mut speculation,
                             &candidate,
                             input_tys,
                             output_tys,
@@ -683,7 +687,7 @@ impl<'a> TraitSolver<'a> {
                         let mut query = LazyTraitSolverProbe::new(self);
                         Self::improvement_candidate_applies_by_structure(
                             &mut query,
-                            ty_inf,
+                            &mut speculation,
                             &candidate,
                             input_tys,
                             output_tys,
@@ -693,8 +697,7 @@ impl<'a> TraitSolver<'a> {
                         )?
                     }
                 };
-                ty_inf.rollback_to(structural_snapshot);
-                snapshot = ty_inf.snapshot();
+                speculation.restart();
                 if by_structure {
                     TraitImprovementMatch::Unknown
                 } else {
@@ -703,11 +706,12 @@ impl<'a> TraitSolver<'a> {
             } else {
                 matched
             };
-            let improved_input_tys = ty_inf.substitute_in_types(input_tys);
-            let improved_output_tys =
-                output_tys.map(|output_tys| ty_inf.substitute_in_types(output_tys));
-            let keeps_generics = ty_inf.declared_generics_intact(&generics);
-            ty_inf.rollback_to(snapshot);
+            let improved_input_tys = speculation.substitute_in_types(input_tys)?;
+            let improved_output_tys = output_tys
+                .map(|output_tys| speculation.substitute_in_types(output_tys))
+                .transpose()?;
+            let keeps_generics = speculation.declared_generics_intact(&generics)?;
+            drop(speculation);
             use TraitImprovementMatch::*;
             match matched {
                 No => {}
@@ -828,22 +832,22 @@ impl<'a> TraitSolver<'a> {
         output_tys: Option<&[Type]>,
         output_effs: Option<&[EffType]>,
         generics: &[Type],
-    ) -> bool {
+    ) -> Result<bool, InternalCompilationError> {
         let trait_def = self.trait_def(trait_id);
         if (output_tys.is_none() && trait_def.output_type_count() > 0)
             || (output_effs.is_none() && trait_def.output_effect_count() > 0)
         {
-            return false;
+            return Ok(false);
         }
-        let output_tys = ty_inf.substitute_in_types(output_tys.unwrap_or_default());
+        let output_tys = ty_inf.substitute_in_types(output_tys.unwrap_or_default())?;
         let output_effs = ty_inf.substitute_in_effect_types(output_effs.unwrap_or_default());
         let tys = || input_tys.iter().chain(&output_tys);
-        output_effs.iter().all(|eff| eff.inner_vars().is_empty())
+        Ok(output_effs.iter().all(|eff| eff.inner_vars().is_empty())
             && tys()
                 .all(|ty| ty.inner_effect_vars().is_empty() && ty.inner_mut_ty_vars().is_empty())
             && tys()
                 .flat_map(TypeLike::inner_ty_vars)
-                .all(|var| generics.contains(&Type::variable(var)))
+                .all(|var| generics.contains(&Type::variable(var))))
     }
 
     /// Try to improve a deferred trait application from its partially known

@@ -14,6 +14,11 @@ use ferlium::{
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
 
+/// A value of any type, which no function returns: a type as deep as the nesting limit allows is
+/// as high as the type limit allows, so no function can take or return it, as its own type is
+/// one level higher.
+const ANY: &str = "return 0";
+
 fn nest(n: usize, open: &str, leaf: &str, close: &str) -> String {
     format!("{}{leaf}{}", open.repeat(n), close.repeat(n))
 }
@@ -75,7 +80,7 @@ fn nesting_at_the_limit_compiles() {
             127,
             |n| {
                 format!(
-                    "fn f(b: {}) -> int {{ 1 }}\nf([])",
+                    "fn f() -> int {{ let b: {} = []; 1 }}\nf()",
                     nest(n, "[", "int", "]")
                 )
             },
@@ -114,7 +119,7 @@ fn let_patterns_and_types_nest_on_their_own() {
     let ty = nest(NESTING_LIMIT - 1, "(int, ", "int", ")");
     let source = |n| {
         let pattern = nest(n, "(_, ", "a", ")");
-        format!("fn f(x: {ty}) -> int {{ let {pattern} = x; a }}\n1")
+        format!("fn f() -> int {{ let x: {ty} = {ANY}; let {pattern} = x; a }}\n1")
     };
     let mut session = TestSession::new();
     assert_val_eq!(session.run(&source(NESTING_LIMIT - 1)), int(1));
@@ -128,7 +133,7 @@ fn match_literals_and_use_trees_nest_up_to_the_limit() {
     let ty = nest(NESTING_LIMIT - 1, "(int, ", "int", ")");
     let matching = |n| {
         let literal = nest(n, "(1, ", "1", ")");
-        format!("fn f(x: {ty}) -> int {{ match x {{ {literal} => 0, _ => 1 }} }}\n1")
+        format!("fn f() -> int {{ let x: {ty} = {ANY}; match x {{ {literal} => 0, _ => 1 }} }}\n1")
     };
     let using = |n| format!("use {};\n1", nest(n, "{ ", "std::*", " }"));
     let mut session = TestSession::new();

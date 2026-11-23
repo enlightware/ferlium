@@ -1124,11 +1124,12 @@ fn ever_growing_prerequisites_are_undecided_not_disjoint() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn prerequisite_chains_deeper_than_the_recursion_limit_are_undecided() {
+fn prerequisite_chains_as_high_as_types_allow_are_undecided() {
     // `P` holds for any nesting of `W` around `int`, so both `R` impls apply to `B<W<…<int>…>>`,
-    // but checking it exceeds the recursion limit, which must not prove the impls disjoint. Aliases
-    // nest `W` deeper than source may nest a type.
-    let aliases = (1..=130)
+    // and checking it must not prove the impls disjoint. Aliases nest `W` deeper than source may
+    // nest a type, as deep as a type may be: `B<D126>` has the largest height. The height limit
+    // keeps such a chain within the recursion limit; ever larger goals reach it, as above.
+    let aliases = (1..=126)
         .map(|depth| format!("type D{depth} = W<D{}>;", depth - 1))
         .collect::<Vec<_>>()
         .join("\n");
@@ -1142,7 +1143,7 @@ fn prerequisite_chains_deeper_than_the_recursion_limit_are_undecided() {
         impl P for int {{}}
         impl<T> P for W<T> where T: P {{}}
         impl<T> R for B<T> where T: P {{}}
-        impl R for B<D130> {{}}"
+        impl R for B<D126> {{}}"
     ));
 }
 

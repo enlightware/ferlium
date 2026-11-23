@@ -3589,7 +3589,8 @@ fn zero_sized_result_compiler_limits_report_source_diagnostics() {
     let wide = format!("({})", vec!["()"; 4096].join(","));
     for (ty, kind, actual, limit) in [
         (deep, CompilerLimitKind::ZeroSizedResultDepth, 65, 64),
-        (wide, CompilerLimitKind::ZeroSizedResultNodes, 4097, 4096),
+        // The type of more nodes than the zero-sized result limit is larger than types may be.
+        (wide, CompilerLimitKind::TypeSize, 4097, 4096),
     ] {
         let mut session = CompilerSession::new();
         let source = format!("fn oversized() -> {ty} {{ loop {{}} }}");

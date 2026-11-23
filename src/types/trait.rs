@@ -348,7 +348,7 @@ impl Trait {
             trait_output_effect_polarities(id, &|id| env.trait_def(id))
         })?;
         Ok(TypeScheme::new_infer_quantifiers_with_constraints(
-            inference.substitute_in_fn_type(&self.method(index).1.ty_scheme.ty),
+            inference.substitute_in_fn_type(&self.method(index).1.ty_scheme.ty)?,
             constraints,
         ))
     }

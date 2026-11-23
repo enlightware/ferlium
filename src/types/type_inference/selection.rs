@@ -6,7 +6,7 @@
 use std::{collections::hash_map::Entry, mem};
 
 use super::{
-    ground_bounds::{BoundOperation, collapsed_meet, selected_bound},
+    ground_bounds::{BoundError, BoundOperation, collapsed_meet, selected_bound},
     type_bounds::TypeBound,
     unify::{SubOrSameType, UnifiedTypeInference},
 };
@@ -70,12 +70,12 @@ impl UnifiedTypeInference {
         self.publication_inputs = inputs.into_iter().collect();
     }
 
-    fn input_variables(&mut self) -> FxHashSet<TypeVar> {
-        self.publication_inputs
-            .clone()
-            .into_iter()
-            .flat_map(|ty| self.normalize_type(ty).inner_ty_vars())
-            .collect()
+    fn input_variables(&mut self) -> Result<FxHashSet<TypeVar>, InternalCompilationError> {
+        let mut vars = FxHashSet::default();
+        for ty in self.publication_inputs.clone() {
+            vars.extend(self.normalize_type(ty)?.inner_ty_vars());
+        }
+        Ok(vars)
     }
 
     /// Rebuild only after representatives or nested terms change. Structural
@@ -83,18 +83,41 @@ impl UnifiedTypeInference {
     pub(super) fn propagate_type_bounds(&mut self) -> Result<bool, InternalCompilationError> {
         let mut progress = false;
         loop {
-            for (ty, span) in mem::take(&mut self.bottom_sources) {
-                let ty = self.normalize_type(ty);
+            // On error, the sources and the bounds stay as they were, not normalized.
+            let bottom_sources = self
+                .bottom_sources
+                .clone()
+                .into_iter()
+                .map(|(ty, span)| Ok((self.normalize_type(ty)?, span)))
+                .collect::<Result<Vec<_>, InternalCompilationError>>()?;
+            self.bottom_sources.clear();
+            for (ty, span) in bottom_sources {
                 if ty.data().as_variable().is_some() {
                     self.bottom_sources.entry(ty).or_insert(span);
                 }
             }
-            let mut bounds = mem::take(&mut self.bounds);
+            // The clone shares the graph, which normalization rebuilds rather than mutates.
+            let mut bounds = self.bounds.clone();
             let revision = (
                 self.ty_unification_table.revision(),
                 self.mut_unification_table.revision(),
             );
-            match bounds.normalize_if_changed(revision, |ty| self.normalize_type(ty)) {
+            // Normalization stops the inference at its first error, which is kept here.
+            let mut error = None;
+            let normalized = bounds.normalize_if_changed(revision, |ty| {
+                if error.is_some() {
+                    return ty;
+                }
+                self.normalize_type(ty).unwrap_or_else(|e| {
+                    error = Some(e);
+                    ty
+                })
+            });
+            if let Some(error) = error {
+                return Err(error);
+            }
+            self.bounds = bounds;
+            match normalized {
                 Some(changed) => {
                     self.selection_stats.performed_bounds_normalizations += 1;
                     self.selection_stats.normalizations += usize::from(changed);
@@ -102,7 +125,6 @@ impl UnifiedTypeInference {
                 }
                 None => self.selection_stats.skipped_bounds_normalizations += 1,
             }
-            self.bounds = bounds;
             self.selection_stats.scc_passes += 1;
             let equalities = self.bounds.equalities();
             if !equalities.is_empty() {
@@ -140,9 +162,9 @@ impl UnifiedTypeInference {
         &mut self,
         structural_outputs: bool,
         pending: &[PubTypeConstraint],
-    ) -> FxHashSet<TypeVar> {
+    ) -> Result<FxHashSet<TypeVar>, InternalCompilationError> {
         use crate::types::type_scheme::PubTypeConstraint::*;
-        self.normalize_remaining_constraints();
+        self.normalize_remaining_constraints()?;
         let mut outputs = FxHashSet::default();
         for constraint in self.remaining_ty_constraints.iter().chain(pending) {
             match constraint {
@@ -172,7 +194,7 @@ impl UnifiedTypeInference {
                 _ => {}
             }
         }
-        outputs
+        Ok(outputs)
     }
 
     /// Pending outputs can constrain variables nested anywhere in a bound,
@@ -181,11 +203,13 @@ impl UnifiedTypeInference {
     pub(super) fn pending_bound_variables(
         &mut self,
         structural_outputs: bool,
-    ) -> FxHashSet<TypeVar> {
+    ) -> Result<FxHashSet<TypeVar>, InternalCompilationError> {
         self.pending_dependency_variables(structural_outputs, false, &[])
     }
 
-    pub(super) fn pending_default_variables(&mut self) -> FxHashSet<TypeVar> {
+    pub(super) fn pending_default_variables(
+        &mut self,
+    ) -> Result<FxHashSet<TypeVar>, InternalCompilationError> {
         self.pending_dependency_variables(false, true, &[])
     }
 
@@ -194,10 +218,10 @@ impl UnifiedTypeInference {
         structural_outputs: bool,
         defaulting: bool,
         pending: &[PubTypeConstraint],
-    ) -> FxHashSet<TypeVar> {
-        let mut blocked = self.pending_output_variables(structural_outputs, pending);
+    ) -> Result<FxHashSet<TypeVar>, InternalCompilationError> {
+        let mut blocked = self.pending_output_variables(structural_outputs, pending)?;
         if blocked.is_empty() {
-            return blocked;
+            return Ok(blocked);
         }
         let mut neighbors = FxHashMap::<TypeVar, Vec<TypeVar>>::default();
         for bound in self.bounds.relations() {
@@ -253,7 +277,7 @@ impl UnifiedTypeInference {
                 }
             }
         }
-        blocked
+        Ok(blocked)
     }
 
     /// Give each type that pending bounds restrict from below by known types only the least
@@ -267,11 +291,16 @@ impl UnifiedTypeInference {
         pending: &[PubTypeConstraint],
         among: Option<&[Type]>,
     ) -> Result<bool, InternalCompilationError> {
-        let among = among.map(|tys| {
-            tys.iter()
-                .filter_map(|ty| self.normalize_type(*ty).data().as_variable().copied())
-                .collect::<FxHashSet<_>>()
-        });
+        let among = match among {
+            Some(tys) => {
+                let mut vars = FxHashSet::default();
+                for ty in tys {
+                    vars.extend(self.normalize_type(*ty)?.data().as_variable().copied());
+                }
+                Some(vars)
+            }
+            None => None,
+        };
         self.select_lower_bounds_with(false, SelectionPhase::Inference, pending, among.as_ref())
     }
 
@@ -324,12 +353,12 @@ impl UnifiedTypeInference {
             .collect();
         roots.sort_by_key(|var| var.name());
         let mut choices = Vec::new();
-        let inputs = self.input_variables();
+        let inputs = self.input_variables()?;
         let publishing = phase != SelectionPhase::Inference;
         let pending_outputs = if phase == SelectionPhase::Publication {
             FxHashSet::default()
         } else {
-            self.pending_dependency_variables(phase == SelectionPhase::Inference, false, pending)
+            self.pending_dependency_variables(phase == SelectionPhase::Inference, false, pending)?
         };
         for root in roots {
             if pending_outputs.contains(&root)
@@ -516,7 +545,7 @@ impl UnifiedTypeInference {
         if components.is_empty() {
             return Ok(false);
         }
-        let inputs = self.input_variables();
+        let inputs = self.input_variables()?;
         // Partition once instead of rescanning all relations for each component.
         // Preserve relation order within each group: products and diagnostics
         // use the first contributor. Component/BFS order is unchanged as well.
@@ -575,7 +604,9 @@ impl UnifiedTypeInference {
         }
         let snapshot = self.effects.snapshot();
         let result = self.reduce_bounds_inner(bounds, operation);
-        if !matches!(result, Ok(Some(_))) {
+        if matches!(result, Ok(Some(_))) {
+            self.effects.commit(snapshot);
+        } else {
             self.effects.rollback_to(snapshot);
         }
         result
@@ -635,7 +666,11 @@ impl UnifiedTypeInference {
                     candidate = ty;
                     progress = true;
                 }
-                Err(_) => deferred.push(bound),
+                Err(BoundError::Unresolved) => deferred.push(bound),
+                Err(BoundError::TooLarge(error)) => {
+                    return Err(InternalCompilationError::type_limit_exceeded(error)
+                        .locate_limit(bound.lower_span));
+                }
                 Ok(None) => {
                     if let (TypeKind::Named(current), TypeKind::Named(expected)) =
                         (&*other.data(), &*candidate.data())
@@ -743,7 +778,7 @@ impl UnifiedTypeInference {
             } else {
                 // Structural constraints describe the shape currently being
                 // reconciled; they are not outputs awaiting an implementation.
-                self.pending_bound_variables(false)
+                self.pending_bound_variables(false)?
             };
             let relations: Vec<_> = self
                 .ordered_bounds()
@@ -823,9 +858,12 @@ impl UnifiedTypeInference {
                         lower[0].lower_span,
                     )?;
                 }
-                strengthened |= lower
-                    .iter()
-                    .any(|b| self.normalize_type(b.lower) != b.lower);
+                for b in lower.iter() {
+                    if self.normalize_type(b.lower)? != b.lower {
+                        strengthened = true;
+                        break;
+                    }
+                }
             }
             if strengthened {
                 continue;
@@ -856,13 +894,15 @@ impl UnifiedTypeInference {
                             upper[0].upper_span,
                         )?;
                     }
-                    let normalized: Vec<_> = upper
+                    let normalized = upper
                         .iter()
-                        .map(|bound| TypeBound {
-                            upper: self.normalize_type(bound.upper),
-                            ..*bound
+                        .map(|bound| {
+                            Ok(TypeBound {
+                                upper: self.normalize_type(bound.upper)?,
+                                ..*bound
+                            })
                         })
-                        .collect();
+                        .collect::<Result<Vec<_>, InternalCompilationError>>()?;
                     if let Some(candidate) =
                         self.reduce_bounds(&normalized, BoundOperation::Meet)?
                     {
@@ -881,7 +921,7 @@ impl UnifiedTypeInference {
             }
         }
         self.propagate_type_bounds()?;
-        self.normalize_remaining_constraints();
+        self.normalize_remaining_constraints()?;
         if !final_publication {
             return Ok(());
         }
@@ -971,7 +1011,10 @@ mod tests {
             inference
                 .solve_publication_bounds(final_publication)
                 .unwrap();
-            assert_eq!(inference.normalize_type(Type::variable_id(0)), int_type());
+            assert_eq!(
+                inference.normalize_type(Type::variable_id(0)).unwrap(),
+                int_type()
+            );
         }
     }
 
@@ -1024,7 +1067,7 @@ mod tests {
         let mut effects = FxHashSet::default();
         for index in 0..COMPONENTS {
             for var in [2 * index, 2 * index + 1] {
-                let ty = inference.normalize_type(variable(var));
+                let ty = inference.normalize_type(variable(var)).unwrap();
                 let data = ty.data();
                 let function = data.as_function().unwrap();
                 assert_eq!(function.ret, result(index));
@@ -1032,7 +1075,10 @@ mod tests {
             }
         }
         for var in empty..=singleton {
-            assert_eq!(inference.normalize_type(variable(var)), variable(var));
+            assert_eq!(
+                inference.normalize_type(variable(var)).unwrap(),
+                variable(var)
+            );
         }
     }
 
@@ -1202,7 +1248,7 @@ mod tests {
                         for y in 0..domain.len() {
                             let assignment = [x, y];
                             let mut value = |ty| {
-                                let ty = inference.substitute_in_type(ty);
+                                let ty = inference.substitute_in_type(ty).unwrap();
                                 if let Some(var) = ty.data().as_variable() {
                                     domain[assignment[var.name() as usize]].1
                                 } else {
@@ -1240,7 +1286,7 @@ mod tests {
             }
             inference
                 .publish_type_bounds()
-                .map(|()| inference.substitute_in_type(var))
+                .map(|()| inference.substitute_in_type(var).unwrap())
         };
         let int = returning(int_type());
         let bool = returning(bool_type());
@@ -1299,12 +1345,12 @@ mod tests {
             }
             inference.publish_type_bounds().unwrap();
             assert_eq!(
-                inference.substitute_in_type(joined),
+                inference.substitute_in_type(joined).unwrap(),
                 Type::nullary_function_by_val(int_type())
             );
             inference.rollback_to(snapshot);
-            assert_eq!(inference.substitute_in_type(result), result);
-            assert_eq!(inference.substitute_in_type(joined), joined);
+            assert_eq!(inference.substitute_in_type(result).unwrap(), result);
+            assert_eq!(inference.substitute_in_type(joined).unwrap(), joined);
             assert_eq!(inference.bounds.relations().count(), 0);
             assert!(inference.bottom_sources.is_empty());
         }
@@ -1357,7 +1403,7 @@ mod tests {
                 );
                 for i in 0..count {
                     assert_eq!(
-                        inference.substitute_in_type(Type::variable_id(i)),
+                        inference.substitute_in_type(Type::variable_id(i)).unwrap(),
                         int_type()
                     );
                 }
@@ -1394,7 +1440,7 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(
-            inference.substitute_in_type(Type::variable_id(2)),
+            inference.substitute_in_type(Type::variable_id(2)).unwrap(),
             Type::variable_id(2)
         );
     }
@@ -1416,7 +1462,10 @@ mod tests {
             // Neither variable has a concrete contributor, but the cycle must
             // still collapse before selection reports that it made no choice.
             assert!(!inference.select_lower_bounds(false, phase).unwrap());
-            assert_eq!(inference.normalize_type(a), inference.normalize_type(b));
+            assert_eq!(
+                inference.normalize_type(a).unwrap(),
+                inference.normalize_type(b).unwrap()
+            );
             assert_eq!(inference.selection_stats.selections, 0);
 
             // A structural pair also has no variable to select. Its queued
@@ -1526,8 +1575,8 @@ mod tests {
                 .select_lower_bounds(false, SelectionPhase::Inference)
                 .unwrap()
         );
-        assert_eq!(inference.substitute_in_type(output), output);
-        assert_eq!(inference.substitute_in_type(nested), nested);
+        assert_eq!(inference.substitute_in_type(output).unwrap(), output);
+        assert_eq!(inference.substitute_in_type(nested).unwrap(), nested);
         // A later implementation determines the exact output, which is wider
         // than the current lower contributor. Saturation must still accept it.
         let actual = Type::nullary_function_by_val(int_type());
@@ -1535,6 +1584,6 @@ mod tests {
             .unify_same_type(output, span, actual, span)
             .unwrap();
         inference.propagate_type_bounds().unwrap();
-        assert_eq!(inference.substitute_in_type(output), actual);
+        assert_eq!(inference.substitute_in_type(output).unwrap(), actual);
     }
 }

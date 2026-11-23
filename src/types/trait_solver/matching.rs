@@ -250,14 +250,14 @@ impl<'a> TraitSolver<'a> {
         requested_output_effs: Option<&[EffType]>,
         quantified_effect_vars: &FxHashSet<EffectVar>,
         fn_span: Location,
-    ) -> bool {
+    ) -> Result<bool, InternalCompilationError> {
         if requested_output_tys.is_none() && requested_output_effs.is_none() {
-            return true;
+            return Ok(true);
         }
         if requested_output_tys.is_some_and(|tys| tys.len() != imp.output_tys.len())
             || requested_output_effs.is_some_and(|effs| effs.len() != imp.output_effs.len())
         {
-            return false;
+            return Ok(false);
         }
 
         let mut ty_inf = UnifiedTypeInference::new_with_ty_vars(Self::type_var_capacity_for_types(
@@ -318,11 +318,14 @@ impl<'a> TraitSolver<'a> {
         });
         if let Some(requested_output_tys) = &requested_output_tys {
             for (impl_ty, requested_ty) in imp.output_tys.iter().zip(requested_output_tys.iter()) {
-                if ty_inf
-                    .unify_same_type_with_sub_effects(*impl_ty, fn_span, *requested_ty, fn_span)
-                    .is_err()
-                {
-                    return false;
+                let unified = ty_inf.unify_same_type_with_sub_effects(
+                    *impl_ty,
+                    fn_span,
+                    *requested_ty,
+                    fn_span,
+                );
+                if InternalCompilationError::attempt(unified)?.is_none() {
+                    return Ok(false);
                 }
             }
         }
@@ -343,11 +346,11 @@ impl<'a> TraitSolver<'a> {
                 )
                 .is_err()
                 {
-                    return false;
+                    return Ok(false);
                 }
             }
         }
-        true
+        Ok(true)
     }
 
     /// Try to discharge a nested blanket-impl trait constraint from assumptions
@@ -359,8 +362,8 @@ impl<'a> TraitSolver<'a> {
         output_tys: Option<&[Type]>,
         output_effs: Option<&[EffType]>,
         assumptions: ConstraintAssumptions<'_>,
-    ) -> bool {
-        assumptions.iter().any(|assumption| {
+    ) -> Result<bool, InternalCompilationError> {
+        for assumption in assumptions.iter() {
             let PubTypeConstraint::HaveTrait {
                 trait_id: assumption_trait_id,
                 input_tys: assumption_input_tys,
@@ -368,46 +371,50 @@ impl<'a> TraitSolver<'a> {
                 ..
             } = assumption
             else {
-                return false;
+                continue;
             };
             if *assumption_trait_id != trait_id
                 || assumption_input_tys.len() != input_tys.len()
                 || output_tys
                     .is_some_and(|output_tys| assumption_output_tys.len() != output_tys.len())
             {
-                return false;
+                continue;
             }
 
-            let substituted_assumption = ty_inf.substitute_in_constraint(assumption);
+            let substituted_assumption = ty_inf.substitute_in_constraint(assumption)?;
             let Some((_, ass_trait_id, ass_input_tys, ass_output_tys, ass_output_effs, _)) =
                 substituted_assumption.as_have_trait()
             else {
-                return false;
+                continue;
             };
             if !ass_input_tys.iter().all(|ty| ty.is_trait_input_resolved())
                 || !ass_output_tys.iter().all(|ty| ty.is_trait_input_resolved())
             {
-                return false;
+                continue;
             }
             if *ass_trait_id != trait_id
                 || ass_input_tys.len() != input_tys.len()
                 || output_tys.is_some_and(|output_tys| ass_output_tys.len() != output_tys.len())
             {
-                return false;
+                continue;
             }
-            ass_input_tys == input_tys
+            if ass_input_tys == input_tys
                 && output_tys.is_none_or(|output_tys| ass_output_tys == output_tys)
                 && output_effs.is_none_or(|output_effs| ass_output_effs == output_effs)
-        })
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn normalize_blanket_remaining_constraints(
         ty_inf: &mut UnifiedTypeInference,
         constraints: impl IntoIterator<Item = (usize, PubTypeConstraint)>,
-    ) -> Vec<(usize, PubTypeConstraint)> {
+    ) -> Result<Vec<(usize, PubTypeConstraint)>, InternalCompilationError> {
         constraints
             .into_iter()
-            .map(|(index, constraint)| (index, ty_inf.substitute_in_constraint(&constraint)))
+            .map(|(index, constraint)| Ok((index, ty_inf.substitute_in_constraint(&constraint)?)))
             .collect()
     }
 
@@ -552,9 +559,13 @@ impl<'a> TraitSolver<'a> {
         // functions of its inputs, so its constraints find them, and a requested output that
         // is still open would stand for the type that they find.
         for (imp_input_ty, input_ty) in imp_input_tys.iter().zip(input_tys.iter()) {
-            if ty_inf
-                .unify_same_type_with_sub_effects(*imp_input_ty, fn_span, *input_ty, fn_span)
-                .is_err()
+            if InternalCompilationError::attempt(ty_inf.unify_same_type_with_sub_effects(
+                *imp_input_ty,
+                fn_span,
+                *input_ty,
+                fn_span,
+            ))?
+            .is_none()
             {
                 return Ok(BlanketImplMatch::No);
             }
@@ -563,9 +574,13 @@ impl<'a> TraitSolver<'a> {
             && !scratch
         {
             for (imp_output_ty, output_ty) in imp_output_tys.iter().zip(output_tys.iter()) {
-                if ty_inf
-                    .unify_same_type_with_sub_effects(*imp_output_ty, fn_span, *output_ty, fn_span)
-                    .is_err()
+                if InternalCompilationError::attempt(ty_inf.unify_same_type_with_sub_effects(
+                    *imp_output_ty,
+                    fn_span,
+                    *output_ty,
+                    fn_span,
+                ))?
+                .is_none()
                 {
                     return Ok(BlanketImplMatch::No);
                 }
@@ -596,7 +611,7 @@ impl<'a> TraitSolver<'a> {
             .into_iter()
             .enumerate()
             .collect::<Vec<_>>();
-        let mut remaining = Self::normalize_blanket_remaining_constraints(ty_inf, remaining);
+        let mut remaining = Self::normalize_blanket_remaining_constraints(ty_inf, remaining)?;
         let mut queued_bounds = false;
         // The constraints with unknown inputs as improvement left them: one that is still as
         // it was then has nothing more to tell, and improving it again at every pass would
@@ -609,7 +624,7 @@ impl<'a> TraitSolver<'a> {
             for (constraint_index, constraint) in old_remaining.iter() {
                 // Re-substitute the constraint on every pass because earlier
                 // solved constraints may have refined the type variables it uses.
-                let substituted_constraint = ty_inf.substitute_in_constraint(constraint);
+                let substituted_constraint = ty_inf.substitute_in_constraint(constraint)?;
                 let Some((
                     _,
                     trait_id,
@@ -693,14 +708,13 @@ impl<'a> TraitSolver<'a> {
                     } else {
                         repr
                     };
-                    if ty_inf
-                        .unify_same_type_with_sub_effects(
-                            repr,
-                            fn_span,
-                            constraint_outputs[0],
-                            fn_span,
-                        )
-                        .is_err()
+                    if InternalCompilationError::attempt(ty_inf.unify_same_type_with_sub_effects(
+                        repr,
+                        fn_span,
+                        constraint_outputs[0],
+                        fn_span,
+                    ))?
+                    .is_none()
                     {
                         return Ok(BlanketImplMatch::No);
                     }
@@ -713,7 +727,7 @@ impl<'a> TraitSolver<'a> {
                     Some(&constraint_outputs),
                     Some(&constraint_output_effs),
                     assumptions,
-                ) {
+                )? {
                     continue;
                 }
                 if !constraint_inputs
@@ -737,7 +751,7 @@ impl<'a> TraitSolver<'a> {
                             TraitImprovementMatch::Unknown => {}
                             TraitImprovementMatch::Yes => {}
                         }
-                        improved.push(ty_inf.substitute_in_constraint(&substituted_constraint));
+                        improved.push(ty_inf.substitute_in_constraint(&substituted_constraint)?);
                     }
                     still_remaining.push((*constraint_index, substituted_constraint));
                     continue;
@@ -764,9 +778,9 @@ impl<'a> TraitSolver<'a> {
                             arena,
                         )
                     };
-                    match solved {
-                        Ok(outputs) => outputs,
-                        Err(_) => return Ok(BlanketImplMatch::No),
+                    match InternalCompilationError::attempt(solved)? {
+                        Some(outputs) => outputs,
+                        None => return Ok(BlanketImplMatch::No),
                     }
                 };
                 let solved_outputs = if structural {
@@ -777,14 +791,13 @@ impl<'a> TraitSolver<'a> {
                 for (solved_output, constraint_output) in
                     solved_outputs.iter().zip(constraint_outputs.iter())
                 {
-                    if ty_inf
-                        .unify_same_type_with_sub_effects(
-                            *solved_output,
-                            fn_span,
-                            *constraint_output,
-                            fn_span,
-                        )
-                        .is_err()
+                    if InternalCompilationError::attempt(ty_inf.unify_same_type_with_sub_effects(
+                        *solved_output,
+                        fn_span,
+                        *constraint_output,
+                        fn_span,
+                    ))?
+                    .is_none()
                     {
                         return Ok(BlanketImplMatch::No);
                     }
@@ -824,7 +837,7 @@ impl<'a> TraitSolver<'a> {
             }
 
             let still_remaining =
-                Self::normalize_blanket_remaining_constraints(ty_inf, still_remaining);
+                Self::normalize_blanket_remaining_constraints(ty_inf, still_remaining)?;
             let settled = still_remaining.is_empty() || still_remaining == old_remaining;
 
             // The answer to a non-trait constraint may bound a type from below, as the type
@@ -841,13 +854,15 @@ impl<'a> TraitSolver<'a> {
                     .map(|(_, constraint)| constraint.clone())
                     .collect();
                 let own: Vec<_> = inst_subst.0.values().copied().collect();
-                match ty_inf.select_least_bounded_types(&pending, (!scratch).then_some(&own[..])) {
-                    Ok(true) => {
+                let selected =
+                    ty_inf.select_least_bounded_types(&pending, (!scratch).then_some(&own[..]));
+                match InternalCompilationError::attempt(selected)? {
+                    Some(true) => {
                         remaining = still_remaining;
                         continue;
                     }
-                    Ok(false) => {}
-                    Err(_) => return Ok(BlanketImplMatch::No),
+                    Some(false) => {}
+                    None => return Ok(BlanketImplMatch::No),
                 }
             }
 
@@ -876,9 +891,13 @@ impl<'a> TraitSolver<'a> {
         // trait constraints in source order.
         if let Some(output_tys) = output_tys {
             for (imp_output_ty, output_ty) in imp_output_tys.iter().zip(output_tys.iter()) {
-                if ty_inf
-                    .unify_same_type_with_sub_effects(*imp_output_ty, fn_span, *output_ty, fn_span)
-                    .is_err()
+                if InternalCompilationError::attempt(ty_inf.unify_same_type_with_sub_effects(
+                    *imp_output_ty,
+                    fn_span,
+                    *output_ty,
+                    fn_span,
+                ))?
+                .is_none()
                 {
                     return Ok(BlanketImplMatch::No);
                 }
@@ -915,43 +934,48 @@ impl<'a> TraitSolver<'a> {
         if ty_inf.finalize_effects().is_err() {
             return Ok(BlanketImplMatch::No);
         }
-        for requirement in &mut runtime_requirements {
-            match &mut requirement.req {
-                DictionaryReq::ProjectionSubscript { subscript_ty, .. } => {
-                    ty_inf.substitute_in_subscript_type_in_place(subscript_ty);
-                }
-                DictionaryReq::VariantPayloadIndirection {
-                    variant_ty,
-                    payload_ty,
-                    ..
-                } => {
-                    *variant_ty = ty_inf.substitute_in_type(*variant_ty);
-                    *payload_ty = ty_inf.substitute_in_type(*payload_ty);
-                }
-                DictionaryReq::TraitImpl {
-                    input_tys,
-                    output_tys,
-                    output_effs,
-                    ..
-                } => {
-                    ty_inf.substitute_in_types_in_place(input_tys);
-                    ty_inf.substitute_in_types_in_place(output_tys);
-                    ty_inf.substitute_in_effect_types_in_place(output_effs);
+        let mut instantiation = inst_subst;
+        // The previous state of the effects is restored however the substitution ends.
+        let substituted = (|| {
+            for requirement in &mut runtime_requirements {
+                match &mut requirement.req {
+                    DictionaryReq::ProjectionSubscript { subscript_ty, .. } => {
+                        ty_inf.substitute_in_subscript_type_in_place(subscript_ty)?;
+                    }
+                    DictionaryReq::VariantPayloadIndirection {
+                        variant_ty,
+                        payload_ty,
+                        ..
+                    } => {
+                        *variant_ty = ty_inf.substitute_in_type(*variant_ty)?;
+                        *payload_ty = ty_inf.substitute_in_type(*payload_ty)?;
+                    }
+                    DictionaryReq::TraitImpl {
+                        input_tys,
+                        output_tys,
+                        output_effs,
+                        ..
+                    } => {
+                        ty_inf.substitute_in_types_in_place(input_tys)?;
+                        ty_inf.substitute_in_types_in_place(output_tys)?;
+                        ty_inf.substitute_in_effect_types_in_place(output_effs);
+                    }
                 }
             }
-        }
-        runtime_requirements.retain(|requirement| requirement.index != NO_RUNTIME_REQUIREMENT);
-        runtime_requirements.sort_by_key(|requirement| requirement.index);
-        ty_inf.substitute_in_types_in_place(&mut imp_output_tys);
-        ty_inf.substitute_in_effect_types_in_place(&mut imp_output_effs);
-        let mut instantiation = inst_subst;
-        for ty in instantiation.0.values_mut() {
-            *ty = ty_inf.substitute_in_type(*ty);
-        }
-        for eff in instantiation.1.values_mut() {
-            *eff = ty_inf.substitute_in_effect_type(eff);
-        }
+            runtime_requirements.retain(|requirement| requirement.index != NO_RUNTIME_REQUIREMENT);
+            runtime_requirements.sort_by_key(|requirement| requirement.index);
+            ty_inf.substitute_in_types_in_place(&mut imp_output_tys)?;
+            ty_inf.substitute_in_effect_types_in_place(&mut imp_output_effs);
+            for ty in instantiation.0.values_mut() {
+                *ty = ty_inf.substitute_in_type(*ty)?;
+            }
+            for eff in instantiation.1.values_mut() {
+                *eff = ty_inf.substitute_in_effect_type(eff);
+            }
+            Ok::<_, InternalCompilationError>(())
+        })();
         ty_inf.restore_effects_finalized(effects_finalized);
+        substituted?;
         Ok(BlanketImplMatch::Yes {
             output_tys: imp_output_tys,
             output_effs: imp_output_effs,
@@ -1082,6 +1106,8 @@ impl<'a> TraitSolver<'a> {
             let selection = match self.select_application(*trait_id, input_tys, None, None, fn_span)
             {
                 Ok(selection) => selection,
+                // A compiler limit does not tell that the requirement fails.
+                Err(err) if err.is_compiler_limit() => return Err(err),
                 Err(err) => {
                     log::trace!(
                         "Blanket impl constraint failed while solving {} for {:?}: {:?}",
@@ -1171,13 +1197,17 @@ impl<'a> TraitSolver<'a> {
                 // Request this output alone; the others take the implementation's own rows.
                 let mut requested = imp.output_effs.clone();
                 requested[index] = requested_output_effs[index].clone();
-                (!self.impl_matches_requested_outputs(
-                    imp,
-                    None,
-                    Some(&requested),
-                    quantified_effect_vars,
-                    fn_span,
-                ))
+                // Only effects are requested, which no compiler limit stops matching.
+                matches!(
+                    self.impl_matches_requested_outputs(
+                        imp,
+                        None,
+                        Some(&requested),
+                        quantified_effect_vars,
+                        fn_span,
+                    ),
+                    Ok(false)
+                )
                 .then(|| {
                     (
                         names[index],

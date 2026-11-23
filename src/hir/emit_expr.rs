@@ -246,7 +246,7 @@ fn emit_expr_unsafe_inner(
             &mut descr.locals,
             value_trait_id,
             module_env,
-        );
+        )?;
     }
     ty_inf.resolve_local_storage_and_activate_value_constraints(
         expr_arena,
@@ -254,12 +254,12 @@ fn emit_expr_unsafe_inner(
         &mut locals,
         value_trait_id,
         module_env,
-    );
+    )?;
 
     // Default constraints into the unification tables (pre-substitution).
     // For expressions, iterate defaulting and re-solving to a fixed point.
     {
-        let node_ty = ty_inf.substitute_in_type(expr_arena[node_id].ty);
+        let node_ty = ty_inf.substitute_in_type(expr_arena[node_id].ty)?;
         let mut solver = trait_solver_from_module!(module, others);
         if let Some(module_id) = private_impl_module {
             solver.allow_private_impls_from(module_id);
@@ -295,7 +295,7 @@ fn emit_expr_unsafe_inner(
                 &mut descr.locals,
                 value_trait_id,
                 module_env,
-            );
+            )?;
         }
         ty_inf.resolve_local_storage_and_activate_value_constraints(
             expr_arena,
@@ -303,7 +303,7 @@ fn emit_expr_unsafe_inner(
             &mut locals,
             value_trait_id,
             module_env,
-        );
+        )?;
         let mut solver = trait_solver_from_module!(module, others);
         if let Some(module_id) = private_impl_module {
             solver.allow_private_impls_from(module_id);
@@ -328,7 +328,7 @@ fn emit_expr_unsafe_inner(
     // A type variable of the body or its lambdas that nothing determines defaults to `never`; the
     // expression's own type stays checked, as it is the result.
     {
-        let node_ty = ty_inf.substitute_in_type(expr_arena[node_id].ty);
+        let node_ty = ty_inf.substitute_in_type(expr_arena[node_id].ty)?;
         let bodies = once((&*expr_arena, node_id)).chain(lambda_functions.iter().map(|id| {
             let pending = &pending_functions[id];
             (&pending.code.arena, pending.code.entry_node_id)
@@ -343,7 +343,7 @@ fn emit_expr_unsafe_inner(
 
     // An expression is not generalized over effects it only performs: they and the effects of
     // its body take their least solution.
-    let node_ty = ty_inf.substitute_in_type(expr_arena[node_id].ty);
+    let node_ty = ty_inf.substitute_in_type(expr_arena[node_id].ty)?;
     let mut polarities = EffectVarPolarities::default();
     polarities.visit(node_ty, true);
     let positive_only_effect_vars = polarities.positive_only();
@@ -353,26 +353,26 @@ fn emit_expr_unsafe_inner(
     ty_inf.finalize_effects()?;
 
     // Substitute everything using ty_inf (single pass, includes all defaults).
-    ty_inf.substitute_in_node(expr_arena, node_id);
+    ty_inf.substitute_in_node(expr_arena, node_id)?;
     // The uses of declared fields that this inference made, for the expression and for each
     // of its lambdas: they follow the types of the nodes from here on.
     let mut evidence_plan = EvidencePlan::default();
     evidence_plan.record_field_uses(&ty_inf);
-    evidence_plan.substitute(&mut ty_inf);
+    evidence_plan.substitute(&mut ty_inf)?;
     for lambda_id in lambda_functions.iter() {
         let descr = pending_functions
             .get_mut(lambda_id)
             .expect("expected pending function body");
         descr.evidence_plan.record_field_uses(&ty_inf);
-        ty_inf.substitute_in_pending_module_function(descr);
+        ty_inf.substitute_in_pending_module_function(descr)?;
         module.functions[lambda_id.as_index()].definition = descr.definition.clone();
     }
-    ty_inf.substitute_in_local_decls_in_place(&mut locals[initial_local_count..]);
+    ty_inf.substitute_in_local_decls_in_place(&mut locals[initial_local_count..])?;
 
     // Take final substituted constraints.
     let module_env = ModuleEnv::new(module, others);
     ty_inf.log_debug_constraints(module_env);
-    ty_inf.normalize_remaining_constraints();
+    ty_inf.normalize_remaining_constraints()?;
     let all_constraints = ty_inf.take_constraints();
 
     // Compute quantifiers from the node type and remaining constraints.
@@ -722,7 +722,9 @@ fn emit_expr_with_options(
         locals,
         options,
         warnings,
-    )?;
+    )
+    // A limit exceeded where no source span is known is reported at the expression.
+    .map_err(|error| error.locate_limit(span))?;
     validate_safe_expr_type_scheme(&ty, span)?;
     Ok(PendingExprEntry {
         ty,

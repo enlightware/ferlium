@@ -413,7 +413,8 @@ fn pending_impls_block_negative_answers_only() {
             )
             .unwrap();
         drop(solver);
-        ty_inf.substitute_in_type(output) == array_type(ty_inf.substitute_in_type(element))
+        ty_inf.substitute_in_type(output).unwrap()
+            == array_type(ty_inf.substitute_in_type(element).unwrap())
     };
     module.impls.pending = Rc::default();
     assert!(improves(&mut module));

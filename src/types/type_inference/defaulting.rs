@@ -1,7 +1,7 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{borrow::Borrow, mem, slice::from_ref};
+use std::{borrow::Borrow, slice::from_ref};
 
 use itertools::Itertools;
 
@@ -175,43 +175,46 @@ impl DefaultingScope {
         self
     }
 
-    fn boundary_constraints(&self, inference: &mut UnifiedTypeInference) -> Vec<PubTypeConstraint> {
+    fn boundary_constraints(
+        &self,
+        inference: &mut UnifiedTypeInference,
+    ) -> Result<Vec<PubTypeConstraint>, InternalCompilationError> {
         let seeds = self
             .boundary
             .seed_ty_vars
             .iter()
             .flat_map(|var| inference.lookup_type_var(*var).inner_ty_vars())
             .collect::<Vec<_>>();
-        let boundary = inference.constraint_boundary(seeds);
-        let constraints = inference.linking_constraints();
-        if self.beyond_boundary {
+        let boundary = inference.constraint_boundary(seeds)?;
+        let constraints = inference.linking_constraints()?;
+        Ok(if self.beyond_boundary {
             boundary.owned_inaccessible_constraints(&constraints)
         } else {
             boundary.owned_accessible_constraints(&constraints)
-        }
+        })
     }
 
     fn unit_default_constraints(
         &self,
         ty_inf: &mut UnifiedTypeInference,
         boundary_constraints: &[PubTypeConstraint],
-    ) -> Vec<PubTypeConstraint> {
-        let unit_variant_seed_ty_vars: Vec<_> = self
-            .unit_variant_seed_tys
-            .iter()
-            .flat_map(|seed_ty| ty_inf.substitute_in_type(*seed_ty).inner_ty_vars())
-            .unique()
-            .collect();
+    ) -> Result<Vec<PubTypeConstraint>, InternalCompilationError> {
+        let mut unit_variant_seed_ty_vars = Vec::new();
+        for seed_ty in &self.unit_variant_seed_tys {
+            unit_variant_seed_ty_vars.extend(ty_inf.substitute_in_type(*seed_ty)?.inner_ty_vars());
+        }
+        let unit_variant_seed_ty_vars: Vec<_> =
+            unit_variant_seed_ty_vars.into_iter().unique().collect();
         if unit_variant_seed_ty_vars.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
-        let unit_boundary = ty_inf.constraint_boundary(unit_variant_seed_ty_vars);
-        if boundary_constraints.is_empty() {
-            unit_boundary.owned_accessible_constraints(&ty_inf.linking_constraints())
+        let unit_boundary = ty_inf.constraint_boundary(unit_variant_seed_ty_vars)?;
+        Ok(if boundary_constraints.is_empty() {
+            unit_boundary.owned_accessible_constraints(&ty_inf.linking_constraints()?)
         } else {
             unit_boundary.owned_accessible_constraints(boundary_constraints)
-        }
+        })
     }
 }
 
@@ -313,20 +316,25 @@ impl UnifiedTypeInference {
     /// the compiler-derived `Value` applications whose leaves are requirements of their own, as
     /// `Value<(T, B)>` beside `Value<T>` and `Value<B>`. Such an application holds whenever its
     /// leaves do, so a variable that only it ties to another is free to default on its own.
-    pub(crate) fn linking_constraints(&mut self) -> Vec<&PubTypeConstraint> {
-        let derived = self.derived_value_applications();
-        self.remaining_ty_constraints
+    pub(crate) fn linking_constraints(
+        &mut self,
+    ) -> Result<Vec<&PubTypeConstraint>, InternalCompilationError> {
+        let derived = self.derived_value_applications()?;
+        Ok(self
+            .remaining_ty_constraints
             .iter()
             .filter(|constraint| links(&derived, constraint))
-            .collect()
+            .collect())
     }
 
     /// The derived `Value` applications of [`Self::linking_constraints`], as they are now.
-    fn derived_value_applications(&mut self) -> FxHashSet<(TraitId, Type)> {
+    fn derived_value_applications(
+        &mut self,
+    ) -> Result<FxHashSet<(TraitId, Type)>, InternalCompilationError> {
         (0..self.derived_value_applications.len())
             .map(|index| {
                 let (trait_id, ty) = self.derived_value_applications[index];
-                (trait_id, self.normalize_type(ty))
+                Ok((trait_id, self.normalize_type(ty)?))
             })
             .collect()
     }
@@ -339,8 +347,8 @@ impl UnifiedTypeInference {
     pub(crate) fn constraint_boundary(
         &mut self,
         seeds: impl IntoIterator<Item = TypeVar>,
-    ) -> ConstraintBoundary {
-        let derived = self.derived_value_applications();
+    ) -> Result<ConstraintBoundary, InternalCompilationError> {
+        let derived = self.derived_value_applications()?;
         let groups: Vec<_> = self
             .remaining_ty_constraints
             .iter()
@@ -362,10 +370,10 @@ impl UnifiedTypeInference {
                 groups_from.entry(*var).or_default().push(index);
             }
         }
-        let mut reachable: FxHashSet<_> = seeds
-            .into_iter()
-            .flat_map(|var| self.normalize_type(Type::variable(var)).inner_ty_vars())
-            .collect();
+        let mut reachable = FxHashSet::default();
+        for var in seeds {
+            reachable.extend(self.normalize_type(Type::variable(var))?.inner_ty_vars());
+        }
         let mut queue: Vec<_> = reachable.iter().copied().collect();
         while let Some(var) = queue.pop() {
             for index in groups_from.get(&var).into_iter().flatten() {
@@ -376,7 +384,7 @@ impl UnifiedTypeInference {
                 }
             }
         }
-        ConstraintBoundary::from_seed_ty_vars(reachable)
+        Ok(ConstraintBoundary::from_seed_ty_vars(reachable))
     }
 
     /// Resolve local ownership decisions and activate the `Value` constraints that are still needed.
@@ -387,9 +395,9 @@ impl UnifiedTypeInference {
         locals: &mut [LocalDecl],
         value_trait_id: TraitId,
         env: ModuleEnv<'_>,
-    ) {
-        self.activate_compiler_derived_value_constraint_leaves(value_trait_id, env);
-        self.substitute_in_local_decls_in_place(locals);
+    ) -> Result<(), InternalCompilationError> {
+        self.activate_compiler_derived_value_constraint_leaves(value_trait_id, env)?;
+        self.substitute_in_local_decls_in_place(locals)?;
         for local in &mut *locals {
             // A local demands the `Value` witness for either of two independent reasons, and both
             // must be asked for here: it needs the *ownership* methods when a deferred storage
@@ -400,16 +408,17 @@ impl UnifiedTypeInference {
             let deferred_storage_became_owned =
                 hir::resolve_deferred_local_storage_shape(arena, local);
             let allocates_dynamically_sized_storage = local.owns_storage()
-                && value_type_needs_layout_witness(self.substitute_in_type(local.ty));
+                && value_type_needs_layout_witness(self.substitute_in_type(local.ty)?);
             if (deferred_storage_became_owned || allocates_dynamically_sized_storage)
                 && !local.ty.is_function()
             {
-                self.add_activated_value_constraint(value_trait_id, local.ty, local.scope, env);
+                self.add_activated_value_constraint(value_trait_id, local.ty, local.scope, env)?;
             }
         }
-        self.activate_take_local_value_constraints(arena, root, locals, value_trait_id, env);
-        self.activate_assignment_value_constraints(arena, root, locals, value_trait_id, env);
-        self.activate_product_layout_constraints(arena, root, value_trait_id, env);
+        self.activate_take_local_value_constraints(arena, root, locals, value_trait_id, env)?;
+        self.activate_assignment_value_constraints(arena, root, locals, value_trait_id, env)?;
+        self.activate_product_layout_constraints(arena, root, value_trait_id, env)?;
+        Ok(())
     }
 
     /// Replace the public prerequisite of a compiler-derived `Value<X>` application with the
@@ -419,7 +428,7 @@ impl UnifiedTypeInference {
         &mut self,
         value_trait_id: TraitId,
         env: ModuleEnv<'_>,
-    ) {
+    ) -> Result<(), InternalCompilationError> {
         let derived = self.remaining_ty_constraints.to_vec();
         for constraint in derived {
             let PubTypeConstraint::HaveTrait {
@@ -440,12 +449,13 @@ impl UnifiedTypeInference {
             {
                 continue;
             }
-            let ty = self.substitute_in_type(input_tys[0]);
+            let ty = self.substitute_in_type(input_tys[0])?;
             if generated_value_evidence_types(ty, &env).is_some() {
-                self.add_activated_value_constraint(value_trait_id, ty, span.use_site, env);
+                self.add_activated_value_constraint(value_trait_id, ty, span.use_site, env)?;
                 self.derived_value_applications.push((value_trait_id, ty));
             }
         }
+        Ok(())
     }
 
     /// Activate the direct member-layout evidence needed by generic product construction and
@@ -456,7 +466,7 @@ impl UnifiedTypeInference {
         node_id: NodeId,
         value_trait_id: TraitId,
         env: ModuleEnv<'_>,
-    ) {
+    ) -> Result<(), InternalCompilationError> {
         let node = &arena[node_id];
         let product_ty = match &node.kind {
             NodeKind::Tuple(_) | NodeKind::Record(_) | NodeKind::Array(_) => Some(node.ty),
@@ -473,9 +483,9 @@ impl UnifiedTypeInference {
             _ => None,
         };
         if let Some(product_ty) = product_ty {
-            let product_ty = self.substitute_in_type(product_ty);
+            let product_ty = self.substitute_in_type(product_ty)?;
             for member_ty in dynamic_product_member_layouts(product_ty, node.span, &env) {
-                self.add_activated_value_constraint(value_trait_id, member_ty, node.span, env);
+                self.add_activated_value_constraint(value_trait_id, member_ty, node.span, env)?;
             }
         }
         let variant_payload_ty = match &node.kind {
@@ -484,7 +494,7 @@ impl UnifiedTypeInference {
             _ => None,
         };
         if let Some(payload_ty) = variant_payload_ty {
-            self.add_activated_value_constraint(value_trait_id, payload_ty, node.span, env);
+            self.add_activated_value_constraint(value_trait_id, payload_ty, node.span, env)?;
         }
         let inst_data = match &node.kind {
             NodeKind::GetFunction(get) => Some(&get.inst_data),
@@ -500,21 +510,22 @@ impl UnifiedTypeInference {
                     subscript_ty, ..
                 } = requirement
                 {
-                    let receiver_ty = self.substitute_in_type(subscript_ty.receiver_ty());
+                    let receiver_ty = self.substitute_in_type(subscript_ty.receiver_ty())?;
                     for member_ty in dynamic_product_member_layouts(receiver_ty, node.span, &env) {
                         self.add_activated_value_constraint(
                             value_trait_id,
                             member_ty,
                             node.span,
                             env,
-                        );
+                        )?;
                     }
                 }
             }
         }
         for child in node.kind.child_node_ids() {
-            self.activate_product_layout_constraints(arena, child, value_trait_id, env);
+            self.activate_product_layout_constraints(arena, child, value_trait_id, env)?;
         }
+        Ok(())
     }
 
     fn activate_assignment_value_constraints(
@@ -524,25 +535,26 @@ impl UnifiedTypeInference {
         locals: &[LocalDecl],
         value_trait_id: TraitId,
         env: ModuleEnv<'_>,
-    ) {
+    ) -> Result<(), InternalCompilationError> {
         if let NodeKind::PendingAssignment(plan) = &arena[node].kind {
             let captures = hir::assignment::captured_inputs(arena, plan, &mut |ty| {
                 self.substitute_in_mut_type(ty)
             });
             for capture in captures {
                 let node = &arena[capture];
-                let ty = self.substitute_in_type(node.ty);
+                let ty = self.substitute_in_type(node.ty)?;
                 if !hir::assignment::capture_needs_storage(node, ty, |id| {
                     self.substitute_in_mut_type(locals[id.as_index()].mut_ty)
                 }) {
                     continue;
                 }
-                self.add_activated_value_constraint(value_trait_id, node.ty, node.span, env);
+                self.add_activated_value_constraint(value_trait_id, node.ty, node.span, env)?;
             }
         }
         for child in arena[node].kind.child_node_ids() {
-            self.activate_assignment_value_constraints(arena, child, locals, value_trait_id, env);
+            self.activate_assignment_value_constraints(arena, child, locals, value_trait_id, env)?;
         }
+        Ok(())
     }
 
     fn activate_take_local_value_constraints(
@@ -552,17 +564,18 @@ impl UnifiedTypeInference {
         locals: &[LocalDecl],
         value_trait_id: TraitId,
         env: ModuleEnv<'_>,
-    ) {
+    ) -> Result<(), InternalCompilationError> {
         let node = &arena[node_id];
         if let NodeKind::TakeLocalValue(take) = &node.kind
             && matches!(take.mode, PendingTakeLocalValueMode::Unknown)
             && !locals[take.id.as_index()].owns_storage()
         {
-            self.add_activated_value_constraint(value_trait_id, node.ty, node.span, env);
+            self.add_activated_value_constraint(value_trait_id, node.ty, node.span, env)?;
         }
         for child in node.kind.child_node_ids() {
-            self.activate_take_local_value_constraints(arena, child, locals, value_trait_id, env);
+            self.activate_take_local_value_constraints(arena, child, locals, value_trait_id, env)?;
         }
+        Ok(())
     }
 
     fn add_activated_value_constraint(
@@ -571,10 +584,10 @@ impl UnifiedTypeInference {
         ty: Type,
         span: Location,
         env: ModuleEnv<'_>,
-    ) {
-        let ty = self.substitute_in_type(ty);
+    ) -> Result<(), InternalCompilationError> {
+        let ty = self.substitute_in_type(ty)?;
         if ty.is_function() {
-            return;
+            return Ok(());
         }
         let generated = generated_value_evidence_types(ty, &env);
         // The generated dictionary also reads where its open payloads are stored.
@@ -600,6 +613,7 @@ impl UnifiedTypeInference {
                 span,
             ));
         }
+        Ok(())
     }
 
     /// Add a requirement, owned by the function whose constraints are being made, see
@@ -640,8 +654,8 @@ impl UnifiedTypeInference {
         arena: &mut NodeArena,
     ) -> Result<(), InternalCompilationError> {
         loop {
-            self.normalize_remaining_constraints();
-            let constraints = mem::take(&mut *self.remaining_ty_constraints);
+            self.normalize_remaining_constraints()?;
+            let constraints = self.remaining_ty_constraints.take();
             let old_remaining_constraints = constraints.iter().collect::<FxHashSet<_>>();
             // Defaulting reuses the main constraint aggregation path so late
             // projection and ADT constraints are canonicalized consistently.
@@ -659,9 +673,9 @@ impl UnifiedTypeInference {
                 trait_solver,
                 arena,
             )?;
-            *self.remaining_ty_constraints = remaining;
+            self.remaining_ty_constraints.replace(remaining);
             // Normalize and deduplicate once against the pass's final bindings.
-            self.normalize_remaining_constraints();
+            self.normalize_remaining_constraints()?;
             let bounds_progress = self.propagate_type_bounds()?
                 | self.select_lower_bounds(false, SelectionPhase::Inference)?;
             let new_remaining_constraints = self
@@ -719,7 +733,7 @@ impl UnifiedTypeInference {
         }
 
         // Then, collect the type variables that are invalid for variant simplification.
-        let mut invalid_ty_vars = self.pending_default_variables();
+        let mut invalid_ty_vars = self.pending_default_variables()?;
         for constraint in constraints {
             match constraint {
                 PubTypeConstraint::TypeHasVariant { payload_ty, .. } => {
@@ -796,10 +810,10 @@ impl UnifiedTypeInference {
         let num_trait_id = trait_solver.std_trait_id(NUM_TRAIT_NAME);
 
         // Re-substitute boundary constraints to see the current state of type variables.
-        let subst_constraints = self.substitute_in_constraints(constraints);
+        let subst_constraints = self.substitute_in_constraints(constraints)?;
 
         // First, collect invalid type variables and Num type variables.
-        let mut invalid_ty_vars = self.pending_default_variables();
+        let mut invalid_ty_vars = self.pending_default_variables()?;
         let mut num_ty_vars = FxHashSet::<TypeVar>::default();
         for constraint in &subst_constraints {
             if let PubTypeConstraint::HaveTrait {
@@ -860,7 +874,7 @@ impl UnifiedTypeInference {
                                 *trait_id,
                                 &[default_ty],
                                 constraint.use_site(),
-                            )
+                            )?
                         {
                             break;
                         }
@@ -903,7 +917,7 @@ impl UnifiedTypeInference {
         trait_solver: &mut TraitSolver<'_>,
         arena: &mut NodeArena,
     ) -> Result<bool, InternalCompilationError> {
-        let constraints = self.substitute_in_constraints(constraints);
+        let constraints = self.substitute_in_constraints(constraints)?;
         let mut candidate_ty_vars = FxHashSet::<TypeVar>::default();
 
         for constraint in &constraints {
@@ -920,7 +934,7 @@ impl UnifiedTypeInference {
             }
         }
 
-        let blocked = self.pending_default_variables();
+        let blocked = self.pending_default_variables()?;
         let mut progress = false;
         for ty_var in candidate_ty_vars {
             if blocked.contains(&ty_var) {
@@ -992,9 +1006,14 @@ impl UnifiedTypeInference {
                     .map(|input_ty| input_ty.map(&mut mapper))
                     .collect::<Vec<_>>();
                 if inst_input_tys.iter().all(Type::is_constant)
-                    && trait_solver
-                        .solve_impl(trait_id, &inst_input_tys, span, arena)
-                        .is_err()
+                    && InternalCompilationError::attempt(trait_solver.solve_impl(
+                        trait_id,
+                        &inst_input_tys,
+                        span,
+                        arena,
+                    ))
+                    .map_err(|error| error.locate_limit(span))?
+                    .is_none()
                 {
                     all_satisfied = false;
                     break;
@@ -1028,13 +1047,13 @@ impl UnifiedTypeInference {
         expr_ty: Type,
         trait_solver: &mut TraitSolver<'_>,
         arena: &mut NodeArena,
-    ) -> bool {
+    ) -> Result<bool, InternalCompilationError> {
         use crate::std::math::int_type;
 
         let mut progress = false;
 
         // Re-substitute the expression type through current tables.
-        let substituted_ty = self.substitute_in_type(expr_ty);
+        let substituted_ty = self.substitute_in_type(expr_ty)?;
         let remaining_vars: Vec<TypeVar> = substituted_ty
             .inner_ty_vars()
             .into_iter()
@@ -1045,10 +1064,10 @@ impl UnifiedTypeInference {
             .collect();
 
         // Get current normalized constraints.
-        self.normalize_remaining_constraints();
+        self.normalize_remaining_constraints()?;
         let subst_constraints = self.remaining_constraints().to_vec();
 
-        let blocked = self.pending_default_variables();
+        let blocked = self.pending_default_variables()?;
         for ty_var in remaining_vars {
             if blocked.contains(&ty_var) {
                 continue;
@@ -1081,9 +1100,14 @@ impl UnifiedTypeInference {
                 } = &inst_c
                 {
                     if input_tys.iter().all(Type::is_constant)
-                        && trait_solver
-                            .solve_impl(*trait_id, input_tys, span.use_site, arena)
-                            .is_err()
+                        && InternalCompilationError::attempt(trait_solver.solve_impl(
+                            *trait_id,
+                            input_tys,
+                            span.use_site,
+                            arena,
+                        ))
+                        .map_err(|error| error.locate_limit(span.use_site))?
+                        .is_none()
                     {
                         all_satisfied = false;
                         break;
@@ -1100,21 +1124,21 @@ impl UnifiedTypeInference {
                     .find(|c| c.contains_any_type_var(ty_var))
                     .expect("there must be a relevant constraint for expr defaulting")
                     .use_site();
-                if self
-                    .unify_same_type_with_sub_effects(
-                        Type::variable(ty_var),
-                        span,
-                        int_type(),
-                        span,
-                    )
-                    .is_ok()
+                if InternalCompilationError::attempt(self.unify_same_type_with_sub_effects(
+                    Type::variable(ty_var),
+                    span,
+                    int_type(),
+                    span,
+                ))
+                .map_err(|error| error.locate_limit(span))?
+                .is_some()
                 {
                     progress = true;
                 }
             }
         }
 
-        progress
+        Ok(progress)
     }
 
     fn defaulting_progress_key(
@@ -1122,32 +1146,31 @@ impl UnifiedTypeInference {
         scope: &DefaultingScope,
         boundary_constraints: &[PubTypeConstraint],
         observed_variable_count: usize,
-    ) -> DefaultingProgressKey {
+    ) -> Result<DefaultingProgressKey, InternalCompilationError> {
         // Observe solutions of variables that existed at this boundary. Trait
         // probing can allocate fresh scratch variables on every pass without
         // changing any live type; allocation counts are not semantic progress.
-        let unresolved_expr_var_count = scope
-            .expr_root_ty
-            .map(|expr_root_ty| {
-                self.substitute_in_type(expr_root_ty)
-                    .inner_ty_vars()
-                    .into_iter()
-                    .filter(|v| self.lookup_type_var(*v).data().as_variable().is_some())
-                    .count()
-            })
-            .unwrap_or(0);
+        let unresolved_expr_var_count = match scope.expr_root_ty {
+            Some(expr_root_ty) => self
+                .substitute_in_type(expr_root_ty)?
+                .inner_ty_vars()
+                .into_iter()
+                .filter(|v| self.lookup_type_var(*v).data().as_variable().is_some())
+                .count(),
+            None => 0,
+        };
         let boundary_constraint_var_count = boundary_constraints
             .iter()
             .map(|constraint| constraint.inner_ty_vars().len())
             .sum();
-        DefaultingProgressKey {
+        Ok(DefaultingProgressKey {
             unresolved_expr_var_count,
             boundary_constraint_var_count,
             variable_solutions: (0..observed_variable_count)
                 .map(|index| self.normalize_type(Type::variable(TypeVar::new(index as u32))))
-                .collect(),
+                .collect::<Result<_, _>>()?,
             retained_bound_count: self.bounds.relations().count() + self.bottom_sources.len(),
-        }
+        })
     }
 
     /// Default to `never` the type variables in `candidates` that nothing determines, after every
@@ -1162,11 +1185,15 @@ impl UnifiedTypeInference {
         protected: impl IntoIterator<Item = TypeVar>,
         dependent_ty_vars: impl Fn(&PubTypeConstraint) -> Vec<TypeVar>,
     ) -> Result<(), InternalCompilationError> {
-        self.normalize_remaining_constraints();
-        let protected = protected
-            .into_iter()
-            .flat_map(|var| self.substitute_in_type(Type::variable(var)).inner_ty_vars())
-            .collect::<Vec<_>>();
+        self.normalize_remaining_constraints()?;
+        let mut protected_vars = Vec::new();
+        for var in protected {
+            protected_vars.extend(
+                self.substitute_in_type(Type::variable(var))?
+                    .inner_ty_vars(),
+            );
+        }
+        let protected = protected_vars;
         let mut blocked: FxHashSet<TypeVar> = protected.iter().copied().collect();
         let constraints = self.remaining_constraints();
         for constraint in
@@ -1183,11 +1210,14 @@ impl UnifiedTypeInference {
             .flat_map(|bound| [bound.lower, bound.upper])
             .collect::<Vec<_>>();
         for ty in bound_tys {
-            blocked.extend(self.substitute_in_type(ty).inner_ty_vars());
+            blocked.extend(self.substitute_in_type(ty)?.inner_ty_vars());
         }
         let mut defaulted = FxHashSet::default();
         for (var, span) in candidates {
-            for var in self.substitute_in_type(Type::variable(var)).inner_ty_vars() {
+            for var in self
+                .substitute_in_type(Type::variable(var))?
+                .inner_ty_vars()
+            {
                 if !blocked.contains(&var) && defaulted.insert(var) {
                     self.unify_same_type(Type::variable(var), span, Type::never(), span)?;
                 }
@@ -1227,17 +1257,20 @@ impl UnifiedTypeInference {
         loop {
             self.prepare_type_bounds()?;
             self.resolve_remaining_constraints_to_fixed_point(trait_solver, arena)?;
-            self.normalize_remaining_constraints();
-            let boundary_constraints = scope.boundary_constraints(self);
-            let old_progress_key =
-                self.defaulting_progress_key(scope, &boundary_constraints, observed_variable_count);
+            self.normalize_remaining_constraints()?;
+            let boundary_constraints = scope.boundary_constraints(self)?;
+            let old_progress_key = self.defaulting_progress_key(
+                scope,
+                &boundary_constraints,
+                observed_variable_count,
+            )?;
 
             self.default_orphan_variants_in_constraints(&boundary_constraints)?;
             self.default_num_types_once(&boundary_constraints, trait_solver, arena)?;
             self.propagate_type_bounds()?;
 
             let unit_default_constraints =
-                scope.unit_default_constraints(self, &boundary_constraints);
+                scope.unit_default_constraints(self, &boundary_constraints)?;
             if !unit_default_constraints.is_empty() {
                 self.default_unit_variant_trait_inputs_to_unit(
                     &unit_default_constraints,
@@ -1251,24 +1284,27 @@ impl UnifiedTypeInference {
             if scope.expr_root_ty.is_some() {
                 while self.select_lower_bounds(true, SelectionPhase::Inference)? {}
             }
-            let unconstrained_progress = scope
-                .expr_root_ty
-                .map(|expr_root_ty| {
-                    self.default_unconstrained_expr_ty_vars(expr_root_ty, trait_solver, arena)
-                })
-                .unwrap_or(false);
+            let unconstrained_progress = match scope.expr_root_ty {
+                Some(expr_root_ty) => {
+                    self.default_unconstrained_expr_ty_vars(expr_root_ty, trait_solver, arena)?
+                }
+                None => false,
+            };
 
-            self.normalize_remaining_constraints();
-            let boundary_constraints = scope.boundary_constraints(self);
-            let new_progress_key =
-                self.defaulting_progress_key(scope, &boundary_constraints, observed_variable_count);
+            self.normalize_remaining_constraints()?;
+            let boundary_constraints = scope.boundary_constraints(self)?;
+            let new_progress_key = self.defaulting_progress_key(
+                scope,
+                &boundary_constraints,
+                observed_variable_count,
+            )?;
 
             if !unconstrained_progress && new_progress_key == old_progress_key {
                 break;
             }
         }
 
-        self.normalize_remaining_constraints();
+        self.normalize_remaining_constraints()?;
 
         self.log_bounds_stats();
         Ok(())

@@ -87,87 +87,95 @@ pub(crate) fn find_disjoint_subgraphs<N: Node>(graph: &[N]) -> Vec<Vec<N::Index>
     disjoint_subgraphs
 }
 
+/// The strongly connected components of `graph`, each after all the components that it reaches.
+///
+/// Tarjan's algorithm, iterative rather than recursive as `reverse_postorder` is: the graphs
+/// include the interned types that the compiler builds, whose size is bounded by limits rather
+/// than by the host thread's call-stack capacity.
 pub(crate) fn find_strongly_connected_components<N: Node>(graph: &[N]) -> Vec<Vec<N::Index>> {
-    let mut index = 0;
-    let mut stack = Vec::new();
-    let mut in_stack = vec![false; graph.len()];
-    let mut indices = vec![None; graph.len()];
-    let mut low_link = vec![0; graph.len()];
-    let mut sccs = Vec::new();
+    let mut search = SccSearch {
+        graph,
+        next_index: 0,
+        stack: Vec::new(),
+        in_stack: vec![false; graph.len()],
+        indices: vec![None; graph.len()],
+        low_link: vec![0; graph.len()],
+        path: Vec::new(),
+        sccs: Vec::new(),
+    };
+    for root in 0..graph.len() {
+        if search.indices[root].is_none() {
+            search.run_from(root);
+        }
+    }
+    search.sccs
+}
 
-    #[allow(clippy::too_many_arguments)]
-    fn strong_connect<N: Node>(
-        node_index: usize,
-        index: &mut usize,
-        stack: &mut Vec<usize>,
-        in_stack: &mut [bool],
-        indices: &mut [Option<usize>],
-        low_link: &mut [usize],
-        graph: &[N],
-        sccs: &mut Vec<Vec<N::Index>>,
-    ) {
-        indices[node_index] = Some(*index);
-        low_link[node_index] = *index;
-        *index += 1;
-        stack.push(node_index);
-        in_stack[node_index] = true;
+/// The state of Tarjan's algorithm.
+struct SccSearch<'g, N: Node> {
+    graph: &'g [N],
+    next_index: usize,
+    stack: Vec<usize>,
+    in_stack: Vec<bool>,
+    indices: Vec<Option<usize>>,
+    low_link: Vec<usize>,
+    /// The active path of the search, each node with the neighbors it has still to explore.
+    path: Vec<(usize, std::vec::IntoIter<usize>)>,
+    sccs: Vec<Vec<N::Index>>,
+}
 
-        // Explore neighbors
-        for neighbor in graph[node_index].neighbors() {
-            let neighbor_index: usize = neighbor.try_into().unwrap();
-
-            if indices[neighbor_index].is_none() {
-                // Neighbor has not been visited, recurse
-                strong_connect(
-                    neighbor_index,
-                    index,
-                    stack,
-                    in_stack,
-                    indices,
-                    low_link,
-                    graph,
-                    sccs,
-                );
-                low_link[node_index] = low_link[node_index].min(low_link[neighbor_index]);
-            } else if in_stack[neighbor_index] {
-                // Neighbor is in the stack, hence part of the current SCC
-                low_link[node_index] = low_link[node_index].min(indices[neighbor_index].unwrap());
+impl<N: Node> SccSearch<'_, N> {
+    fn run_from(&mut self, root: usize) {
+        self.enter(root);
+        while let Some((node, neighbors)) = self.path.last_mut() {
+            let node = *node;
+            if let Some(neighbor) = neighbors.next() {
+                match self.indices[neighbor] {
+                    // Not visited yet: descend into it.
+                    None => self.enter(neighbor),
+                    // In the stack, hence part of the current SCC.
+                    Some(index) if self.in_stack[neighbor] => {
+                        self.low_link[node] = self.low_link[node].min(index);
+                    }
+                    Some(_) => {}
+                }
+            } else {
+                self.leave(node);
             }
         }
+    }
 
-        // If `node_index` is a root node, pop the stack to form an SCC
-        if low_link[node_index] == indices[node_index].unwrap() {
+    fn enter(&mut self, node: usize) {
+        self.indices[node] = Some(self.next_index);
+        self.low_link[node] = self.next_index;
+        self.next_index += 1;
+        self.stack.push(node);
+        self.in_stack[node] = true;
+        let neighbors: Vec<_> = self.graph[node].neighbors().map(position_of).collect();
+        self.path.push((node, neighbors.into_iter()));
+    }
+
+    /// Return from `node`, all of whose neighbors are explored, to its parent on the path.
+    fn leave(&mut self, node: usize) {
+        self.path.pop();
+        if let Some(&(parent, _)) = self.path.last() {
+            self.low_link[parent] = self.low_link[parent].min(self.low_link[node]);
+        }
+        // If `node` is a root node, pop the stack to form an SCC.
+        if self.low_link[node] == self.indices[node].unwrap() {
             let mut scc = Vec::new();
-            while let Some(w) = stack.pop() {
-                in_stack[w] = false;
-                // Converted here, at the one push that builds a component, rather than by a second
-                // pass over the finished answer.
+            while let Some(w) = self.stack.pop() {
+                self.in_stack[w] = false;
+                // Converted here, at the one push that builds a component, rather than by a
+                // second pass over the finished answer.
                 scc.push(index_of::<N::Index>(w));
-                if w == node_index {
+                if w == node {
                     break;
                 }
             }
-            sccs.push(scc);
+            self.sccs.push(scc);
         }
     }
-
-    // Call `strong_connect` for each node that hasn't been visited yet
-    for node_index in 0..graph.len() {
-        if indices[node_index].is_none() {
-            strong_connect(
-                node_index,
-                &mut index,
-                &mut stack,
-                &mut in_stack,
-                &mut indices,
-                &mut low_link,
-                graph,
-                &mut sccs,
-            );
-        }
-    }
-
-    sccs
 }
 
 pub(crate) fn topological_sort_sccs<N: Node>(
@@ -542,5 +550,39 @@ mod tests {
         assert_eq!(sorted_sccs[0], BTreeSet::from([0, 1, 2]));
         assert_eq!(sorted_sccs[1], BTreeSet::from([3, 4, 5]));
         assert_eq!(sorted_sccs[2], BTreeSet::from([6]));
+    }
+
+    /// Each component comes after all those it reaches, its nodes in the order in which the
+    /// search leaves them.
+    #[test]
+    fn scc_order_follows_the_search() {
+        let graph = vec![
+            N(vec![1]),
+            N(vec![2, 3]),
+            N(vec![0]),
+            N(vec![4]),
+            N(vec![5]),
+            N(vec![3, 6]),
+            N(vec![]),
+        ];
+        let sccs = find_strongly_connected_components(&graph);
+        assert_eq!(sccs, vec![vec![6], vec![5, 4, 3], vec![2, 1, 0]]);
+    }
+
+    /// The search does not use the call stack, on a path longer than a thread's stack could
+    /// hold as recursion.
+    #[test]
+    fn scc_of_a_long_path() {
+        let n = 1_000_000;
+        let mut graph: Vec<_> = (1..n).map(|i| N(vec![i])).collect();
+        graph.push(N(vec![0]));
+        let sccs = std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(move || find_strongly_connected_components(&graph))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(sccs.len(), 1);
+        assert_eq!(sccs[0].len(), n as usize);
     }
 }

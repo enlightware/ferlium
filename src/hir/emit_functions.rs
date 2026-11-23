@@ -525,7 +525,8 @@ fn default_unconstrained_diverging_returns_to_never<'func, I>(
     output: &mut Module,
     ty_inf: &mut UnifiedTypeInference,
     inputs: DivergingReturnDefaultingInputs<'_, I>,
-) where
+) -> Result<(), InternalCompilationError>
+where
     I: Iterator<Item = EmitFunctionInput<'func>>,
 {
     let defaults = unconstrained_diverging_returns(
@@ -536,7 +537,7 @@ fn default_unconstrained_diverging_returns_to_never<'func, I>(
         inputs.function_explicit_root_tys,
         inputs.recursive_function_ids,
         inputs.pending_functions,
-    );
+    )?;
     for (id, ret_var) in defaults {
         let subst: (TypeInstSubst, FxHashMap<_, _>) = (
             FxHashMap::from_iter([(ret_var, Type::never())]),
@@ -554,6 +555,7 @@ fn default_unconstrained_diverging_returns_to_never<'func, I>(
             instantiate_function_descr_in_place(pending, &mut mapper);
         }
     }
+    Ok(())
 }
 
 /// The functions whose return is an unconstrained variable that only diverges, either because the
@@ -566,7 +568,7 @@ fn unconstrained_diverging_returns<'func>(
     function_explicit_root_tys: &[Vec<Type>],
     recursive_function_ids: &FxHashSet<FunctionId>,
     pending_functions: &PendingModuleFunctions,
-) -> Vec<(LocalFunctionId, TypeVar)> {
+) -> Result<Vec<(LocalFunctionId, TypeVar)>, InternalCompilationError> {
     let mut defaults = Vec::new();
     for ((input, id), explicit_root_tys) in ast_functions
         .zip(local_fns.iter())
@@ -583,7 +585,7 @@ fn unconstrained_diverging_returns<'func>(
 
         // The body may not be substituted yet, as when a group's contracts are discovered.
         let body_is_never = ty_inf
-            .substitute_in_type(pending.code.arena[pending.code.entry_node_id].ty)
+            .substitute_in_type(pending.code.arena[pending.code.entry_node_id].ty)?
             == Type::never();
         let unproductive_recursive = recursive_function_ids
             .contains(&FunctionId::new(output.module_id(), *id))
@@ -597,20 +599,26 @@ fn unconstrained_diverging_returns<'func>(
         }
 
         let descr = &output.functions[id.as_index()];
-        let fn_ty = ty_inf.substitute_in_fn_type(&descr.definition.ty_scheme.ty);
+        let fn_ty = ty_inf.substitute_in_fn_type(&descr.definition.ty_scheme.ty)?;
         let Some(ret_var) = fn_ty.ret.data().as_variable().copied() else {
             continue;
         };
 
+        let mut in_explicit_root = false;
+        for ty in explicit_root_tys {
+            if ty_inf
+                .substitute_in_type(*ty)?
+                .contains_any_type_var(ret_var)
+            {
+                in_explicit_root = true;
+                break;
+            }
+        }
         if fn_ty
             .args
             .iter()
             .any(|arg| arg.ty.contains_any_type_var(ret_var))
-            || explicit_root_tys.iter().any(|ty| {
-                ty_inf
-                    .substitute_in_type(*ty)
-                    .contains_any_type_var(ret_var)
-            })
+            || in_explicit_root
             || ty_inf
                 .remaining_constraints()
                 .iter()
@@ -620,7 +628,7 @@ fn unconstrained_diverging_returns<'func>(
         }
         defaults.push((*id, ret_var));
     }
-    defaults
+    Ok(defaults)
 }
 
 /// `subst` extended for the requirements of a declaration: an output effect left unwritten in
@@ -752,21 +760,19 @@ impl CompleteClause {
         &self,
         requirements: Vec<PubTypeConstraint>,
         ty_inf: &mut UnifiedTypeInference,
-    ) -> Vec<PubTypeConstraint> {
-        let held = self
-            .held
-            .iter()
-            .map(|held| ty_inf.substitute_in_constraint(held))
-            .collect::<Vec<_>>();
-        requirements
-            .into_iter()
-            .filter(|requirement| {
-                let requirement = ty_inf.substitute_in_constraint(requirement);
-                !held
-                    .iter()
-                    .any(|held| same_trait_application(held, &requirement))
-            })
-            .collect()
+    ) -> Result<Vec<PubTypeConstraint>, InternalCompilationError> {
+        let held = ty_inf.substitute_in_constraints(&self.held)?;
+        let mut kept = Vec::new();
+        for requirement in requirements {
+            let substituted = ty_inf.substitute_in_constraint(&requirement)?;
+            if !held
+                .iter()
+                .any(|held| same_trait_application(held, &substituted))
+            {
+                kept.push(requirement);
+            }
+        }
+        Ok(kept)
     }
 }
 
@@ -1304,10 +1310,7 @@ impl Settlement {
             .zip(&self.signatures)
             .zip(&self.own_requirements)
         {
-            let resolved_roots = roots
-                .iter()
-                .map(|root| ty_inf.substitute_in_type(*root))
-                .collect::<Vec<_>>();
+            let resolved_roots = ty_inf.substitute_in_types(roots)?;
             distinct_written_type_vars(params, resolved_roots, || GenericParamsOwner::Function {
                 name: name.0,
             })?;
@@ -1316,7 +1319,7 @@ impl Settlement {
                 .into_iter()
                 .chain(requirements.iter().flat_map(|r| r.inner_ty_vars()));
             for var in unknown_types {
-                let ty = ty_inf.substitute_in_type(Type::variable(var));
+                let ty = ty_inf.substitute_in_type(Type::variable(var))?;
                 if ty.data().as_variable().is_none() {
                     return Err(internal_compilation_error!(RecursiveGroupBodyDoesNotFit {
                         function: name.0,
@@ -1359,7 +1362,7 @@ impl Settlement {
                 self.value_trait,
                 written_effects,
                 ty_inf,
-            );
+            )?;
             // The bodies of a definition keep their contracts together.
             let failed = errors
                 .iter()
@@ -1425,7 +1428,9 @@ impl Settlement {
                     .iter()
                     .zip(params)
                     .filter_map(|(root, param)| {
-                        let root = ty_inf.substitute_in_type(*root);
+                        // Only names the types of the message: a root that is too large to
+                        // substitute is left unnamed.
+                        let root = ty_inf.substitute_in_type(*root).ok()?;
                         Some((*root.data().as_variable()?, param.0))
                     })
                     .collect::<FxHashMap<_, _>>();
@@ -1474,19 +1479,19 @@ fn baseline_requirements<'a>(
                 let ty = &output.functions[id.as_index()].definition.ty_scheme.ty;
                 ty_inf.substitute_in_fn_type(ty)
             })
-            .collect::<Vec<_>>()
+            .collect::<Result<Vec<_>, _>>()
     };
-    ty_inf.normalize_remaining_constraints();
+    ty_inf.normalize_remaining_constraints()?;
     let mut own_requirements = Vec::new();
     for ((unit, signature), roots) in units
         .iter()
-        .zip(signatures(output, ty_inf))
+        .zip(signatures(output, ty_inf)?)
         .zip(written_roots)
     {
         let owner = functions[*unit];
         let mut seeds = signature.inner_ty_vars();
         for root in roots {
-            seeds.extend(ty_inf.substitute_in_type(*root).inner_ty_vars());
+            seeds.extend(ty_inf.substitute_in_type(*root)?.inner_ty_vars());
         }
         own_requirements.push(
             ConstraintBoundary::from_seed_ty_vars(seeds)
@@ -1498,7 +1503,7 @@ fn baseline_requirements<'a>(
         );
     }
     if !exported {
-        return Ok((signatures(output, ty_inf), own_requirements));
+        return Ok((signatures(output, ty_inf)?, own_requirements));
     }
 
     // The requirements that were replaced, and for each function those that replace them.
@@ -1518,7 +1523,7 @@ fn baseline_requirements<'a>(
         }
         let signature = &output.functions[id.as_index()].definition.ty_scheme.ty;
         let rigid = ty_inf
-            .substitute_in_fn_type(signature)
+            .substitute_in_fn_type(signature)?
             .args
             .iter()
             .map(|arg| arg.ty)
@@ -1589,18 +1594,18 @@ fn baseline_requirements<'a>(
             }
             let mut ty_inf = ty_inf.constraint_owner_scope(*id);
             for requirement in added.drain(..) {
-                let requirement = ty_inf.substitute_in_constraint(&requirement);
+                let requirement = ty_inf.substitute_in_constraint(&requirement)?;
                 ty_inf.add_requirement(requirement);
             }
         }
-        ty_inf.normalize_remaining_constraints();
+        ty_inf.normalize_remaining_constraints()?;
         for requirements in &mut own_requirements {
             for requirement in requirements.iter_mut() {
-                *requirement = ty_inf.substitute_in_constraint(requirement);
+                *requirement = ty_inf.substitute_in_constraint(requirement)?;
             }
         }
     }
-    Ok((signatures(output, ty_inf), own_requirements))
+    Ok((signatures(output, ty_inf)?, own_requirements))
 }
 
 /// Gives the types and the requirements of the baseline the effects that a round found, and
@@ -1635,16 +1640,20 @@ fn round_contract(
     value_trait: TraitId,
     written_effects: &[EffectVar],
     ty_inf: &mut UnifiedTypeInference,
-) -> (GroupContract, Vec<EffectVar>) {
-    let (requirements, requirement_ranks): (Vec<_>, Vec<_>) = requirements
-        .iter()
-        .zip(requirement_ranks)
-        .filter(|(requirement, _)| {
-            written_leaves
-                .is_none_or(|leaves| is_written_leaf(requirement, leaves, value_trait, ty_inf))
-        })
-        .map(|(requirement, rank)| (requirement.clone(), *rank))
-        .unzip();
+) -> Result<(GroupContract, Vec<EffectVar>), InternalCompilationError> {
+    let mut kept_requirements = Vec::new();
+    let mut kept_ranks = Vec::new();
+    for (requirement, rank) in requirements.iter().zip(requirement_ranks) {
+        let kept = match written_leaves {
+            Some(leaves) => is_written_leaf(requirement, leaves, value_trait, ty_inf)?,
+            None => true,
+        };
+        if kept {
+            kept_requirements.push(requirement.clone());
+            kept_ranks.push(*rank);
+        }
+    }
+    let (requirements, requirement_ranks) = (kept_requirements, kept_ranks);
     let mut effects = RoundEffects(ty_inf);
     let ty = signature.map(&mut effects);
     let requirements = requirements
@@ -1696,7 +1705,7 @@ fn round_contract(
         .sorted_by_key(|(_, number)| *number)
         .map(|(var, _)| var)
         .collect();
-    (contract, numbered)
+    Ok((contract, numbered))
 }
 
 /// What joint inference of a group remembers about the declaration of one of its functions.
@@ -1720,6 +1729,8 @@ fn is_written_row(row: &EffType, written: &FxHashMap<EffectVar, usize>) -> bool 
 /// variables that pass 1 solved. Rows found through a solved variable were inferred.
 struct RowWalker<'a, V: FnMut(&mut UnifiedTypeInference, &EffType, bool) -> EffType> {
     ty_inf: &'a mut UnifiedTypeInference,
+    /// The first error of substitution, which stops the walk at the type that met it.
+    error: Option<InternalCompilationError>,
     written_vars: &'a FxHashMap<EffectVar, usize>,
     in_solved: bool,
     visit: V,
@@ -1732,7 +1743,13 @@ impl<V: FnMut(&mut UnifiedTypeInference, &EffType, bool) -> EffType> TypeMapper
         if !ty.data().is_variable() {
             return ty;
         }
-        let solved = self.ty_inf.substitute_in_type(ty);
+        let solved = match self.ty_inf.substitute_in_type(ty) {
+            Ok(solved) => solved,
+            Err(error) => {
+                self.error.get_or_insert(error);
+                return ty;
+            }
+        };
         if solved == ty {
             return ty;
         }
@@ -1763,13 +1780,16 @@ fn walk_signature<V: FnMut(&mut UnifiedTypeInference, &EffType, bool) -> EffType
     ty_inf: &mut UnifiedTypeInference,
     written_vars: &FxHashMap<EffectVar, usize>,
     visit: V,
-) -> FnType {
-    fn_ty.map(&mut RowWalker {
+) -> Result<FnType, InternalCompilationError> {
+    let mut walker = RowWalker {
         ty_inf,
+        error: None,
         written_vars,
         in_solved: false,
         visit,
-    })
+    };
+    let fn_ty = fn_ty.map(&mut walker);
+    walker.error.map_or(Ok(fn_ty), Err)
 }
 
 /// A written row of a signature, in the variables of its contract.
@@ -1796,7 +1816,7 @@ fn shape_scheme(
     written_types: &[TypeVar],
     declaration: &GroupFunctionDeclaration,
     ty_inf: &mut UnifiedTypeInference,
-) -> TypeScheme<FnType> {
+) -> Result<TypeScheme<FnType>, InternalCompilationError> {
     let written = &declaration.written_vars;
     let next = Cell::new(declaration.written_vars.len() as u32);
     let signature_row = |row: &EffType, is_written: bool| {
@@ -1811,21 +1831,21 @@ fn shape_scheme(
         .args
         .iter()
         .map(|arg| {
-            walk_signature(
+            Ok(walk_signature(
                 &FnType::new(vec![*arg], Type::unit(), EffType::empty()),
                 ty_inf,
                 written,
                 |_, row, is_written| signature_row(row, is_written),
-            )
-            .args[0]
+            )?
+            .args[0])
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, InternalCompilationError>>()?;
     let ret = walk_signature(
         &FnType::new(vec![], fn_ty.ret, EffType::empty()),
         ty_inf,
         written,
         |_, row, is_written| signature_row(row, is_written),
-    )
+    )?
     .ret;
     let ty = FnType::new(args, ret, EffType::empty());
     let no_constraints: [PubTypeConstraint; 0] = [];
@@ -1835,12 +1855,12 @@ fn shape_scheme(
         .chain(TypeScheme::list_ty_vars(&ty, no_constraints.iter()))
         .unique()
         .collect();
-    TypeScheme {
+    Ok(TypeScheme {
         ty_quantifiers,
         eff_quantifiers: ty.inner_effect_vars(),
         ty,
         constraints: Vec::new(),
-    }
+    })
 }
 
 /// Numbers the effect variables of a contract: the written generics first, then the others as
@@ -1907,17 +1927,14 @@ fn group_shapes(
 ) -> Result<Vec<GroupContract>, InternalCompilationError> {
     let mut shapes = Vec::new();
     for ((fn_ty, declaration), roots) in fn_tys.iter().zip(declarations).zip(written_type_roots) {
-        let resolved_roots = roots
-            .iter()
-            .map(|root| ty_inf.substitute_in_type(*root))
-            .collect::<Vec<_>>();
+        let resolved_roots = ty_inf.substitute_in_types(roots)?;
         let written_types =
             distinct_written_type_vars(&declaration.type_params, resolved_roots, || {
                 GenericParamsOwner::Function {
                     name: declaration.name,
                 }
             })?;
-        let scheme = shape_scheme(fn_ty, &written_types, declaration, ty_inf);
+        let scheme = shape_scheme(fn_ty, &written_types, declaration, ty_inf)?;
         shapes.push(GroupContract {
             scheme,
             written_count: declaration.written_vars.len(),
@@ -1950,7 +1967,7 @@ fn discovered_shapes<'func>(
         function_explicit_root_tys,
         recursive_function_ids,
         pending_functions,
-    ) {
+    )? {
         let span = output.functions[id.as_index()]
             .spans
             .as_ref()
@@ -1986,7 +2003,7 @@ fn fit_declared_signature(
     output: &Module,
     ty_inf: &mut UnifiedTypeInference,
 ) -> Result<Vec<PubTypeConstraint>, InternalCompilationError> {
-    if let Err(reason) = check_declared_signature(declared, ty_inf) {
+    if let Err(reason) = check_declared_signature(declared, ty_inf)? {
         let (trait_id, index) = input
             .trait_default
             .expect("only a default method has a declared signature");
@@ -2001,12 +2018,7 @@ fn fit_declared_signature(
             span: input.function.span,
         }));
     }
-    constraints.extend(
-        declared
-            .constraints
-            .iter()
-            .map(|constraint| ty_inf.substitute_in_constraint(constraint)),
-    );
+    constraints.extend(ty_inf.substitute_in_constraints(&declared.constraints)?);
     Ok(constraints.into_iter().unique().collect())
 }
 
@@ -2077,7 +2089,8 @@ fn reduced_requirements(
             .iter()
             .zip(written_roots)
             .filter_map(|(name, root)| {
-                let root = ty_inf.substitute_in_type(*root);
+                // Only names the types of a message: a root too large to substitute is unnamed.
+                let root = ty_inf.substitute_in_type(*root).ok()?;
                 Some((*root.data().as_variable()?, name.0))
             })
             .collect::<Vec<_>>()
@@ -2130,6 +2143,39 @@ fn group_is_exported<'a, I: Iterator<Item = EmitFunctionInput<'a>>>(mut inputs: 
 /// Emit the functions of one group of the module's call graph.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_function_group<'a, F, I>(
+    output: &mut Module,
+    solver_arena: &mut NodeArena,
+    ast_functions: F,
+    desugared_arena: &DExprArena,
+    others: &Modules,
+    recursive_function_names: &FxHashSet<Ustr>,
+    capabilities: CompilationCapabilities,
+    warnings: &mut Vec<CompilationWarning>,
+) -> Result<(), InternalCompilationError>
+where
+    I: Iterator<Item = EmitFunctionInput<'a>>,
+    F: Fn() -> I,
+{
+    // A limit that the inference of the group exceeds where no source span is known is
+    // reported at the first function of the group.
+    let span = ast_functions()
+        .next()
+        .map_or_else(Location::new_synthesized, |input| input.function.span);
+    emit_function_group_unlocated(
+        output,
+        solver_arena,
+        ast_functions,
+        desugared_arena,
+        others,
+        recursive_function_names,
+        capabilities,
+        warnings,
+    )
+    .map_err(|error| error.locate_limit(span))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_function_group_unlocated<'a, F, I>(
     output: &mut Module,
     solver_arena: &mut NodeArena,
     ast_functions: F,
@@ -2282,6 +2328,8 @@ where
     I: Iterator<Item = EmitFunctionInput<'a>>,
     F: Fn() -> I,
 {
+    // A limit exceeded where no source span is known is reported at the implementation.
+    let span = trait_ctx.span;
     let result = emit_functions(
         output,
         solver_arena,
@@ -2293,7 +2341,8 @@ where
         capabilities,
         warnings,
         GroupMode::Normal,
-    )?;
+    )
+    .map_err(|error| error.locate_limit(span))?;
     match result {
         Emitted::TraitImpl(output) => Ok(*output),
         _ => unreachable!("emitting a trait implementation produces its output"),
@@ -3635,7 +3684,7 @@ fn solve_types(
                 &mut descr.locals,
                 value_trait_id,
                 module_env,
-            );
+            )?;
         }
     }
 
@@ -3680,12 +3729,12 @@ where
     let value_trait_id = ModuleEnv::new(output, others).expect_std_trait_id(VALUE_TRAIT_NAME);
     // Default orphan constraints for the trait implementation into the unification tables.
     {
-        let input_tys = ty_inf.substitute_in_types(&trait_output.input_tys);
-        let output_tys = ty_inf.substitute_in_types(&trait_output.output_tys);
+        let input_tys = ty_inf.substitute_in_types(&trait_output.input_tys)?;
+        let output_tys = ty_inf.substitute_in_types(&trait_output.output_tys)?;
         let mut head_tys = input_tys.clone();
         head_tys.extend(output_tys.iter().copied());
         let head_quantifiers = collect_ty_vars(&head_tys);
-        ty_inf.normalize_remaining_constraints();
+        ty_inf.normalize_remaining_constraints()?;
         let scope = DefaultingScope::beyond_signature(head_quantifiers);
         let mut solver = trait_solver_from_module!(output, others);
         ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, solver_arena)?;
@@ -3711,7 +3760,7 @@ where
                     &mut descr.locals,
                     value_trait_id,
                     module_env,
-                );
+                )?;
             }
         }
         let mut solver = trait_solver_from_module!(output, others);
@@ -3733,11 +3782,11 @@ where
             .iter()
             .chain(&trait_output.output_tys)
         {
-            protected.extend(ty_inf.substitute_in_type(*ty).inner_ty_vars());
+            protected.extend(ty_inf.substitute_in_type(*ty)?.inner_ty_vars());
         }
         for id in &local_fns {
             let fn_ty = &output.functions[id.as_index()].definition.ty_scheme.ty;
-            protected.extend(ty_inf.substitute_in_fn_type(fn_ty).inner_ty_vars());
+            protected.extend(ty_inf.substitute_in_fn_type(fn_ty)?.inner_ty_vars());
         }
         default_unconstrained_types_to_never(
             &mut ty_inf,
@@ -3750,12 +3799,14 @@ where
         // variables, such as that of a callback parameter written without effects, are fixed.
         // An output effect is not observable as such: it is the least solution of what the
         // header writes for it and what the methods perform, unless a requirement determines it.
-        let mut head_effect_vars = trait_output
+        let mut head_effect_vars = FxHashSet::default();
+        for ty in trait_output
             .input_tys
             .iter()
             .chain(&trait_output.output_tys)
-            .flat_map(|ty| ty_inf.substitute_in_type(*ty).inner_effect_vars())
-            .collect::<FxHashSet<_>>();
+        {
+            head_effect_vars.extend(ty_inf.substitute_in_type(*ty)?.inner_effect_vars());
+        }
         if let Some((_, _, written_output_effs, _)) = &explicit_trait_impl {
             for eff in written_output_effs {
                 ty_inf
@@ -3778,7 +3829,7 @@ where
                     .expect("a written impl generic has a type variable");
                 ty_inf.substitute_in_type(*ty)
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
         distinct_written_type_vars(impl_ctx.generic_type_params, resolved_roots, || {
             GenericParamsOwner::TraitImpl {
                 trait_name: impl_ctx.trait_def.name,
@@ -3791,7 +3842,7 @@ where
             && !trait_ctx.writes_associated_consts
             && let [input_ty] = trait_output.input_tys.as_slice()
         {
-            let input_ty = ty_inf.substitute_in_type(*input_ty);
+            let input_ty = ty_inf.substitute_in_type(*input_ty)?;
             for constraint in
                 value_layout_getters_requirements(output, others, input_ty, trait_ctx.span)?
             {
@@ -3799,7 +3850,7 @@ where
             }
         }
 
-        let input_tys = ty_inf.substitute_in_types(&trait_output.input_tys);
+        let input_tys = ty_inf.substitute_in_types(&trait_output.input_tys)?;
         let exportable = output.is_trait_impl_exportable(trait_ctx.trait_id, &input_tys, others);
         // A complete clause leaves to the users what it writes, whether the impl is exportable or
         // not.
@@ -3819,12 +3870,13 @@ where
                             .as_ref()?
                             .0
                             .get(&TypeVar::new(index as u32))?;
-                        let root = ty_inf.substitute_in_type(root);
+                        // Only names the types of a message, as above.
+                        let root = ty_inf.substitute_in_type(root).ok()?;
                         Some((*root.data().as_variable()?, name.0))
                     })
                     .collect::<Vec<_>>()
             };
-            ty_inf.normalize_remaining_constraints();
+            ty_inf.normalize_remaining_constraints()?;
             let constraints = ty_inf.remaining_constraints().to_vec();
             let mut solver = trait_solver_from_module!(output, others);
             let constraints = match solver.reduce_public_requirements(
@@ -3864,7 +3916,7 @@ where
                 }
             }
             let requirements = match &complete_clause {
-                Some(complete) => complete.without_held(constraints.requirements, &mut ty_inf),
+                Some(complete) => complete.without_held(constraints.requirements, &mut ty_inf)?,
                 None => constraints.requirements,
             };
             ty_inf.replace_remaining_constraints(requirements);
@@ -3878,9 +3930,9 @@ where
         }
 
         // Check for remaining orphans.
-        ty_inf.normalize_remaining_constraints();
-        let input_tys = ty_inf.substitute_in_types(&trait_output.input_tys);
-        let output_tys = ty_inf.substitute_in_types(&trait_output.output_tys);
+        ty_inf.normalize_remaining_constraints()?;
+        let input_tys = ty_inf.substitute_in_types(&trait_output.input_tys)?;
+        let output_tys = ty_inf.substitute_in_types(&trait_output.output_tys)?;
         let mut head_tys = input_tys.clone();
         head_tys.extend(output_tys.iter().copied());
         let head_quantifiers = collect_ty_vars(&head_tys);
@@ -3913,18 +3965,18 @@ where
         &associated_lambdas,
         &local_fns,
         &mut ty_inf,
-    );
+    )?;
     check_declared_effects_not_combined(output, &associated_lambdas, &local_fns, &mut ty_inf)?;
 
     // Resolve input and output types and output effects.
-    ty_inf.substitute_in_types_in_place(&mut trait_output.input_tys);
-    ty_inf.substitute_in_types_in_place(&mut trait_output.output_tys);
+    ty_inf.substitute_in_types_in_place(&mut trait_output.input_tys)?;
+    ty_inf.substitute_in_types_in_place(&mut trait_output.output_tys)?;
     // What the methods perform, as minimization left it, which includes what the header writes.
     ty_inf.substitute_in_effect_types_in_place(&mut trait_output.output_effs);
 
-    trait_output.evidence_plan.substitute(&mut ty_inf);
+    trait_output.evidence_plan.substitute(&mut ty_inf)?;
     // Take final substituted constraints.
-    ty_inf.normalize_remaining_constraints();
+    ty_inf.normalize_remaining_constraints()?;
     let all_constraints = ty_inf.take_constraints();
 
     // Check that each method's effects are a subset of the trait definition's effects, so that
@@ -4004,8 +4056,10 @@ where
         .iter()
         .filter_map(|constraint| {
             // A requirement that the definition leaves to its caller is published, not solved here.
-            if ty_inf.is_callers_application(constraint) {
-                return Some(Ok(constraint.instantiate_simple(&subst)));
+            match ty_inf.is_callers_application(constraint) {
+                Ok(true) => return Some(Ok(constraint.instantiate_simple(&subst))),
+                Ok(false) => {}
+                Err(error) => return Some(Err(error)),
             }
             constraint
                 .instantiate_and_drop_if_solved(&mut subst, &mut solver, solver_arena)
@@ -4078,6 +4132,7 @@ where
             let position = ty_subst
                 .get(&TypeVar::new(index as u32))
                 .map(|root| ty_inf.substitute_in_type(*root))
+                .transpose()?
                 .and_then(|root| root.data().as_variable().copied())
                 .and_then(|var| quantifiers.iter().position(|quantifier| *quantifier == var));
             if let Some(position) = position {
@@ -4291,9 +4346,9 @@ where
     let mut protected = Vec::new();
     for (id, explicit_root_tys) in local_fns.iter().zip(function_explicit_root_tys) {
         let fn_ty = &output.functions[id.as_index()].definition.ty_scheme.ty;
-        protected.extend(ty_inf.substitute_in_fn_type(fn_ty).inner_ty_vars());
+        protected.extend(ty_inf.substitute_in_fn_type(fn_ty)?.inner_ty_vars());
         for ty in explicit_root_tys {
-            protected.extend(ty_inf.substitute_in_type(*ty).inner_ty_vars());
+            protected.extend(ty_inf.substitute_in_type(*ty)?.inner_ty_vars());
         }
     }
     default_unconstrained_types_to_never(
@@ -4332,8 +4387,8 @@ where
                         .scheme
                         .ty_quantifiers
                         .iter()
-                        .map(|var| (*var, ty_inf.substitute_in_type(group_instance[var])))
-                        .collect::<TypeInstSubst>(),
+                        .map(|var| Ok((*var, ty_inf.substitute_in_type(group_instance[var])?)))
+                        .collect::<Result<TypeInstSubst, InternalCompilationError>>()?,
                     EffectsInstSubst::default(),
                 );
                 bottom.scheme.ty = bottom
@@ -4341,9 +4396,9 @@ where
                     .ty
                     .map(&mut BitmapInstantiationMapper::new(&subst));
                 bottom.scheme.ty_quantifiers = Vec::new();
-                bottom
+                Ok(bottom)
             })
-            .collect();
+            .collect::<Result<Vec<_>, InternalCompilationError>>()?;
         let written_leaves = complete_clauses
             .iter()
             .map(|complete| complete.as_ref().map(|complete| complete.leaves.clone()))
@@ -4534,7 +4589,7 @@ fn determine_function_types(
             &output.functions[id.as_index()].definition.ty_scheme.ty,
             pending_functions.get(id),
             explicit_root_tys,
-        );
+        )?;
         let mut solver = trait_solver_from_module!(output, others);
         ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, solver_arena)?;
         let generated = solver.finish().commit(
@@ -4570,7 +4625,7 @@ fn determine_function_types(
                     &mut descr.locals,
                     value_trait_id,
                     module_env,
-                );
+                )?;
             }
         }
         let mut solver = trait_solver_from_module!(output, others);
@@ -4584,7 +4639,7 @@ fn determine_function_types(
                 &output.functions[id.as_index()].definition.ty_scheme.ty,
                 pending_functions.get(id),
                 explicit_root_tys,
-            );
+            )?;
             if !scope.is_empty() {
                 ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, solver_arena)?;
             }
@@ -4599,16 +4654,17 @@ fn determine_function_types(
     }
     for (id, explicit_root_tys) in local_fns.iter().zip(function_explicit_root_tys.iter()) {
         let descr = &output.functions[id.as_index()];
-        let fn_ty = ty_inf.substitute_in_fn_type(&descr.definition.ty_scheme.ty);
+        let fn_ty = ty_inf.substitute_in_fn_type(&descr.definition.ty_scheme.ty)?;
         let mut sig_ty_vars = fn_ty.inner_ty_vars();
         sig_ty_vars.extend(
-            explicit_root_tys
-                .iter()
-                .flat_map(|ty| ty_inf.substitute_in_type(*ty).inner_ty_vars().into_iter())
+            ty_inf
+                .substitute_in_types(explicit_root_tys)?
+                .into_iter()
+                .flat_map(|ty| ty.inner_ty_vars())
                 .collect::<Vec<_>>(),
         );
         sig_ty_vars = sig_ty_vars.into_iter().unique().collect();
-        ty_inf.normalize_remaining_constraints();
+        ty_inf.normalize_remaining_constraints()?;
         let sig_boundary = ConstraintBoundary::from_seed_ty_vars(sig_ty_vars.iter().copied());
         let module_env = ModuleEnv::new(output, others);
         let remaining = ty_inf.remaining_constraints().to_vec();
@@ -4618,8 +4674,12 @@ fn determine_function_types(
             .filter(|c| !c.is_type_has_variant())
             .filter(|c| !is_compiler_provided_value_constraint(c, module_env))
             // One left to the caller is related to the signature by the contract.
-            .filter(|c| !ty_inf.is_callers_application(c))
-            .collect();
+            .filter_map(|c| match ty_inf.is_callers_application(c) {
+                Ok(true) => None,
+                Ok(false) => Some(Ok(c)),
+                Err(error) => Some(Err(error)),
+            })
+            .collect::<Result<_, _>>()?;
         if !remaining_orphans.is_empty() {
             if let Some((ty_var, ty, span)) =
                 first_unbound_type_in_constraints(remaining_orphans.iter().copied())
@@ -4678,15 +4738,15 @@ where
     // The applications of traits that the bodies leave to their callers, with those that
     // a declaration gives.
     let requirements = |ty_inf: &mut UnifiedTypeInference| {
-        ty_inf.normalize_remaining_constraints();
+        ty_inf.normalize_remaining_constraints()?;
         let mut applications = declared_signatures
             .iter()
             .flatten()
             .flat_map(|declared| declared.constraints.iter())
             .map(|constraint| ty_inf.substitute_in_constraint(constraint))
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
         applications.extend(ty_inf.remaining_constraints().iter().cloned());
-        applications
+        Ok::<_, InternalCompilationError>(applications)
     };
     // The written effect generics of a function that the round leaves out are not
     // judged: they are as its signature has them.
@@ -4751,7 +4811,7 @@ where
                 if settlement.is_left_out(index) {
                     continue;
                 }
-                let mut applications = requirements(ty_inf)
+                let mut applications = requirements(ty_inf)?
                     .into_iter()
                     .filter(|application| !ty_inf.is_requirement_of_others(application, *owner))
                     .collect::<Vec<_>>();
@@ -4761,6 +4821,9 @@ where
                     coalesced = settlement.keeps_types(ty_inf);
                 }
                 if let Err(error) = coalesced {
+                    if error.is_compiler_limit() {
+                        return Err(error);
+                    }
                     left_out = Some((index, error));
                     break;
                 }
@@ -4770,7 +4833,7 @@ where
                 return Ok(None);
             }
         } else {
-            let mut applications = requirements(ty_inf);
+            let mut applications = requirements(ty_inf)?;
             ty_inf.coalesce_constraint_outputs(&mut applications, &polarities)?;
         }
     }
@@ -4783,7 +4846,7 @@ where
         associated_lambdas,
         local_fns,
         ty_inf,
-    );
+    )?;
     for (index, (id, round_error)) in local_fns.iter().zip(&mut round_errors).enumerate() {
         if is_left_out(&*settlement, index) {
             continue;
@@ -4804,7 +4867,7 @@ where
 
     // Recursive-return defaulting inspects the final constraints. A contract already says
     // what its function returns.
-    ty_inf.normalize_remaining_constraints();
+    ty_inf.normalize_remaining_constraints()?;
     if !mode.has_fixed_types() {
         default_unconstrained_diverging_returns_to_never(
             output,
@@ -4817,7 +4880,7 @@ where
                 associated_lambdas: associated_lambdas,
                 pending_functions: pending_functions,
             },
-        );
+        )?;
     }
     // In a group that settles, a requirement that bodies make is of these bodies: each
     // function has its own instances of what the functions it names require.
@@ -4848,11 +4911,12 @@ where
         .collect::<Vec<_>>();
 
     // A requirement that the definition leaves to its caller is published, not solved here.
-    let callers_applications = all_constraints
-        .iter()
-        .filter(|constraint| ty_inf.is_callers_application(constraint))
-        .map(constraint_ptr)
-        .collect::<FxHashSet<_>>();
+    let mut callers_applications = FxHashSet::default();
+    for constraint in &all_constraints {
+        if ty_inf.is_callers_application(constraint)? {
+            callers_applications.insert(constraint_ptr(constraint));
+        }
+    }
 
     // The type variables of the signatures of the group.
     let group_signature_vars = local_fns
@@ -4883,10 +4947,7 @@ where
             let function = input.function;
             let descr = &output.functions[id.as_index()];
             if declared.is_none() {
-                let resolved_roots = explicit_root_tys
-                    .iter()
-                    .map(|root| ty_inf.substitute_in_type(*root))
-                    .collect::<Vec<_>>();
+                let resolved_roots = ty_inf.substitute_in_types(explicit_root_tys)?;
                 distinct_written_type_vars(
                     function.generic_params.type_params(),
                     resolved_roots,
@@ -4897,9 +4958,10 @@ where
             }
             // Find constraints related to this function's signature.
             let mut sig_ty_vars = descr.definition.ty_scheme.ty.inner_ty_vars();
-            let explicit_ty_vars = explicit_root_tys
-                .iter()
-                .flat_map(|ty| ty_inf.substitute_in_type(*ty).inner_ty_vars().into_iter())
+            let explicit_ty_vars = ty_inf
+                .substitute_in_types(explicit_root_tys)?
+                .into_iter()
+                .flat_map(|ty| ty.inner_ty_vars())
                 .collect::<Vec<_>>();
             sig_ty_vars.extend(explicit_ty_vars.iter().copied());
             sig_ty_vars = sig_ty_vars.into_iter().unique().collect();
@@ -5003,7 +5065,7 @@ where
             let mut constraints = constraints;
             if let Some(declared) = declared {
                 constraints = fit_declared_signature(declared, constraints, input, output, ty_inf)?;
-                let declared_ty = ty_inf.substitute_in_fn_type(&declared.ty);
+                let declared_ty = ty_inf.substitute_in_fn_type(&declared.ty)?;
                 output.functions[id.as_index()].definition.ty_scheme.ty = declared_ty;
             }
 
@@ -5211,7 +5273,7 @@ where
             continue;
         };
         let constraints = match complete {
-            Some(complete) => complete.without_held(constraints, ty_inf),
+            Some(complete) => complete.without_held(constraints, ty_inf)?,
             None => constraints,
         };
         // A default method needs nothing beyond its trait's contract, so that every
@@ -5220,11 +5282,7 @@ where
         if let Some(declared) = declared
             && input.trait_default.is_some()
         {
-            let contract = declared
-                .constraints
-                .iter()
-                .map(|constraint| ty_inf.substitute_in_constraint(constraint))
-                .collect::<Vec<_>>();
+            let contract = ty_inf.substitute_in_constraints(&declared.constraints)?;
             if let Some(extra) = constraints
                 .iter()
                 .find(|constraint| !contract.contains(constraint))
@@ -5257,19 +5315,21 @@ where
             associated_lambdas,
             local_fns,
             ty_inf,
-        );
+        )?;
         for id in local_fns {
             let scheme = &output.functions[id.as_index()].definition.ty_scheme;
-            let quantifiers = scheme
-                .ty_quantifiers
-                .iter()
-                .filter_map(|var| {
+            let mut roots = Vec::new();
+            for var in &scheme.ty_quantifiers {
+                roots.extend(
                     ty_inf
-                        .substitute_in_type(Type::variable(*var))
+                        .substitute_in_type(Type::variable(*var))?
                         .data()
                         .as_variable()
-                        .copied()
-                })
+                        .copied(),
+                );
+            }
+            let quantifiers = roots
+                .into_iter()
                 .chain(TypeScheme::list_ty_vars(
                     &scheme.ty,
                     scheme.constraints.iter(),
@@ -5540,20 +5600,21 @@ fn function_defaulting_scope(
     fn_ty: &FnType,
     pending_function: Option<&PendingModuleFunction>,
     explicit_root_tys: &[Type],
-) -> DefaultingScope {
-    let fn_ty = ty_inf.substitute_in_fn_type(fn_ty);
+) -> Result<DefaultingScope, InternalCompilationError> {
+    let fn_ty = ty_inf.substitute_in_fn_type(fn_ty)?;
     let mut sig_ty_vars = fn_ty.inner_ty_vars();
     sig_ty_vars.extend(
-        explicit_root_tys
-            .iter()
-            .flat_map(|ty| ty_inf.substitute_in_type(*ty).inner_ty_vars().into_iter())
+        ty_inf
+            .substitute_in_types(explicit_root_tys)?
+            .into_iter()
+            .flat_map(|ty| ty.inner_ty_vars())
             .collect::<Vec<_>>(),
     );
     sig_ty_vars = sig_ty_vars.into_iter().unique().collect();
-    ty_inf.normalize_remaining_constraints();
-    let sig_boundary = ty_inf.constraint_boundary(sig_ty_vars.iter().copied());
+    ty_inf.normalize_remaining_constraints()?;
+    let sig_boundary = ty_inf.constraint_boundary(sig_ty_vars.iter().copied())?;
     let has_orphans = !sig_boundary
-        .inaccessible_constraints(&ty_inf.linking_constraints())
+        .inaccessible_constraints(&ty_inf.linking_constraints()?)
         .is_empty();
     // If the signature still exposes type variables, it defines the boundary for
     // defaulting and body-local `None`/unit evidence must not bias it.
@@ -5576,7 +5637,7 @@ fn function_defaulting_scope(
     } else {
         DefaultingScope::default()
     };
-    scope.with_unit_variant_seed_tys(unit_variant_seed_tys)
+    Ok(scope.with_unit_variant_seed_tys(unit_variant_seed_tys))
 }
 
 /// Reject functions whose published types combine two declared effect variables in one effect.
@@ -5591,7 +5652,7 @@ fn minimize_body_effects(
 ) -> Result<(), InternalCompilationError> {
     for id in signatures {
         let fn_ty = &output.functions[id.as_index()].definition.ty_scheme.ty;
-        observable.extend(ty_inf.substitute_in_fn_type(fn_ty).inner_effect_vars());
+        observable.extend(ty_inf.substitute_in_fn_type(fn_ty)?.inner_effect_vars());
     }
     ty_inf.minimize_unobservable_effects(observable)
 }
@@ -5644,7 +5705,8 @@ fn missing_requirement(
         .zip(&declared.ty_quantifiers)
         .filter_map(|(source_var, var)| {
             let name = **parameter_names.get(source_var.name() as usize)?;
-            let root = ty_inf.substitute_in_type(Type::variable(*var));
+            // Only names the types of a message: a root too large to substitute is unnamed.
+            let root = ty_inf.substitute_in_type(Type::variable(*var)).ok()?;
             let root = *root.data().as_variable()?;
             Some((root, name))
         })

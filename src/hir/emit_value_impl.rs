@@ -499,11 +499,8 @@ pub(super) fn emit_auto_value_impls(
                 constraints = reduced.requirements;
                 evidence_plan = reduced.evidence;
                 inference.finalize_effects()?;
-                evidence_plan.substitute(&mut inference);
-                constraints = constraints
-                    .iter()
-                    .map(|c| inference.substitute_in_constraint(c))
-                    .collect();
+                evidence_plan.substitute(&mut inference)?;
+                constraints = inference.substitute_in_constraints(&constraints)?;
             }
             let generated = solver.finish().commit(
                 &mut output.functions,

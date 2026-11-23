@@ -197,6 +197,8 @@ pub(crate) struct EffectSolver {
     rigid_names: FxHashMap<EffectVar, Ustr>,
     /// Whether effects are no longer related, see [`Self::ignore_effects`].
     ignores_effects: bool,
+    /// Snapshots not yet rolled back or committed: ena records every change while one is open.
+    open_snapshots: usize,
 }
 
 /// The substitution of class roots once effects are finalized.
@@ -325,6 +327,7 @@ impl EffectSolver {
     }
 
     pub(crate) fn snapshot(&mut self) -> EffectSolverSnapshot {
+        self.open_snapshots += 1;
         EffectSolverSnapshot {
             table: self.table.snapshot(),
             deferred_inclusions: self.deferred_inclusions.clone(),
@@ -332,7 +335,19 @@ impl EffectSolver {
         }
     }
 
+    /// Keep the changes since `snapshot`, which a snapshot further out can still undo.
+    pub(crate) fn commit(&mut self, snapshot: EffectSolverSnapshot) {
+        self.open_snapshots -= 1;
+        self.table.commit(snapshot.table);
+    }
+
+    #[cfg(test)]
+    pub(super) fn open_snapshots(&self) -> usize {
+        self.open_snapshots
+    }
+
     pub(crate) fn rollback_to(&mut self, snapshot: EffectSolverSnapshot) {
+        self.open_snapshots -= 1;
         self.table.rollback_to(snapshot.table);
         self.deferred_inclusions = snapshot.deferred_inclusions;
         self.publishing = snapshot.publishing;

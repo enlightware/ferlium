@@ -23,7 +23,9 @@ use crate::{
     parser::location::{Location, SourceTable},
     types::{
         effects::{EffType, EffectNames, EffectRow, EffectVar, NamedEffectRow},
-        r#type::{Type, TypeDisplayEnv, TypeVar},
+        r#type::{
+            TYPE_HEIGHT_LIMIT, TYPE_SIZE_LIMIT, Type, TypeDisplayEnv, TypeLimitExceeded, TypeVar,
+        },
         type_inference::unify::SubOrSameType,
         type_like::TypeLike,
         type_scheme::PubTypeConstraint,
@@ -37,6 +39,10 @@ pub type LocatedError = (String, Location);
 pub enum CompilerLimitKind {
     ZeroSizedResultNodes,
     ZeroSizedResultDepth,
+    /// See `TYPE_HEIGHT_LIMIT`.
+    TypeHeight,
+    /// See `TYPE_SIZE_LIMIT`.
+    TypeSize,
 }
 
 impl Display for CompilerLimitKind {
@@ -44,6 +50,8 @@ impl Display for CompilerLimitKind {
         f.write_str(match self {
             Self::ZeroSizedResultNodes => "zero-sized result reconstruction nodes",
             Self::ZeroSizedResultDepth => "zero-sized result nesting depth",
+            Self::TypeHeight => "type height",
+            Self::TypeSize => "type size",
         })
     }
 }
@@ -55,6 +63,26 @@ pub struct CompilerLimit {
     pub actual: usize,
     pub limit: usize,
     pub span: Location,
+}
+
+impl From<TypeLimitExceeded> for CompilerLimit {
+    /// A limit without a span, which `InternalCompilationError::locate_limit` fills in.
+    fn from(error: TypeLimitExceeded) -> Self {
+        let (kind, actual, limit) = match error {
+            TypeLimitExceeded::Height(actual) => {
+                (CompilerLimitKind::TypeHeight, actual, TYPE_HEIGHT_LIMIT)
+            }
+            TypeLimitExceeded::Size(actual) => {
+                (CompilerLimitKind::TypeSize, actual, TYPE_SIZE_LIMIT)
+            }
+        };
+        Self {
+            kind,
+            actual: actual as usize,
+            limit: limit as usize,
+            span: Location::new_synthesized(),
+        }
+    }
 }
 
 impl Display for CompilerLimit {
@@ -1647,6 +1675,40 @@ macro_rules! internal_compilation_error {
 }
 
 impl InternalCompilationError {
+    /// A compiler limit error for a type that would be too large, without a span yet:
+    /// `locate_limit` gives it the span of the operation that exceeded the limit.
+    pub(crate) fn type_limit_exceeded(error: TypeLimitExceeded) -> Self {
+        internal_compilation_error!(CompilerLimitExceeded(error.into()))
+    }
+
+    /// Whether this error is a compiler limit, which a caller that tries an alternative on
+    /// failure must report rather than take as a failure of the attempt.
+    pub(crate) fn is_compiler_limit(&self) -> bool {
+        matches!(&*self.0, CompilationErrorImpl::CompilerLimitExceeded(_))
+    }
+
+    /// The outcome of an attempt, such as matching a candidate implementation: `None` if it
+    /// fails, which tells the caller something, such as that the candidate does not apply. A
+    /// compiler limit tells nothing, so it stays an error.
+    pub(crate) fn attempt<T>(result: Result<T, Self>) -> Result<Option<T>, Self> {
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(error) if error.is_compiler_limit() => Err(error),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Give a compiler limit error without a span, such as one converted from
+    /// `TypeLimitExceeded`, the span of the operation that exceeded the limit.
+    pub(crate) fn locate_limit(mut self, span: Location) -> Self {
+        if let CompilationErrorImpl::CompilerLimitExceeded(limit) = &mut *self.0
+            && limit.span.is_synthesized()
+        {
+            limit.span = span;
+        }
+        self
+    }
+
     pub(crate) fn with_private_requirement_names(
         mut self,
         names: impl IntoIterator<Item = (TypeVar, Ustr)>,

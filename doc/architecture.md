@@ -63,7 +63,7 @@ lowering with native pointers and runtime wrappers.
 
 The main phases are:
 
-1. Parse source text into parsed AST. Expressions, patterns, types and `use` trees each nest at most 128 levels (`NESTING_LIMIT`), which bounds the stack that the recursive passes need: the parser checks types, patterns and `use` trees as it builds them, and expressions once parsed.
+1. Parse source text into parsed AST.
 2. Validate parsed AST features that are not accepted in user code.
 3. Desugar parsed AST syntax and module declarations.
 4. Resolve symbols and emit typed HIR while collecting type, effect, mutability, and trait constraints. Definite unreachable suffixes are reported as warnings and omitted without constraining inference. Source lints, such as needless returns in function-tail position, are collected alongside those warnings. Some HIR decisions, such as local storage ownership and value argument passing, may remain explicitly unresolved.
@@ -73,6 +73,10 @@ The main phases are:
 8. Elaborate dictionaries, ownership and value dispatch, record field access, and call lifetime plans into final HIR.
 9. Validate final-HIR ownership, literal, borrow, place-lifetime, and yield invariants.
 10. Execute final HIR through the tree-walking interpreter, or lower it to MIR and execute it through the MIR reference interpreter. MIR execution optionally runs rewriting passes first, selected per session through `MirOptimization`; optimized bodies are stored beside the raw ones, so enabling optimization never changes what another session executes.
+
+The compiler limits what source can make grow without bound, such as how deeply code nests and how
+large types are, to keep a program from exhausting the compiler's stack, time or memory. Crossing a
+limit is a located compilation error.
 
 MIR's structure and invariants are specified in [mir-ir.md](mir-ir.md); the rewriting passes, the
 order they run in, and the rules deciding where a pass belongs are in

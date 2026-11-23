@@ -9,6 +9,7 @@ pub mod expr;
 mod ground_bounds;
 mod selection;
 pub(crate) mod signature;
+pub(crate) mod speculation;
 pub mod substitution;
 pub mod tables;
 mod type_bounds;

@@ -837,7 +837,7 @@ impl ast::PType {
         modules_used: &mut FxHashSet<ModuleId>,
     ) -> Result<Type, InternalCompilationError> {
         use ast::PType::*;
-        Ok(match self {
+        let ty = match self {
             Never => Type::never(),
             Unit => Type::unit(),
             Resolved(ty) => *ty,
@@ -1018,7 +1018,13 @@ impl ast::PType {
                 generic_eff_params,
                 modules_used,
             )?),
-        })
+        };
+        // Each node is built from checked children, so the first node to exceed a limit is
+        // the one reported, at its span; an alias is the type it stands for.
+        ty.check_limits().map_err(|error| {
+            InternalCompilationError::type_limit_exceeded(error).locate_limit(span)
+        })?;
+        Ok(ty)
     }
 }
 

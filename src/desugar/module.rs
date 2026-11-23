@@ -756,6 +756,7 @@ fn desugar_recursive_aliases_in_scc(
 ) -> Result<Vec<DesugaredTypeAlias>, InternalCompilationError> {
     let mut root_tys = Vec::with_capacity(alias_refs.len());
     let mut root_entries = Vec::with_capacity(alias_refs.len());
+    let mut root_spans = Vec::with_capacity(alias_refs.len());
     let mut builder =
         RecursiveTypeBuilder::new(alias_refs.len(), env, modules_used, alias_refs, type_defs);
     for &index in scc {
@@ -781,8 +782,16 @@ fn desugar_recursive_aliases_in_scc(
             alias.generic_params.type_params().to_vec(),
             alias.doc.clone(),
         ));
+        root_spans.push(alias.ty.1);
     }
     let root_tys = builder.finish(&root_tys);
+    // The group's types are measured once interned together, so each alias is checked here, at
+    // its definition.
+    for (ty, span) in root_tys.iter().zip(root_spans) {
+        ty.check_limits().map_err(|error| {
+            InternalCompilationError::type_limit_exceeded(error).locate_limit(span)
+        })?;
+    }
     Ok(root_entries
         .into_iter()
         .zip(root_tys)
@@ -1439,6 +1448,9 @@ impl ast::TraitMethod {
         )?;
         let effects = desugar_fn_effects(&self.effects, Some(generic_eff_params))?;
         let fn_ty = FnType::new(args, ret, effects);
+        fn_ty.check_limits().map_err(|error| {
+            InternalCompilationError::type_limit_exceeded(error).locate_limit(self.span)
+        })?;
         Ok((
             self.name.0,
             CallableDefinition::new(

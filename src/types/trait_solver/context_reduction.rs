@@ -348,12 +348,15 @@ impl EvidencePlan {
         }
     }
 
-    pub(crate) fn substitute(&mut self, inference: &mut UnifiedTypeInference) {
+    pub(crate) fn substitute(
+        &mut self,
+        inference: &mut UnifiedTypeInference,
+    ) -> Result<(), InternalCompilationError> {
         for node in &mut self.nodes {
-            node.constraint = inference.substitute_in_constraint(&node.constraint);
+            node.constraint = inference.substitute_in_constraint(&node.constraint)?;
             if let EvidencePlanSource::Selected { application, .. } = &mut node.source {
                 for ty in application.substitution.0.values_mut() {
-                    *ty = inference.substitute_in_type(*ty);
+                    *ty = inference.substitute_in_type(*ty)?;
                 }
                 for eff in application.substitution.1.values_mut() {
                     *eff = inference.substitute_in_effect_type(eff);
@@ -361,10 +364,11 @@ impl EvidencePlan {
             }
         }
         for field_use in &mut self.field_uses {
-            inference.substitute_in_subscript_type_in_place(&mut field_use.required);
-            inference.substitute_in_types_in_place(&mut field_use.ty_args);
+            inference.substitute_in_subscript_type_in_place(&mut field_use.required)?;
+            inference.substitute_in_types_in_place(&mut field_use.ty_args)?;
             inference.substitute_in_effect_types_in_place(&mut field_use.eff_args);
         }
+        Ok(())
     }
 
     /// Replace the reduction that the plan holds with `reduced`, keeping the uses of declared
@@ -451,8 +455,8 @@ pub(crate) fn is_written_leaf(
     written: &[PubTypeConstraint],
     value_trait: TraitId,
     inference: &mut UnifiedTypeInference,
-) -> bool {
-    match constraint {
+) -> Result<bool, InternalCompilationError> {
+    Ok(match constraint {
         PubTypeConstraint::HaveTrait {
             trait_id,
             input_tys,
@@ -460,16 +464,20 @@ pub(crate) fn is_written_leaf(
         } => {
             // Effects select no implementation, so they do not tell requirements apart.
             let erased = |tys: &[Type]| instantiate_types(tys, &mut EffectErasingMapper);
-            let inputs = erased(&inference.substitute_in_types(input_tys));
+            let inputs = erased(&inference.substitute_in_types(input_tys)?);
             // `Value` of a type variable is implicit: it need not be written.
             if *trait_id == value_trait && inputs[0].data().is_variable() {
-                return true;
+                return Ok(true);
             }
-            written.iter().any(|written| {
-                matches!(inference.substitute_in_constraint(written),
+            for written in written {
+                if matches!(inference.substitute_in_constraint(written)?,
                     PubTypeConstraint::HaveTrait { trait_id: id, input_tys, .. }
                     if id == *trait_id && erased(&input_tys) == inputs)
-            })
+                {
+                    return Ok(true);
+                }
+            }
+            false
         }
         // It is the `Value` of its payload, which is reduced as such.
         PubTypeConstraint::VariantPayloadLayout { .. } => false,
@@ -479,7 +487,7 @@ pub(crate) fn is_written_leaf(
         | PubTypeConstraint::ProjectionSubscriptIs { .. }
         | PubTypeConstraint::TypeHasVariant { .. }
         | PubTypeConstraint::VariantPayloadStorage { .. } => true,
-    }
+    })
 }
 
 fn is_ground_trait_requirement(constraint: &PubTypeConstraint) -> bool {
@@ -503,12 +511,9 @@ fn reduction_rigid_types(
     constraints: &[PubTypeConstraint],
     protected: &[Type],
     inference: &mut UnifiedTypeInference,
-) -> Vec<Type> {
-    let constraints = constraints
-        .iter()
-        .map(|constraint| inference.substitute_in_constraint(constraint))
-        .collect::<Vec<_>>();
-    let mut rigid = collect_ty_vars(&inference.substitute_in_types(protected))
+) -> Result<Vec<Type>, InternalCompilationError> {
+    let constraints = inference.substitute_in_constraints(constraints)?;
+    let mut rigid = collect_ty_vars(&inference.substitute_in_types(protected)?)
         .into_iter()
         .collect::<FxHashSet<_>>();
     let variables = constraints.inner_ty_vars();
@@ -550,7 +555,7 @@ fn reduction_rigid_types(
             .into_iter()
             .filter(|var| !determined.contains(var)),
     );
-    rigid.into_iter().sorted().map(Type::variable).collect()
+    Ok(rigid.into_iter().sorted().map(Type::variable).collect())
 }
 
 impl TraitSolver<'_> {
@@ -954,9 +959,9 @@ impl TraitSolver<'_> {
         constraint: &PubTypeConstraint,
         leaves: ReductionLeaves<'_>,
         inference: &mut UnifiedTypeInference,
-    ) -> bool {
+    ) -> Result<bool, InternalCompilationError> {
         match leaves {
-            ReductionLeaves::Public => self.requirement_is_public(constraint),
+            ReductionLeaves::Public => Ok(self.requirement_is_public(constraint)),
             ReductionLeaves::Written(written) => is_written_leaf(
                 constraint,
                 written,
@@ -1076,11 +1081,11 @@ impl TraitSolver<'_> {
             return Err(unresolved(constraint));
         };
         let span = constraint.use_site();
-        let inputs = inference.substitute_in_types(input_tys);
+        let inputs = inference.substitute_in_types(input_tys)?;
         if self.impls.pending.blocks(*trait_id, &inputs) {
             return Err(unresolved(constraint));
         }
-        let rigid = collect_ty_vars(&inference.substitute_in_types(rigid_inputs))
+        let rigid = collect_ty_vars(&inference.substitute_in_types(rigid_inputs)?)
             .into_iter()
             .map(Type::variable)
             .collect::<Vec<_>>();
@@ -1096,7 +1101,7 @@ impl TraitSolver<'_> {
         // prerequisites fail, so retain applicability probing in that case.
         let unique_head = candidates.len() == 1 && self.trait_def(*trait_id).derivers.is_empty();
         for candidate in candidates {
-            let snapshot = inference.snapshot();
+            let mut speculation = inference.speculate();
             // Only the head must fit without specializing an enclosing input. A public
             // prerequisite such as `[T]: Read` remains a condition on callers, even if its
             // currently visible impls would narrow T. Private prerequisites are reduced below
@@ -1104,26 +1109,28 @@ impl TraitSolver<'_> {
             let erased_inputs = instantiate_types(&candidate.inputs, &mut EffectErasingMapper);
             let erased_query = instantiate_types(&inputs, &mut EffectErasingMapper);
             let head_substitution = (
-                inference.fresh_type_var_subst(candidate.type_count),
-                inference.fresh_effect_var_subst(candidate.effect_count),
+                speculation.fresh_type_var_subst(candidate.type_count),
+                speculation.fresh_effect_var_subst(candidate.effect_count),
             );
-            let uniform = erased_inputs
-                .iter()
-                .zip(&erased_query)
-                .all(|(head, input)| {
-                    inference
-                        .unify_same_type_with_sub_effects(
-                            head.instantiate_simple(&head_substitution),
-                            span,
-                            *input,
-                            span,
-                        )
-                        .is_ok()
-                })
-                // Selection matches a head against the query; it must not improve the query's
-                // inputs, including fresh outputs supplied by a public prerequisite.
-                && inference.declared_generics_intact(&head_rigid);
-            inference.rollback_to(snapshot);
+            let mut fits = true;
+            for (head, input) in erased_inputs.iter().zip(&erased_query) {
+                let unified = speculation.unify_same_type_with_sub_effects(
+                    head.instantiate_simple(&head_substitution),
+                    span,
+                    *input,
+                    span,
+                );
+                // A compiler limit does not tell that the head does not fit: reduction reports
+                // it as an unresolved requirement.
+                if InternalCompilationError::attempt(unified)?.is_none() {
+                    fits = false;
+                    break;
+                }
+            }
+            // Selection matches a head against the query; it must not improve the query's
+            // inputs, including fresh outputs supplied by a public prerequisite.
+            let uniform = fits && speculation.declared_generics_intact(&head_rigid)?;
+            drop(speculation);
             // A unique, uniformly matching head needs no speculative prerequisite
             // search: reduction checks its obligations below, in the same work
             // budget as the parent. Re-probing them here repeats a whole nested
@@ -1132,7 +1139,7 @@ impl TraitSolver<'_> {
                 selected = Some(candidate);
                 break;
             }
-            let snapshot = inference.snapshot();
+            let mut speculation = inference.speculate();
             let mut probe = TraitSolverProbe::from_solver(self);
             let structural_candidate = TraitImprovementCandidate::Blanket {
                 input_tys: candidate.inputs.clone(),
@@ -1144,16 +1151,15 @@ impl TraitSolver<'_> {
             };
             let possible = Self::improvement_candidate_applies_by_structure(
                 &mut probe,
-                inference,
+                &mut speculation,
                 &structural_candidate,
                 &inputs,
                 None,
                 ConstraintAssumptions::all(&[]),
                 span,
                 &mut NodeArena::default(),
-            );
-            inference.rollback_to(snapshot);
-            let possible = possible?;
+            )?;
+            drop(speculation);
             if possible {
                 if !uniform || selected.is_some() {
                     return Ok(UniformSelection::Deferred);
@@ -1254,11 +1260,11 @@ impl TraitSolver<'_> {
             let origin = self.output_effect_origin(*trait_id, index, span);
             inference.relate_trait_output_effect(&head, output, polarity, span, origin)?;
         }
-        if !inference.declared_generics_intact(&rigid) {
+        if !inference.declared_generics_intact(&rigid)? {
             return Err(unresolved(constraint));
         }
         for ty in substitution.0.values_mut() {
-            *ty = inference.substitute_in_type(*ty);
+            *ty = inference.substitute_in_type(*ty)?;
         }
         for eff in substitution.1.values_mut() {
             *eff = inference.substitute_in_effect_type(eff);
@@ -1342,18 +1348,20 @@ impl TraitSolver<'_> {
                 evidence: EvidencePlan::default(),
             });
         }
-        let Some(original) = constraints
-            .iter()
-            .find(|c| !self.is_reduction_leaf(c, leaves, inference))
-            .or(constraints.first())
-            .cloned()
-        else {
+        let mut first_not_leaf = None;
+        for c in &constraints {
+            if !self.is_reduction_leaf(c, leaves, inference)? {
+                first_not_leaf = Some(c);
+                break;
+            }
+        }
+        let Some(original) = first_not_leaf.or(constraints.first()).cloned() else {
             return Ok(ReducedRequirements {
                 requirements: constraints,
                 evidence: EvidencePlan::default(),
             });
         };
-        let rigid = reduction_rigid_types(&constraints, rigid_inputs, inference);
+        let rigid = reduction_rigid_types(&constraints, rigid_inputs, inference)?;
         let declared = inference.field_uses().len();
         let mut evidence = EvidencePlan::default();
         for constraint in constraints {
@@ -1367,15 +1375,26 @@ impl TraitSolver<'_> {
             let mut progress = false;
             while let Some(id) = pending.pop() {
                 let start = evidence.nodes.len();
-                if self.reduce_evidence_node(
-                    id,
-                    &rigid,
-                    leaves,
-                    inference,
-                    arena,
-                    &mut work,
-                    &mut evidence,
-                )? {
+                if self
+                    .reduce_evidence_node(
+                        id,
+                        &rigid,
+                        leaves,
+                        inference,
+                        arena,
+                        &mut work,
+                        &mut evidence,
+                    )
+                    // Evidence that would need types too large to build is not found, as when the
+                    // work runs out: ever larger prerequisites are a chain that does not end.
+                    .map_err(|error| {
+                        if error.is_compiler_limit() {
+                            unresolved(&evidence.nodes[id].constraint)
+                        } else {
+                            error
+                        }
+                    })?
+                {
                     progress = true;
                     pending.extend((start..evidence.nodes.len()).rev());
                 } else {
@@ -1387,32 +1406,28 @@ impl TraitSolver<'_> {
                 .iter()
                 .filter(|node| matches!(node.source, EvidencePlanSource::Public))
                 .map(|node| inference.substitute_in_constraint(&node.constraint))
-                .collect::<Vec<_>>();
+                .collect::<Result<Vec<_>, _>>()?;
             // A requirement that a complete clause leaves to the callers has the outputs of the
             // written or implied one that it matches.
             if let ReductionLeaves::Written(written) = leaves {
                 let mut with_written = kept.clone();
-                with_written.extend(
-                    written
-                        .iter()
-                        .map(|c| inference.substitute_in_constraint(c)),
-                );
+                with_written.extend(inference.substitute_in_constraints(written)?);
                 inference.coalesce_constraint_outputs(&mut with_written, &|id| {
                     self.output_effect_polarities(id)
                 })?;
             }
             inference
                 .coalesce_constraint_outputs(&mut kept, &|id| self.output_effect_polarities(id))?;
-            if !inference.declared_generics_intact(&rigid) {
+            if !inference.declared_generics_intact(&rigid)? {
                 return Err(unresolved(&original));
             }
-            evidence.substitute(inference);
+            evidence.substitute(inference)?;
             // An output equality may expose a private type in a formerly public leaf, or the
             // head of a type that then answers the leaf. Reduce
             // that same node: incoming edges keep their identity, without a graph-wide redirect.
             for (id, node) in evidence.nodes.iter_mut().enumerate() {
                 if matches!(node.source, EvidencePlanSource::Public)
-                    && (!self.is_reduction_leaf(&node.constraint, leaves, inference)
+                    && (!self.is_reduction_leaf(&node.constraint, leaves, inference)?
                         || is_ground_trait_requirement(&node.constraint)
                         || self.type_answers(&node.constraint)?)
                 {
@@ -1424,7 +1439,7 @@ impl TraitSolver<'_> {
             if deferred.is_empty() {
                 evidence.check_construction_cycles()?;
                 evidence.field_uses = inference.field_uses()[declared..].to_vec();
-                evidence.substitute(inference);
+                evidence.substitute(inference)?;
                 return Ok(ReducedRequirements {
                     requirements: kept,
                     evidence,
@@ -1470,7 +1485,7 @@ impl TraitSolver<'_> {
             && let Some(DictionaryReq::ProjectionSubscript { subscript_ty, .. }) =
                 constraint.structural_requirement_key()
         {
-            let receiver = inference.substitute_in_type(subscript_ty.receiver_ty());
+            let receiver = inference.substitute_in_type(subscript_ty.receiver_ty())?;
             let value_trait = self.std_trait_id(VALUE_TRAIT_NAME);
             let span = constraint.use_site();
             requirements.extend(
@@ -1514,7 +1529,7 @@ impl TraitSolver<'_> {
             .iter()
             .filter(|node| matches!(node.source, EvidencePlanSource::Pending))
             .map(|node| inference.substitute_in_constraint(&node.constraint))
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
         inference
             .select_least_bounded_types(&waiting, Some(&own))
             .map_err(|_| unresolved(constraint))?;
@@ -1535,11 +1550,11 @@ impl TraitSolver<'_> {
         work: &mut usize,
         evidence: &mut EvidencePlan,
     ) -> Result<bool, InternalCompilationError> {
-        let mut constraint = inference.substitute_in_constraint(&evidence.nodes[id].constraint);
+        let mut constraint = inference.substitute_in_constraint(&evidence.nodes[id].constraint)?;
         // What a type whose head is known answers is not a requirement to publish, whatever
         // the names in it.
         let by_type = self.type_answers(&constraint)?;
-        if !by_type && self.is_reduction_leaf(&constraint, leaves, inference) {
+        if !by_type && self.is_reduction_leaf(&constraint, leaves, inference)? {
             evidence.nodes[id].constraint = constraint.clone();
             evidence.nodes[id].source = if is_ground_trait_requirement(&constraint) {
                 let PubTypeConstraint::HaveTrait {
@@ -1588,7 +1603,7 @@ impl TraitSolver<'_> {
                 evidence.nodes[parent].source,
                 EvidencePlanSource::GeneratedValue { .. }
             );
-            if inference.substitute_in_constraint(&evidence.nodes[parent].constraint) == constraint
+            if inference.substitute_in_constraint(&evidence.nodes[parent].constraint)? == constraint
             {
                 if generated {
                     evidence.nodes[id].source =
@@ -1778,11 +1793,11 @@ mod tests {
         let constraints = [dependency(vars[1], vars[2]), dependency(vars[0], vars[1])];
         let mut inference = UnifiedTypeInference::new_with_ty_vars(3);
         assert_eq!(
-            reduction_rigid_types(&constraints, &[], &mut inference),
+            reduction_rigid_types(&constraints, &[], &mut inference).unwrap(),
             vec![vars[0]]
         );
         assert_eq!(
-            reduction_rigid_types(&constraints, &[vars[2]], &mut inference),
+            reduction_rigid_types(&constraints, &[vars[2]], &mut inference).unwrap(),
             vec![vars[0], vars[2]],
         );
     }
@@ -1794,11 +1809,11 @@ mod tests {
         let constraints = [dependency(a, b), dependency(b, a)];
         let mut inference = UnifiedTypeInference::new_with_ty_vars(2);
         assert_eq!(
-            reduction_rigid_types(&constraints, &[], &mut inference),
+            reduction_rigid_types(&constraints, &[], &mut inference).unwrap(),
             vec![a, b]
         );
         assert_eq!(
-            reduction_rigid_types(&constraints, &[a], &mut inference),
+            reduction_rigid_types(&constraints, &[a], &mut inference).unwrap(),
             vec![a]
         );
     }

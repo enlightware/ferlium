@@ -18,6 +18,7 @@ use dyn_clone::DynClone;
 use dyn_eq::DynEq;
 use enum_as_inner::EnumAsInner;
 use indexmap::IndexSet;
+use itertools::Itertools;
 use nonmax::NonMaxU32;
 use rustc_hash::FxBuildHasher;
 use ustr::{Ustr, ustr};
@@ -597,6 +598,14 @@ impl FnType {
         Self { args, ret, effects }
     }
 
+    /// Check the type of a function of this signature against `TYPE_HEIGHT_LIMIT` and
+    /// `TYPE_SIZE_LIMIT`: its arguments may each be within the limits, but not all together.
+    pub fn check_limits(&self) -> Result<(), TypeLimitExceeded> {
+        check_signature_limits(self.args.iter().map(|arg| arg.ty).chain([self.ret]), || {
+            Type::function_type(self.clone())
+        })
+    }
+
     /// The effect variables occurring only in effects that a value of this type performs,
     /// never in effects it receives or in invariant positions. Nothing can observe more of such
     /// a variable than its least solution.
@@ -710,6 +719,14 @@ pub struct SubscriptType {
 }
 
 impl SubscriptType {
+    /// Check the type of a subscript of this signature against `TYPE_HEIGHT_LIMIT` and
+    /// `TYPE_SIZE_LIMIT`, as `FnType::check_limits` does.
+    pub fn check_limits(&self) -> Result<(), TypeLimitExceeded> {
+        check_signature_limits(self.args.iter().map(|arg| arg.ty).chain([self.ret]), || {
+            Type::subscript_type(self.clone())
+        })
+    }
+
     pub(crate) fn members(&self) -> impl Iterator<Item = &SubscriptMemberType> {
         self.ref_member.iter().chain(self.mut_member.iter())
     }
@@ -792,6 +809,14 @@ impl TypeLike for FnType {
         }
     }
 
+    fn inner_ty_vars(&self) -> Vec<TypeVar> {
+        signature_ty_vars(&self.args, self.ret)
+    }
+
+    fn inner_mut_ty_vars(&self) -> Vec<MutVar> {
+        signature_mut_vars(&self.args, self.ret)
+    }
+
     fn fill_with_input_effect_vars(&self, vars: &mut FxHashSet<EffectVar>) {
         for arg in &self.args {
             arg.ty.fill_with_inner_effect_vars(vars);
@@ -802,6 +827,30 @@ impl TypeLike for FnType {
     fn fill_with_output_effect_vars(&self, vars: &mut FxHashSet<EffectVar>) {
         self.effects.fill_with_inner_effect_vars(vars);
     }
+}
+
+/// The type variables of a signature of `args` and `ret`, in order, from the cached summaries of
+/// their types. A walk would go through a member of a recursive type once per path to it, and
+/// these paths can be exponentially many.
+fn signature_ty_vars(args: &[FnArgType], ret: Type) -> Vec<TypeVar> {
+    args.iter()
+        .map(|arg| arg.ty)
+        .chain([ret])
+        .flat_map(|ty| ty.inner_ty_vars())
+        .unique()
+        .collect()
+}
+
+/// The mutability variables of a signature of `args` and `ret`, as `signature_ty_vars`.
+fn signature_mut_vars(args: &[FnArgType], ret: Type) -> Vec<MutVar> {
+    args.iter()
+        .flat_map(|arg| {
+            let own = arg.mut_ty.as_variable().copied();
+            own.into_iter().chain(arg.ty.inner_mut_ty_vars())
+        })
+        .chain(ret.inner_mut_ty_vars())
+        .unique()
+        .collect()
 }
 
 impl TypeLike for SubscriptType {
@@ -836,6 +885,14 @@ impl TypeLike for SubscriptType {
                 result_convention: member.result_convention,
             }),
         }
+    }
+
+    fn inner_ty_vars(&self) -> Vec<TypeVar> {
+        signature_ty_vars(&self.args, self.ret)
+    }
+
+    fn inner_mut_ty_vars(&self) -> Vec<MutVar> {
+        signature_mut_vars(&self.args, self.ret)
     }
 
     fn fill_with_input_effect_vars(&self, vars: &mut FxHashSet<EffectVar>) {
@@ -1355,6 +1412,18 @@ impl Type {
         TypeSummaryRef { ty: self, guard }
     }
 
+    /// The height and size of this interned type, see `TypeSummary`.
+    pub fn metrics(self) -> (u32, u32) {
+        let summary = self.summary();
+        (summary.height, summary.size)
+    }
+
+    /// Check this interned type against `TYPE_HEIGHT_LIMIT` and `TYPE_SIZE_LIMIT`.
+    pub fn check_limits(self) -> Result<(), TypeLimitExceeded> {
+        let (height, size) = self.metrics();
+        TypeLimitExceeded::check(height, size)
+    }
+
     /// Whether this type's shape is known enough for trait impl selection.
     ///
     /// Effect variables do not make the selected impl ambiguous: once the type
@@ -1442,6 +1511,10 @@ impl TypeLike for Type {
 
     fn input_effect_vars(&self) -> FxHashSet<EffectVar> {
         self.summary().free_eff_vars.iter().collect()
+    }
+
+    fn fill_with_input_effect_vars(&self, vars: &mut FxHashSet<EffectVar>) {
+        vars.extend(self.summary().free_eff_vars.iter());
     }
 
     fn inner_effect_vars(&self) -> FxHashSet<EffectVar> {
@@ -2910,13 +2983,83 @@ impl graph::Node for TypeKind {
 /// Positions follow insertion order, so the hasher never affects which index a type receives.
 type TypeWorld = IndexSet<InternedType, FxBuildHasher>;
 
-/// Cached set of free variables of an interned type, used to short-circuit  substitutions that cannot affect the type.
+/// Cached facts about an interned type: its free variables, used to short-circuit substitutions
+/// that cannot affect the type, and its height and size, used to bound the types the compiler builds.
 /// Computed once per interned type at insertion time and stored alongside its `TypeKind` in `InternedType`.
 #[derive(Debug, Clone, Default)]
 pub struct TypeSummary {
     pub free_ty_vars: KindVarSet<TypeVar>,
     pub free_mut_vars: KindVarSet<MutVar>,
     pub free_eff_vars: KindVarSet<EffectVar>,
+    /// The number of nodes on the longest path from this type to a leaf.
+    /// For a member of a recursive world, the height of the world: its number of members plus
+    /// the largest height of a child outside the world, which bounds any path that does not
+    /// revisit a member.
+    pub height: u32,
+    /// The number of nodes of the type, counting a repeated child at each occurrence, saturating.
+    /// For a member of a recursive world, the size of the world unrolled once: over its members,
+    /// one per member and, per child occurrence, the size of a child outside the world, or one
+    /// for a child inside.
+    pub size: u32,
+}
+
+/// The largest height of a type that the compiler builds, see `TypeSummary::height`.
+/// It bounds the stack used by recursive walks over types, as `NESTING_LIMIT` bounds the
+/// stack used by walks over source.
+pub const TYPE_HEIGHT_LIMIT: u32 = 128;
+
+/// The largest size of a type that the compiler builds, see `TypeSummary::size`.
+/// For an acyclic type, it bounds the work of walks that do not share repeated children. For a
+/// recursive type, which it measures with each member once, it bounds only walks that process
+/// each member once.
+pub const TYPE_SIZE_LIMIT: u32 = 4096;
+
+/// A type would exceed one of the limits on the types that the compiler builds, with the value
+/// it would reach, or at least reach when the builder stopped early. It has no span: the caller that
+/// owns the source span turns it into a located compilation error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TypeLimitExceeded {
+    /// The height would exceed `TYPE_HEIGHT_LIMIT`.
+    Height(u32),
+    /// The size would exceed `TYPE_SIZE_LIMIT`.
+    Size(u32),
+}
+
+/// Check an acyclic node with interned `children` against `TYPE_HEIGHT_LIMIT` and
+/// `TYPE_SIZE_LIMIT`, as interning would measure it.
+fn check_node_limits(children: impl IntoIterator<Item = Type>) -> Result<(), TypeLimitExceeded> {
+    let (height, size) = children
+        .into_iter()
+        .fold((0, 1u32), |(height, size), child| {
+            let (child_height, child_size) = child.metrics();
+            (height.max(child_height), size.saturating_add(child_size))
+        });
+    TypeLimitExceeded::check(height + 1, size)
+}
+
+/// Check a function or subscript type of `children` against `TYPE_HEIGHT_LIMIT` and
+/// `TYPE_SIZE_LIMIT`, interning it with `intern` only if the children exceed the limits. They
+/// measure it exactly unless it is a member of a recursive world, as `(R) -> R` is in
+/// `type R = Step((R) -> R) | End`: they then count the world at each child, whereas interning
+/// finds the member and measures the world once.
+fn check_signature_limits(
+    children: impl IntoIterator<Item = Type>,
+    intern: impl FnOnce() -> Type,
+) -> Result<(), TypeLimitExceeded> {
+    check_node_limits(children).or_else(|_| intern().check_limits())
+}
+
+impl TypeLimitExceeded {
+    /// Check a height and a size against the limits.
+    pub fn check(height: u32, size: u32) -> Result<(), Self> {
+        if height > TYPE_HEIGHT_LIMIT {
+            Err(Self::Height(height))
+        } else if size > TYPE_SIZE_LIMIT {
+            Err(Self::Size(size))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// An interned type entry: a `TypeKind` paired with its cached free-variable summary.
@@ -3376,7 +3519,36 @@ impl TypeUniverse {
         self.collect_into_summary(kind, &mut summary, &mut visited, |ty| {
             self.get_interned(ty).summary.clone()
         });
+        let mut height = 0;
+        let mut size = 1u32;
+        kind.for_each_inner_type(|child| {
+            let child = self.get_type_summary(child);
+            height = height.max(child.height);
+            size = size.saturating_add(child.size);
+        });
+        summary.height = height.saturating_add(1);
+        summary.size = size;
         summary
+    }
+
+    /// Compute the height and size shared by all members of a recursive world, see `TypeSummary`.
+    fn world_metrics(&self, kinds: &[TypeKind], world_idx: u32) -> (u32, u32) {
+        let mut external_height = 0;
+        let mut size = 0u32;
+        for kind in kinds {
+            size = size.saturating_add(1);
+            kind.for_each_inner_type(|child| {
+                if child.world.map(|w| w.get()) == Some(world_idx) {
+                    size = size.saturating_add(1);
+                } else {
+                    let child = self.get_type_summary(child);
+                    external_height = external_height.max(child.height);
+                    size = size.saturating_add(child.size);
+                }
+            });
+        }
+        let members = u32::try_from(kinds.len()).unwrap_or(u32::MAX);
+        (members.saturating_add(external_height), size)
     }
 
     /// Compute summaries for an SCC of kinds being added as a new world. Local
@@ -3406,6 +3578,11 @@ impl TypeUniverse {
             if !changed {
                 break;
             }
+        }
+        let (height, size) = self.world_metrics(kinds, scc_world_idx);
+        for summary in &mut summaries {
+            summary.height = height;
+            summary.size = size;
         }
         summaries
     }
@@ -3807,7 +3984,7 @@ mod tests {
                 .unify_sub_type(actual, span, expected, span)
                 .unwrap();
             inference.finalize_effects().unwrap();
-            assert_eq!(inference.substitute_in_type(expected), actual);
+            assert_eq!(inference.substitute_in_type(expected).unwrap(), actual);
         }
     }
 
@@ -4017,6 +4194,60 @@ mod tests {
             "[[(string, { age: int, name: string, nick: Option<string> })]]",
             "[[(string, { age: int, name: string, nick: Option<string> })]]",
         );
+    }
+
+    #[test]
+    fn metrics_count_repeated_children() {
+        let int = int_type();
+        assert_eq!(int.metrics(), (1, 1));
+        let pair = Type::tuple(vec![int, int]);
+        assert_eq!(pair.metrics(), (2, 3));
+        let pair_of_pairs = Type::tuple(vec![pair, pair]);
+        assert_eq!(pair_of_pairs.metrics(), (3, 7));
+        let mixed = Type::tuple(vec![int, pair_of_pairs, pair]);
+        assert_eq!(mixed.metrics(), (4, 1 + 1 + 7 + 3));
+        let mut ty = int;
+        for _ in 0..20 {
+            ty = Type::tuple(vec![ty, ty]);
+        }
+        assert_eq!(ty.metrics(), (21, (1 << 21) - 1));
+        for _ in 0..20 {
+            ty = Type::tuple(vec![ty, ty]);
+        }
+        assert_eq!(ty.metrics(), (41, u32::MAX), "the size saturates");
+    }
+
+    #[test]
+    fn metrics_of_recursive_world() {
+        // `type R = A(R, R) | N`: a world of the variant and of its payload tuple.
+        let unit = Type::unit();
+        let variant = TypeKind::Variant(vec![(ustr("A"), Type::new_local(1)), (ustr("N"), unit)]);
+        let payload = TypeKind::Tuple(vec![Type::new_local(0), Type::new_local(0)]);
+        let stored = store_types(&[variant, payload]);
+        assert!(stored.iter().all(|ty| ty.is_global_recursive()));
+        // Two members, plus the height of `()`; one per member, one per internal occurrence
+        // (three) and the size of `()`.
+        for ty in &stored {
+            assert_eq!(ty.metrics(), (2 + 1, 2 + 3 + 1));
+        }
+
+        // An acyclic parent uses the metrics of a world member like those of any child.
+        // `(R, R)` would be the payload itself, so use three occurrences.
+        let parent = Type::tuple(vec![stored[0], stored[0], stored[0]]);
+        assert!(!parent.is_global_recursive());
+        assert_eq!(parent.metrics(), (4, 1 + 3 * 6));
+
+        // A world whose members have children outside the world.
+        let pair = Type::tuple(vec![unit, unit]);
+        let list = TypeKind::Variant(vec![
+            (ustr("Cons"), Type::new_local(1)),
+            (ustr("Nil"), pair),
+        ]);
+        let cons = TypeKind::Tuple(vec![pair, Type::new_local(0)]);
+        let stored = store_types(&[list, cons]);
+        for ty in &stored {
+            assert_eq!(ty.metrics(), (2 + 2, 2 + 1 + 3 + 3 + 1));
+        }
     }
 
     #[test]

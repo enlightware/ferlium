@@ -609,16 +609,17 @@ pub(super) fn substitute_and_canonicalize_functions(
     associated_lambdas: &FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
     local_fns: &[LocalFunctionId],
     ty_inf: &mut UnifiedTypeInference,
-) {
+) -> Result<(), InternalCompilationError> {
     for id in local_fns.iter() {
         for function_id in function_and_associated_lambdas(id, associated_lambdas) {
             let descr = pending_functions
                 .get_mut(&function_id)
                 .expect("expected pending function body");
-            ty_inf.substitute_in_pending_module_function(descr);
+            ty_inf.substitute_in_pending_module_function(descr)?;
             output.functions[function_id.as_index()].definition = descr.definition.clone();
         }
     }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1582,7 +1583,7 @@ pub(super) fn default_unconstrained_types_to_never<'a>(
     module_env: ModuleEnv<'_>,
 ) -> Result<(), InternalCompilationError> {
     // The instance of a use of a declared field is held beside the bodies.
-    let field_use_vars = ty_inf.field_use_ty_vars();
+    let field_use_vars = ty_inf.field_use_ty_vars()?;
     ty_inf.default_unconstrained_to_never(
         hir::all_unbound_ty_vars(bodies)
             .into_iter()

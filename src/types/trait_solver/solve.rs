@@ -139,15 +139,16 @@ impl<'a> TraitSolver<'a> {
     }
 
     /// Whether an implementation applies to these inputs by structure, with effects ignored,
-    /// as selection sees them, without keeping what solving generates.
+    /// as selection sees them, without keeping what solving generates. A compiler limit does not
+    /// tell that none applies, so it is an error.
     pub(crate) fn has_impl_by_structure(
         &mut self,
         trait_id: TraitId,
         input_tys: &[Type],
         fn_span: Location,
-    ) -> bool {
-        self.solve_outputs_by_structure_query(trait_id, input_tys, fn_span)
-            .is_ok()
+    ) -> Result<bool, InternalCompilationError> {
+        let solved = self.solve_outputs_by_structure_query(trait_id, input_tys, fn_span);
+        Ok(InternalCompilationError::attempt(solved)?.is_some())
     }
 
     /// Get a concrete trait implementation by its key, without performing any solving.
@@ -335,7 +336,7 @@ impl<'a> TraitSolver<'a> {
             requested_output_effs,
             &quantified_effect_vars,
             fn_span,
-        ) {
+        )? {
             return Ok(impl_id);
         }
         let selection = match self.planned_selection(
@@ -424,7 +425,7 @@ impl<'a> TraitSolver<'a> {
         requested_output_effs: Option<&[EffType]>,
         quantified_effect_vars: &FxHashSet<EffectVar>,
         fn_span: Location,
-    ) -> Option<TraitImplId> {
+    ) -> Result<Option<TraitImplId>, InternalCompilationError> {
         let concrete_key = ConcreteTraitImplKey::new(trait_id, input_tys.to_vec());
         if let Some(imp) = self.get_concrete_impl(&concrete_key)
             && self.impl_matches_requested_outputs(
@@ -433,9 +434,9 @@ impl<'a> TraitSolver<'a> {
                 requested_output_effs,
                 quantified_effect_vars,
                 fn_span,
-            )
+            )?
         {
-            return Some(imp);
+            return Ok(Some(imp));
         }
         let canonical_key = application_key(
             trait_id,
@@ -450,10 +451,10 @@ impl<'a> TraitSolver<'a> {
             .copied()
             && self.generated_impl_is_visible(local_impl_id)
         {
-            return Some(TraitImplId::new(
+            return Ok(Some(TraitImplId::new(
                 self.current_type_items.module.id,
                 local_impl_id,
-            ));
+            )));
         }
         // The application its inputs determine serves a request naming outputs it has.
         if requested_output_tys.is_some() || requested_output_effs.is_some() {
@@ -466,15 +467,15 @@ impl<'a> TraitSolver<'a> {
                     requested_output_effs,
                     quantified_effect_vars,
                     fn_span,
-                )
+                )?
             {
-                return Some(TraitImplId::new(
+                return Ok(Some(TraitImplId::new(
                     self.current_type_items.module.id,
                     local_impl_id,
-                ));
+                )));
             }
         }
-        None
+        Ok(None)
     }
 
     /// Select what serves an application, without building anything; see [`Selection`].
@@ -618,7 +619,7 @@ impl<'a> TraitSolver<'a> {
             requested_output_effs,
             quantified_effect_vars,
             fn_span,
-        ) {
+        )? {
             return Ok(Rc::new(self.selection_of_impl(impl_id)));
         }
 
@@ -847,7 +848,7 @@ impl<'a> TraitSolver<'a> {
                 requested_output_effs,
                 quantified_effect_vars,
                 fn_span,
-            ) {
+            )? {
                 return Ok(self.selection_of_impl(imp));
             }
             // The inputs select this impl: outputs differing only in effects are not a reason to
@@ -994,7 +995,7 @@ impl<'a> TraitSolver<'a> {
         let input_tys = Self::derivation_input_tys(input_tys);
         // A written impl whose head matches the application serves it alone: if its prerequisites
         // fail, that is an error, never a reason to derive another impl.
-        if !derivers.is_empty() && self.written_head_matches(trait_id, &input_tys) {
+        if !derivers.is_empty() && self.written_head_matches(trait_id, &input_tys)? {
             return Ok(None);
         }
         // An impl derived at inputs without effects serves them with effects.
@@ -1023,20 +1024,23 @@ impl<'a> TraitSolver<'a> {
     /// Whether the head of a written impl of the trait that is visible here matches the
     /// application, whatever its prerequisites. Effects never select an impl, so the heads are
     /// compared without them.
-    fn written_head_matches(&self, trait_id: TraitId, input_tys: &[Type]) -> bool {
+    fn written_head_matches(
+        &self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+    ) -> Result<bool, InternalCompilationError> {
         let span = Location::new_synthesized();
         let input_tys = instantiate_types(input_tys, &mut EffectErasingMapper);
         let input_tys = input_tys.as_slice();
-        visible_blanket_impls(
+        for (module, blankets) in visible_blanket_impls(
             &self.impls.blanket_key_to_id,
             self.others,
             self.current_type_items.environment,
             trait_id,
-        )
-        .any(|(module, blankets)| {
-            blankets.iter().any(|(sub_key, impl_id)| {
+        ) {
+            for (sub_key, impl_id) in blankets.iter() {
                 if !input_heads_may_match(&sub_key.input_tys, input_tys) {
-                    return false;
+                    continue;
                 }
                 if let Some(module_id) = module {
                     let imp = &self
@@ -1047,7 +1051,7 @@ impl<'a> TraitSolver<'a> {
                         .impls
                         .data[impl_id.as_index()];
                     if !self.can_use_other_impl(module_id, imp) {
-                        return false;
+                        continue;
                     }
                 }
                 let mut ty_inf = UnifiedTypeInference::new_with_ty_vars(
@@ -1062,16 +1066,25 @@ impl<'a> TraitSolver<'a> {
                 );
                 let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
                 let heads = instantiate_types(&sub_key.input_tys, &mut mapper);
-                instantiate_types(&heads, &mut EffectErasingMapper)
+                let mut matches = true;
+                for (head, input_ty) in instantiate_types(&heads, &mut EffectErasingMapper)
                     .iter()
                     .zip(input_tys)
-                    .all(|(head, input_ty)| {
-                        ty_inf
-                            .unify_same_type_with_sub_effects(*head, span, *input_ty, span)
-                            .is_ok()
-                    })
-            })
-        })
+                {
+                    let unified =
+                        ty_inf.unify_same_type_with_sub_effects(*head, span, *input_ty, span);
+                    // A compiler limit does not tell that the head does not match.
+                    if InternalCompilationError::attempt(unified)?.is_none() {
+                        matches = false;
+                        break;
+                    }
+                }
+                if matches {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// The inputs that an application is derived at. Derived implementations do not depend on
@@ -1384,25 +1397,27 @@ impl<'a> TraitSolver<'a> {
                     if output_tys.is_empty() && output_effs.is_empty())
             })
             .map(|constraint| constraint.map(&mut mapper))
-            .filter(|constraint| {
-                !ty_inf
-                    .substitute_in_constraint(constraint)
-                    .inner_effect_vars()
-                    .is_empty()
-            })
             .collect::<Vec<_>>();
+        let mut kept_effect_prerequisites = Vec::new();
+        for constraint in effect_prerequisites {
+            if !ty_inf
+                .substitute_in_constraint(&constraint)?
+                .inner_effect_vars()
+                .is_empty()
+            {
+                kept_effect_prerequisites.push(constraint);
+            }
+        }
+        let effect_prerequisites = kept_effect_prerequisites;
         let constraints = constraints
             .into_iter()
             .chain(effect_prerequisites)
             .collect::<Vec<_>>();
         Ok(SymbolicApplication {
             input_tys: imp_input_tys,
-            output_tys: ty_inf.substitute_in_types(&output_tys),
+            output_tys: ty_inf.substitute_in_types(&output_tys)?,
             output_effs: ty_inf.substitute_in_effect_types(&output_effs),
-            obligations: constraints
-                .iter()
-                .map(|constraint| ty_inf.substitute_in_constraint(constraint))
-                .collect(),
+            obligations: ty_inf.substitute_in_constraints(&constraints)?,
             type_var_base,
             effect_var_base,
         })

@@ -1,18 +1,20 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-use std::mem;
-
 use super::{tables::Revision, unify::UnifiedTypeInference};
 use crate::{
     FxHashMap,
+    compiler::error::InternalCompilationError,
     format::FormatWith,
     hir::{self, FnInstData, dictionary::DictionaryReq},
     module::{LocalDecl, LocalStorage, ModuleEnv, PendingModuleFunction},
     types::{
         effects::{EffType, EffectVar, EffectsInstSubst},
         mutability::{MutType, MutVar},
-        r#type::{CallImplType, FnType, SubscriptType, Type, TypeInstSubst, TypeKind, TypeVar},
+        r#type::{
+            CallImplType, FnType, SubscriptType, Type, TypeInstSubst, TypeKind, TypeLimitExceeded,
+            TypeVar,
+        },
         type_scheme::PubTypeConstraint,
         type_substitution::{
             TypeSubstituer, substitute_fn_type, substitute_fn_type_in_place,
@@ -24,6 +26,13 @@ use crate::{
 
 /// Instantiation substitution that maps type and effect variables to actual types and effects.
 pub type InstSubst = (TypeInstSubst, EffectsInstSubst);
+
+type Result<T> = std::result::Result<T, InternalCompilationError>;
+
+/// A type that substitution would make too large, as an error without a span yet.
+fn too_large(error: TypeLimitExceeded) -> InternalCompilationError {
+    InternalCompilationError::type_limit_exceeded(error)
+}
 
 impl UnifiedTypeInference {
     fn constraint_normalization_revision(&self) -> (Revision, Revision, Revision, Revision) {
@@ -38,17 +47,21 @@ impl UnifiedTypeInference {
     /// Substitute and deduplicate only when equalities, effect substitution or
     /// the constraint vector changed. Revisions are invalidation tokens, not
     /// evidence of semantic progress for defaulting.
-    pub fn normalize_remaining_constraints(&mut self) {
+    pub fn normalize_remaining_constraints(&mut self) -> Result<()> {
         if self.constraints_normalized_at == Some(self.constraint_normalization_revision()) {
             self.selection_stats.skipped_constraint_normalizations += 1;
-            return;
+            return Ok(());
         }
         self.selection_stats.performed_constraint_normalizations += 1;
-        let mut constraints = mem::take(&mut *self.remaining_ty_constraints);
-        self.substitute_in_constraints_in_place(&mut constraints);
-        self.deduplicate_constraints_in_place(&mut constraints);
-        *self.remaining_ty_constraints = constraints;
+        let mut constraints = self.remaining_ty_constraints.take();
+        let result = self.substitute_in_constraints_in_place(&mut constraints);
+        if result.is_ok() {
+            self.deduplicate_constraints_in_place(&mut constraints);
+        }
+        self.remaining_ty_constraints.replace(constraints);
+        result?;
         self.constraints_normalized_at = Some(self.constraint_normalization_revision());
+        Ok(())
     }
 
     /// Borrow the remaining constraints. Call `normalize_remaining_constraints`
@@ -58,71 +71,87 @@ impl UnifiedTypeInference {
     }
 
     pub(crate) fn replace_remaining_constraints(&mut self, constraints: Vec<PubTypeConstraint>) {
-        *self.remaining_ty_constraints = constraints;
+        self.remaining_ty_constraints.replace(constraints);
     }
 
     /// Extract the remaining constraints from self.
     pub fn take_constraints(&mut self) -> Vec<PubTypeConstraint> {
-        let mut constraints = mem::take(&mut *self.remaining_ty_constraints);
+        let mut constraints = self.remaining_ty_constraints.take();
         for constraint in &mut constraints {
             constraint.set_origin(Default::default());
         }
         constraints
     }
 
-    pub(super) fn normalize_type(&mut self, ty: Type) -> Type {
-        substitute_type(ty, &mut NormalizeTypes(self))
+    pub(super) fn normalize_type(&mut self, ty: Type) -> Result<Type> {
+        substitute_type(ty, &mut NormalizeTypes(self)).map_err(too_large)
     }
 
-    pub(super) fn normalize_types(&mut self, tys: &[Type]) -> Vec<Type> {
-        substitute_types(tys, &mut NormalizeTypes(self))
+    pub(super) fn normalize_types(&mut self, tys: &[Type]) -> Result<Vec<Type>> {
+        substitute_types(tys, &mut NormalizeTypes(self)).map_err(too_large)
     }
 
-    pub(super) fn normalize_types_in_place(&mut self, tys: &mut [Type]) {
-        substitute_types_in_place(tys, &mut NormalizeTypes(self));
+    pub(super) fn normalize_types_in_place(&mut self, tys: &mut [Type]) -> Result<()> {
+        substitute_types_in_place(tys, &mut NormalizeTypes(self)).map_err(too_large)
     }
 
     pub(super) fn normalize_mut_type(&mut self, mut_ty: MutType) -> MutType {
         NormalizeTypes(self).substitute_mut_type(mut_ty)
     }
 
-    pub fn substitute_in_pending_module_function(&mut self, descr: &mut PendingModuleFunction) {
-        descr.evidence_plan.substitute(self);
-        self.substitute_in_fn_type_in_place(&mut descr.definition.ty_scheme.ty);
-        self.substitute_in_constraints_in_place(&mut descr.definition.ty_scheme.constraints);
-        self.substitute_in_node(&mut descr.code.arena, descr.code.entry_node_id);
+    pub fn substitute_in_pending_module_function(
+        &mut self,
+        descr: &mut PendingModuleFunction,
+    ) -> Result<()> {
+        let span = descr.code.arena[descr.code.entry_node_id].span;
+        descr
+            .evidence_plan
+            .substitute(self)
+            .map_err(|error| error.locate_limit(span))?;
+        self.substitute_in_fn_type_in_place(&mut descr.definition.ty_scheme.ty)
+            .map_err(|error| error.locate_limit(span))?;
+        self.substitute_in_constraints_in_place(&mut descr.definition.ty_scheme.constraints)?;
+        self.substitute_in_node(&mut descr.code.arena, descr.code.entry_node_id)?;
         if let Some(yield_node_id) = descr.code.yield_node_id {
-            self.substitute_in_node(&mut descr.code.arena, yield_node_id);
+            self.substitute_in_node(&mut descr.code.arena, yield_node_id)?;
         }
-        self.substitute_in_local_decls_in_place(&mut descr.locals);
+        self.substitute_in_local_decls_in_place(&mut descr.locals)
+            .map_err(|error| error.locate_limit(span))
     }
 
-    pub fn substitute_in_type(&mut self, ty: Type) -> Type {
-        substitute_type(ty, &mut SubstituteTypes::new(self))
+    pub fn substitute_in_type(&mut self, ty: Type) -> Result<Type> {
+        substitute_type(ty, &mut SubstituteTypes::new(self)).map_err(too_large)
     }
 
-    pub fn substitute_in_types(&mut self, tys: &[Type]) -> Vec<Type> {
-        substitute_types(tys, &mut SubstituteTypes::new(self))
+    pub fn substitute_in_types(&mut self, tys: &[Type]) -> Result<Vec<Type>> {
+        substitute_types(tys, &mut SubstituteTypes::new(self)).map_err(too_large)
     }
 
-    pub fn substitute_in_types_in_place(&mut self, tys: &mut [Type]) {
-        substitute_types_in_place(tys, &mut SubstituteTypes::new(self));
+    pub fn substitute_in_types_in_place(&mut self, tys: &mut [Type]) -> Result<()> {
+        substitute_types_in_place(tys, &mut SubstituteTypes::new(self)).map_err(too_large)
     }
 
-    pub fn substitute_in_fn_type(&mut self, fn_ty: &FnType) -> FnType {
-        substitute_fn_type(fn_ty, &mut SubstituteTypes::new(self))
+    pub fn substitute_in_fn_type(&mut self, fn_ty: &FnType) -> Result<FnType> {
+        substitute_fn_type(fn_ty, &mut SubstituteTypes::new(self)).map_err(too_large)
     }
 
-    pub fn substitute_in_fn_type_in_place(&mut self, fn_ty: &mut FnType) {
-        substitute_fn_type_in_place(fn_ty, &mut SubstituteTypes::new(self));
+    pub fn substitute_in_fn_type_in_place(&mut self, fn_ty: &mut FnType) -> Result<()> {
+        substitute_fn_type_in_place(fn_ty, &mut SubstituteTypes::new(self)).map_err(too_large)
     }
 
-    pub fn substitute_in_subscript_type_in_place(&mut self, subscript_ty: &mut SubscriptType) {
-        substitute_subscript_type_in_place(subscript_ty, &mut SubstituteTypes::new(self));
+    pub fn substitute_in_subscript_type_in_place(
+        &mut self,
+        subscript_ty: &mut SubscriptType,
+    ) -> Result<()> {
+        substitute_subscript_type_in_place(subscript_ty, &mut SubstituteTypes::new(self))
+            .map_err(too_large)
     }
 
-    pub fn substitute_in_call_impl_type_in_place(&mut self, call_ty: &mut CallImplType) {
-        self.substitute_in_fn_type_in_place(&mut call_ty.fn_ty);
+    pub fn substitute_in_call_impl_type_in_place(
+        &mut self,
+        call_ty: &mut CallImplType,
+    ) -> Result<()> {
+        self.substitute_in_fn_type_in_place(&mut call_ty.fn_ty)
     }
 
     pub fn substitute_in_mut_type(&mut self, mut_ty: MutType) -> MutType {
@@ -146,12 +175,16 @@ impl UnifiedTypeInference {
         }
     }
 
-    pub(crate) fn substitute_in_local_decls_in_place(&mut self, locals: &mut [LocalDecl]) {
+    pub(crate) fn substitute_in_local_decls_in_place(
+        &mut self,
+        locals: &mut [LocalDecl],
+    ) -> Result<()> {
         substitute_type_fields_in_place(
             locals,
             |local| &mut local.ty,
             &mut SubstituteTypes::new(self),
-        );
+        )
+        .map_err(too_large)?;
         for local in locals {
             local.mut_ty = self.substitute_in_mut_type(local.mut_ty);
             if let LocalStorage::Deferred(deferred) = &mut local.storage {
@@ -160,6 +193,7 @@ impl UnifiedTypeInference {
                 deferred.binding_mut_ty = self.substitute_in_mut_type(deferred.binding_mut_ty);
             }
         }
+        Ok(())
     }
 
     pub fn lookup_type_var(&mut self, var: TypeVar) -> Type {
@@ -233,13 +267,27 @@ impl UnifiedTypeInference {
         false
     }
 
-    pub fn substitute_in_node(&mut self, arena: &mut hir::NodeArena, node_id: hir::NodeId) {
+    pub fn substitute_in_node(
+        &mut self,
+        arena: &mut hir::NodeArena,
+        node_id: hir::NodeId,
+    ) -> Result<()> {
         let children = arena[node_id].kind.child_node_ids();
         for child in children {
-            self.substitute_in_node(arena, child);
+            self.substitute_in_node(arena, child)?;
         }
+        let span = arena[node_id].span;
+        self.substitute_in_node_types(arena, node_id)
+            .map_err(|error| error.locate_limit(span))
+    }
+
+    fn substitute_in_node_types(
+        &mut self,
+        arena: &mut hir::NodeArena,
+        node_id: hir::NodeId,
+    ) -> Result<()> {
         let node = &mut arena[node_id];
-        node.ty = self.substitute_in_type(node.ty);
+        node.ty = self.substitute_in_type(node.ty)?;
         node.effects = SubstituteTypes::new(self).substitute_effect_type(&node.effects);
         use hir::NodeKind::*;
         match &mut arena[node_id].kind {
@@ -247,71 +295,72 @@ impl UnifiedTypeInference {
                 if let hir::PendingAssignment::DivergingInputs { argument_types, .. } = &mut **plan
                 {
                     for arg in argument_types {
-                        arg.ty = self.substitute_in_type(arg.ty);
+                        arg.ty = self.substitute_in_type(arg.ty)?;
                         arg.mut_ty = self.substitute_in_mut_type(arg.mut_ty);
                     }
                 }
             }
             SubscriptApply(app) => {
-                self.substitute_in_call_impl_type_in_place(&mut app.ty);
+                self.substitute_in_call_impl_type_in_place(&mut app.ty)?;
             }
             FunctionApply(app) => {
-                self.substitute_in_call_impl_type_in_place(&mut app.ty);
+                self.substitute_in_call_impl_type_in_place(&mut app.ty)?;
             }
             StaticApply(app) => {
-                self.substitute_in_call_impl_type_in_place(&mut app.ty);
-                self.substitute_in_fn_inst_data(&mut app.inst_data);
+                self.substitute_in_call_impl_type_in_place(&mut app.ty)?;
+                self.substitute_in_fn_inst_data(&mut app.inst_data)?;
             }
             TraitMethodApply(app) => {
-                self.substitute_in_call_impl_type_in_place(&mut app.ty);
-                self.substitute_in_types_in_place(&mut app.input_tys);
-                self.substitute_in_types_in_place(&mut app.output_tys);
+                self.substitute_in_call_impl_type_in_place(&mut app.ty)?;
+                self.substitute_in_types_in_place(&mut app.input_tys)?;
+                self.substitute_in_types_in_place(&mut app.output_tys)?;
                 self.substitute_in_effect_types_in_place(&mut app.output_effs);
-                self.substitute_in_fn_inst_data(&mut app.inst_data);
+                self.substitute_in_fn_inst_data(&mut app.inst_data)?;
             }
             GetFunction(get_fn) => {
-                self.substitute_in_fn_inst_data(&mut get_fn.inst_data);
+                self.substitute_in_fn_inst_data(&mut get_fn.inst_data)?;
             }
             GetSubscript(get_subscript) => {
-                self.substitute_in_fn_inst_data(&mut get_subscript.inst_data);
+                self.substitute_in_fn_inst_data(&mut get_subscript.inst_data)?;
             }
             GetTraitMethod(get_method) => {
-                self.substitute_in_types_in_place(&mut get_method.input_tys);
-                self.substitute_in_types_in_place(&mut get_method.output_tys);
+                self.substitute_in_types_in_place(&mut get_method.input_tys)?;
+                self.substitute_in_types_in_place(&mut get_method.output_tys)?;
                 self.substitute_in_effect_types_in_place(&mut get_method.output_effs);
-                self.substitute_in_fn_inst_data(&mut get_method.inst_data);
+                self.substitute_in_fn_inst_data(&mut get_method.inst_data)?;
             }
             GetTraitAssociatedConst(get_const) => {
-                self.substitute_in_types_in_place(&mut get_const.input_tys);
-                self.substitute_in_types_in_place(&mut get_const.output_tys);
+                self.substitute_in_types_in_place(&mut get_const.input_tys)?;
+                self.substitute_in_types_in_place(&mut get_const.output_tys)?;
                 self.substitute_in_effect_types_in_place(&mut get_const.output_effs);
             }
             GetVariantPayloadStorage(get_storage) => {
-                get_storage.variant_ty = self.substitute_in_type(get_storage.variant_ty);
-                get_storage.payload_ty = self.substitute_in_type(get_storage.payload_ty);
+                get_storage.variant_ty = self.substitute_in_type(get_storage.variant_ty)?;
+                get_storage.payload_ty = self.substitute_in_type(get_storage.payload_ty)?;
             }
             GetTraitDictionary(get_dict) => {
-                self.substitute_in_types_in_place(&mut get_dict.input_tys);
-                self.substitute_in_types_in_place(&mut get_dict.output_tys);
+                self.substitute_in_types_in_place(&mut get_dict.input_tys)?;
+                self.substitute_in_types_in_place(&mut get_dict.output_tys)?;
                 self.substitute_in_effect_types_in_place(&mut get_dict.output_effs);
             }
             _ => {}
         }
+        Ok(())
     }
 
-    fn substitute_in_fn_inst_data(&mut self, inst_data: &mut FnInstData) {
+    fn substitute_in_fn_inst_data(&mut self, inst_data: &mut FnInstData) -> Result<()> {
         for dict in &mut inst_data.dicts_req {
             match dict {
                 DictionaryReq::ProjectionSubscript { subscript_ty, .. } => {
-                    self.substitute_in_subscript_type_in_place(subscript_ty);
+                    self.substitute_in_subscript_type_in_place(subscript_ty)?;
                 }
                 DictionaryReq::VariantPayloadIndirection {
                     variant_ty,
                     payload_ty,
                     ..
                 } => {
-                    *variant_ty = self.substitute_in_type(*variant_ty);
-                    *payload_ty = self.substitute_in_type(*payload_ty);
+                    *variant_ty = self.substitute_in_type(*variant_ty)?;
+                    *payload_ty = self.substitute_in_type(*payload_ty)?;
                 }
                 DictionaryReq::TraitImpl {
                     input_tys,
@@ -319,28 +368,38 @@ impl UnifiedTypeInference {
                     output_effs,
                     ..
                 } => {
-                    self.substitute_in_types_in_place(input_tys);
-                    self.substitute_in_types_in_place(output_tys);
+                    self.substitute_in_types_in_place(input_tys)?;
+                    self.substitute_in_types_in_place(output_tys)?;
                     self.substitute_in_effect_types_in_place(output_effs);
                 }
             }
         }
         // The arguments hold the fresh variables allocated when the callee's scheme was
         // instantiated; this is where they become the types unification solved them to.
-        self.substitute_in_types_in_place(&mut inst_data.ty_args);
+        self.substitute_in_types_in_place(&mut inst_data.ty_args)?;
         self.substitute_in_effect_types_in_place(&mut inst_data.eff_args);
+        Ok(())
     }
 
     pub fn substitute_in_constraint(
         &mut self,
         constraint: &PubTypeConstraint,
-    ) -> PubTypeConstraint {
+    ) -> Result<PubTypeConstraint> {
         let mut constraint = constraint.clone();
-        self.substitute_in_constraint_in_place(&mut constraint);
-        constraint
+        self.substitute_in_constraint_in_place(&mut constraint)?;
+        Ok(constraint)
     }
 
-    fn substitute_in_constraint_in_place(&mut self, constraint: &mut PubTypeConstraint) {
+    fn substitute_in_constraint_in_place(
+        &mut self,
+        constraint: &mut PubTypeConstraint,
+    ) -> Result<()> {
+        let span = constraint.use_site();
+        self.substitute_in_constraint_types(constraint)
+            .map_err(|error| error.locate_limit(span))
+    }
+
+    fn substitute_in_constraint_types(&mut self, constraint: &mut PubTypeConstraint) -> Result<()> {
         use PubTypeConstraint::*;
         match constraint {
             TupleAtIndexIs {
@@ -348,11 +407,11 @@ impl UnifiedTypeInference {
                 element_ty,
                 ..
             } => {
-                *tuple_ty = self.substitute_in_type(*tuple_ty);
-                *element_ty = self.substitute_in_type(*element_ty);
+                *tuple_ty = self.substitute_in_type(*tuple_ty)?;
+                *element_ty = self.substitute_in_type(*element_ty)?;
             }
             ProjectionSubscriptIs { subscript_ty, .. } => {
-                self.substitute_in_subscript_type_in_place(subscript_ty);
+                self.substitute_in_subscript_type_in_place(subscript_ty)?;
             }
             TypeHasVariant {
                 variant_ty,
@@ -369,8 +428,8 @@ impl UnifiedTypeInference {
                 payload_ty,
                 ..
             } => {
-                *variant_ty = self.substitute_in_type(*variant_ty);
-                *payload_ty = self.substitute_in_type(*payload_ty);
+                *variant_ty = self.substitute_in_type(*variant_ty)?;
+                *payload_ty = self.substitute_in_type(*payload_ty)?;
             }
             HaveTrait {
                 input_tys,
@@ -378,29 +437,31 @@ impl UnifiedTypeInference {
                 output_effs,
                 ..
             } => {
-                self.substitute_in_types_in_place(input_tys);
-                self.substitute_in_types_in_place(output_tys);
+                self.substitute_in_types_in_place(input_tys)?;
+                self.substitute_in_types_in_place(output_tys)?;
                 self.substitute_in_effect_types_in_place(output_effs);
             }
         }
+        Ok(())
     }
 
-    pub(super) fn substitute_in_constraints(
+    pub(crate) fn substitute_in_constraints(
         &mut self,
         constraints: &[PubTypeConstraint],
-    ) -> Vec<PubTypeConstraint> {
+    ) -> Result<Vec<PubTypeConstraint>> {
         let mut constraints = constraints.to_vec();
-        self.substitute_in_constraints_in_place(&mut constraints);
-        constraints
+        self.substitute_in_constraints_in_place(&mut constraints)?;
+        Ok(constraints)
     }
 
     pub(super) fn substitute_in_constraints_in_place(
         &mut self,
         constraints: &mut [PubTypeConstraint],
-    ) {
+    ) -> Result<()> {
         for constraint in constraints {
-            self.substitute_in_constraint_in_place(constraint);
+            self.substitute_in_constraint_in_place(constraint)?;
         }
+        Ok(())
     }
 
     pub fn log_debug_constraints(&self, module_env: ModuleEnv) {
@@ -524,9 +585,47 @@ impl TypeSubstituer for NormalizeTypes<'_> {
 mod tests {
     use super::UnifiedTypeInference;
     use crate::{
+        compiler::error::{CompilationErrorImpl, CompilerLimitKind},
         parser::location::Location,
-        types::effects::{EffType, Effect, PrimitiveEffect},
+        types::{
+            effects::{EffType, Effect, PrimitiveEffect},
+            r#type::{TYPE_HEIGHT_LIMIT, Type},
+        },
     };
+
+    /// `α0 := (α1,)`, `α1 := (α2,)`, …: each binding is shallow when it is made, but substitution
+    /// builds a type as high as the chain. It stops at the limit, on the stack that the limit
+    /// bounds, rather than when the type is interned.
+    #[test]
+    fn substitution_limits_the_height_of_delayed_bindings() {
+        let n = 4 * TYPE_HEIGHT_LIMIT;
+        let mut inference = UnifiedTypeInference::new_with_ty_vars(n + 1);
+        let span = Location::new_synthesized();
+        for i in 0..n {
+            let wrapped = Type::tuple(vec![Type::variable_id(i + 1)]);
+            inference
+                .unify_same_type(Type::variable_id(i), span, wrapped, span)
+                .unwrap();
+        }
+        let error = inference
+            .substitute_in_type(Type::variable_id(0))
+            .unwrap_err();
+        let CompilationErrorImpl::CompilerLimitExceeded(limit) = &*error else {
+            panic!("expected a compiler limit, got {error:?}");
+        };
+        assert_eq!(limit.kind, CompilerLimitKind::TypeHeight);
+        // Within the limit, the chain substitutes.
+        let deepest = Type::variable_id(n - TYPE_HEIGHT_LIMIT + 1);
+        let substituted = inference.substitute_in_type(deepest).unwrap();
+        assert_eq!(substituted.metrics().0, TYPE_HEIGHT_LIMIT);
+        // A failed substitution leaves the types it substitutes in place as they were.
+        let original = [deepest, Type::variable_id(0)];
+        let mut tys = original;
+        inference
+            .substitute_in_types_in_place(&mut tys)
+            .unwrap_err();
+        assert_eq!(tys, original);
+    }
 
     #[test]
     fn constraint_normalization_observes_effect_publication() {
@@ -553,10 +652,10 @@ mod tests {
         inference
             .remaining_ty_constraints
             .push(constraint(effect.clone()));
-        inference.normalize_remaining_constraints();
+        inference.normalize_remaining_constraints().unwrap();
         assert_eq!(inference.remaining_constraints(), &[constraint(effect)]);
         inference.effects.finalize().unwrap();
-        inference.normalize_remaining_constraints();
+        inference.normalize_remaining_constraints().unwrap();
         assert_eq!(inference.remaining_constraints(), &[constraint(ceiling)]);
     }
 
@@ -600,40 +699,40 @@ mod tests {
         inference
             .remaining_ty_constraints
             .push(constraint(callable));
-        inference.normalize_remaining_constraints();
+        inference.normalize_remaining_constraints().unwrap();
         let first = inference.constraints_normalized_at;
         inference.fresh_type_var(); // allocation cannot affect an existing term
         inference.fresh_effect_var();
         inference.fresh_rigid_effect_var();
         inference.lookup_type_var(crate::types::r#type::TypeVar::new(0));
-        inference.normalize_remaining_constraints();
+        inference.normalize_remaining_constraints().unwrap();
         assert_eq!(inference.constraints_normalized_at, first);
 
         inference
             .unify_same_type(Type::variable_id(0), span, int_type(), span)
             .unwrap();
-        inference.normalize_remaining_constraints();
+        inference.normalize_remaining_constraints().unwrap();
         assert_ne!(inference.constraints_normalized_at, first);
-        let expected = inference.substitute_in_type(callable);
+        let expected = inference.substitute_in_type(callable).unwrap();
         assert_eq!(inference.remaining_constraints(), &[constraint(expected)]);
 
         let before_effect = inference.constraints_normalized_at;
         inference
             .unify_same_effect(&effect, span, &EffType::empty(), span)
             .unwrap();
-        inference.normalize_remaining_constraints();
+        inference.normalize_remaining_constraints().unwrap();
         assert_ne!(inference.constraints_normalized_at, before_effect);
-        let expected = inference.substitute_in_type(callable);
+        let expected = inference.substitute_in_type(callable).unwrap();
         assert_eq!(inference.remaining_constraints(), &[constraint(expected)]);
 
         // Replacing with the same length must invalidate, even without a binding.
         inference.remaining_ty_constraints[0] = constraint(Type::variable_id(0));
-        inference.normalize_remaining_constraints();
+        inference.normalize_remaining_constraints().unwrap();
         assert_eq!(inference.remaining_constraints(), &[constraint(int_type())]);
         inference
             .remaining_ty_constraints
             .push(constraint(int_type()));
-        inference.normalize_remaining_constraints();
+        inference.normalize_remaining_constraints().unwrap();
         assert_eq!(inference.remaining_constraints().len(), 1);
 
         // A failed speculative branch must not reuse its normalization stamp.
@@ -641,15 +740,49 @@ mod tests {
         inference
             .unify_same_type(Type::variable_id(1), span, bool_type(), span)
             .unwrap();
-        inference.normalize_remaining_constraints();
+        inference.normalize_remaining_constraints().unwrap();
         let speculative = inference.constraints_normalized_at;
         inference.rollback_to(snapshot);
-        inference.normalize_remaining_constraints();
+        inference.normalize_remaining_constraints().unwrap();
         assert_ne!(inference.constraints_normalized_at, speculative);
         assert_eq!(
-            inference.normalize_type(Type::variable_id(1)),
+            inference.normalize_type(Type::variable_id(1)).unwrap(),
             Type::variable_id(1)
         );
+    }
+
+    /// A rollback restores the constraints that a speculation rewrote, not only their number:
+    /// two that a temporary binding makes equal, and that normalization merges, are both back.
+    #[test]
+    fn rollback_restores_constraints_that_normalization_merged() {
+        use crate::{
+            module::{LocalTraitId, ModuleId, TraitId},
+            types::{r#type::Type, type_scheme::PubTypeConstraint},
+        };
+        let mut inference = UnifiedTypeInference::new_with_ty_vars(2);
+        let span = Location::new_synthesized();
+        let constraint = |ty| {
+            PubTypeConstraint::new_have_trait(
+                TraitId::new(ModuleId::new(0), LocalTraitId::new(0)),
+                vec![ty],
+                vec![],
+                vec![],
+                span,
+            )
+        };
+        let originals = vec![
+            constraint(Type::variable_id(0)),
+            constraint(Type::variable_id(1)),
+        ];
+        inference.replace_remaining_constraints(originals.clone());
+        let snapshot = inference.snapshot();
+        inference
+            .unify_same_type(Type::variable_id(0), span, Type::variable_id(1), span)
+            .unwrap();
+        inference.normalize_remaining_constraints().unwrap();
+        assert_eq!(inference.remaining_constraints().len(), 1);
+        inference.rollback_to(snapshot);
+        assert_eq!(inference.remaining_constraints(), &originals[..]);
     }
 
     #[test]

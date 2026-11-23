@@ -21,7 +21,10 @@ use crate::{
         r#trait::TraitImplPolicy,
         trait_solver::{TRAIT_SOLVER_RECURSION_LIMIT, input_heads_may_match},
         r#type::{Type, TypeKind, TypeVar},
-        type_inference::unify::{UnifiedTypeInference, UnifiedTypeInferenceSnapshot},
+        type_inference::{
+            speculation::{Snapshotting, Speculation},
+            unify::{UnifiedTypeInference, UnifiedTypeInferenceSnapshot},
+        },
         type_like::{TypeLike, instantiate_types},
         type_mapper::{BitmapInstantiationMapper, EffectErasingMapper, SimpleInstantiationMapper},
         type_scheme::PubTypeConstraint,
@@ -33,8 +36,17 @@ struct CoherenceTypeUnifier {
     inner: UnifiedTypeInference,
 }
 
-struct CoherenceTypeUnifierSnapshot {
-    inner: UnifiedTypeInferenceSnapshot,
+impl Snapshotting for CoherenceTypeUnifier {
+    type Snapshot = UnifiedTypeInferenceSnapshot;
+    fn snapshot(&mut self) -> Self::Snapshot {
+        self.inner.snapshot()
+    }
+    fn rollback_to(&mut self, snapshot: Self::Snapshot) {
+        self.inner.rollback_to(snapshot);
+    }
+    fn commit(&mut self, snapshot: Self::Snapshot) {
+        self.inner.commit(snapshot);
+    }
 }
 
 impl CoherenceTypeUnifier {
@@ -48,16 +60,6 @@ impl CoherenceTypeUnifier {
         self.inner.add_ty_vars(count);
     }
 
-    fn snapshot(&mut self) -> CoherenceTypeUnifierSnapshot {
-        CoherenceTypeUnifierSnapshot {
-            inner: self.inner.snapshot(),
-        }
-    }
-
-    fn rollback_to(&mut self, snapshot: CoherenceTypeUnifierSnapshot) {
-        self.inner.rollback_to(snapshot.inner);
-    }
-
     fn unify_same_type_with_sub_effects(
         &mut self,
         current: Type,
@@ -65,11 +67,23 @@ impl CoherenceTypeUnifier {
         expected: Type,
         expected_span: Location,
     ) -> Result<(), InternalCompilationError> {
-        self.inner
-            .unify_same_type_with_sub_effects(current, current_span, expected, expected_span)
+        match self.inner.unify_same_type_with_sub_effects(
+            current,
+            current_span,
+            expected,
+            expected_span,
+        ) {
+            // Types too large to compare may be equal: exhaustion is never evidence that
+            // impls are disjoint.
+            Err(error) if error.is_compiler_limit() => Ok(()),
+            result => result,
+        }
     }
 
-    fn substitute_in_constraint(&mut self, constraint: &PubTypeConstraint) -> PubTypeConstraint {
+    fn substitute_in_constraint(
+        &mut self,
+        constraint: &PubTypeConstraint,
+    ) -> Result<PubTypeConstraint, InternalCompilationError> {
         self.inner.substitute_in_constraint(constraint)
     }
 }
@@ -585,15 +599,28 @@ fn constraints_may_be_satisfiable(
         constraint,
         private_scope,
     } = pending.pop().unwrap();
-    let constraint = ty_inf.substitute_in_constraint(&constraint);
+    let constraint = match ty_inf.substitute_in_constraint(&constraint) {
+        Ok(constraint) => constraint,
+        // A goal too large to state is undecided, as one beyond the recursion limit.
+        Err(error) if error.is_compiler_limit() => return Ok(true),
+        Err(error) => return Err(error),
+    };
     // Another module may implement the trait for its own type substituted for a type-variable
     // head, so such a constraint is potentially satisfiable. The other constraints are decided
     // first, as they may still give the variable a concrete head.
     if is_open_world(current, others, &constraint) {
-        let all_open = pending.iter().all(|scoped| {
-            let constraint = ty_inf.substitute_in_constraint(&scoped.constraint);
-            is_open_world(current, others, &constraint)
-        });
+        let mut all_open = true;
+        for scoped in &pending {
+            let constraint = match ty_inf.substitute_in_constraint(&scoped.constraint) {
+                Ok(constraint) => constraint,
+                Err(error) if error.is_compiler_limit() => return Ok(true),
+                Err(error) => return Err(error),
+            };
+            if !is_open_world(current, others, &constraint) {
+                all_open = false;
+                break;
+            }
+        }
         if all_open {
             return Ok(true);
         }
@@ -773,12 +800,12 @@ fn trait_constraint_may_be_satisfiable(
             continue;
         }
 
-        let snapshot = ty_inf.snapshot();
+        let mut speculation = Speculation::new(ty_inf);
         let result = match &key {
             TraitKey::Concrete(key) => concrete_impl_may_match_constraint(
                 current,
                 others,
-                ty_inf,
+                &mut speculation,
                 &pending,
                 next_ty_var_index,
                 stack,
@@ -790,7 +817,7 @@ fn trait_constraint_may_be_satisfiable(
             TraitKey::Blanket(key) => blanket_impl_may_match_constraint(
                 current,
                 others,
-                ty_inf,
+                &mut speculation,
                 &pending,
                 next_ty_var_index,
                 stack,
@@ -800,7 +827,7 @@ fn trait_constraint_may_be_satisfiable(
                 output_tys,
             )?,
         };
-        ty_inf.rollback_to(snapshot);
+        drop(speculation);
         if result {
             stack.remove(&query);
             return Ok(true);

@@ -2,7 +2,7 @@
 
 Compiler controls let you influence how Ferlium compiles your program without changing its source-level behavior or type.
 They are intended for cases where the compiler's default choices need to be adjusted.
-This chapter also describes the limit that the compiler places on how deeply source code nests, and what it means for a host that embeds Ferlium.
+This chapter also describes the limits that the compiler places on how deeply source code nests and on how large types are, and what they mean for a host that embeds Ferlium.
 
 ## Preventing function inlining
 
@@ -28,6 +28,12 @@ security boundary and does not prevent optimization of unrelated code.
 Expressions, patterns, types and `use` declarations can each nest at most 128 levels deep; deeper code is a compilation error.
 Every block, call, operator and branch is a level, so `a + b + c` takes one level per `+`, and a nested `if` takes two: the `if` and its block.
 This keeps deeply nested source from exhausting the compiler's stack.
+
+## Type limits
+
+A type can be at most 128 levels deep and have at most 4096 parts, a repeated part counting each time it appears.
+A larger type is a compilation error, whether written or inferred.
+This keeps types that grow without bound from exhausting the compiler.
 
 ## Embedding Ferlium
 

@@ -6,7 +6,7 @@ use crate::{
     types::{
         effects::EffType,
         mutability::MutType,
-        r#type::{Type, TypeKind, TypeVar},
+        r#type::{Type, TypeKind, TypeLimitExceeded, TypeVar},
         type_like::TypeLike,
         type_substitution::{TypeSubstituer, substitute_type},
     },
@@ -19,6 +19,8 @@ pub(crate) enum RecursiveEquationError {
     UnguardedCycle,
     /// Every variant payload on the cycle refers back to the variable.
     NoTerminatingPayload,
+    /// The recursive type would be too large.
+    TooLarge(TypeLimitExceeded),
 }
 
 /// Validate and intern the recursive type equation `var = ty`, where `ty` is a
@@ -42,7 +44,8 @@ pub(crate) fn try_intern_recursive_equation(
     if !validation.has_terminating_payload {
         return Err(RecursiveEquationError::NoTerminatingPayload);
     }
-    Ok(substitute_type(ty, &mut TieEquation { var, root: ty }))
+    substitute_type(ty, &mut TieEquation { var, root: ty })
+        .map_err(RecursiveEquationError::TooLarge)
 }
 
 /// Checks the declared-recursive-type rules on the `var`-containing region of the

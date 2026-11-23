@@ -7,8 +7,8 @@ use crate::{
     types::effects::EffType,
     types::mutability::MutType,
     types::r#type::{
-        FnArgType, FnType, NamedType, NativeType, SubscriptMemberType, SubscriptType, Type,
-        TypeKind, store_types,
+        FnArgType, FnType, NamedType, NativeType, SubscriptMemberType, SubscriptType,
+        TYPE_HEIGHT_LIMIT, Type, TypeKind, TypeLimitExceeded, store_types,
     },
     types::type_like::TypeLike,
     types::type_mapper::{SimpleInstantiationMapper, TypeMapper},
@@ -36,19 +36,68 @@ pub trait TypeSubstituer {
     }
 }
 
-/// Recursively substitute all inner types in a type, using the given substituer.
-pub fn substitute_type(ty: Type, substituer: &mut impl TypeSubstituer) -> Type {
-    let mut kinds = Vec::new();
-    let mut seen = FxHashMap::default();
-    let result = substitute_type_rec(ty, substituer, &mut kinds, &mut seen);
-    // The recursive call may short-circuit and return the input `Type` directly
-    // when it is fully concrete (no free variables to resolve); in that case
-    // there is nothing to re-intern.
-    if result.world().is_some() {
-        result
-    } else {
-        store_types(&kinds)[result.index() as usize]
+/// A graph of local type nodes under construction by a substitution. The traversal descends
+/// recursively, and the graph is interned only once it returns, so the traversal counts its own
+/// depth: it refuses to descend past `TYPE_HEIGHT_LIMIT`, which bounds its stack. The height and
+/// size of the results are checked once interned, where they are exact: a local node may become
+/// a member of a recursive world, whose metrics count its internal edges once, so the metrics of
+/// the local graph would overcount them.
+struct SubstitutionGraph<'o> {
+    output: &'o mut Vec<TypeKind>,
+    seen: FxHashMap<Type, u32>,
+    depth: u32,
+}
+
+impl<'o> SubstitutionGraph<'o> {
+    fn new(output: &'o mut Vec<TypeKind>) -> Self {
+        Self {
+            output,
+            seen: FxHashMap::default(),
+            depth: 0,
+        }
     }
+
+    /// Start a node for `ty`, as the traversal descends into it.
+    fn begin(&mut self, ty: Type) -> Result<u32, TypeLimitExceeded> {
+        if self.depth >= TYPE_HEIGHT_LIMIT {
+            return Err(TypeLimitExceeded::Height(TYPE_HEIGHT_LIMIT + 1));
+        }
+        self.depth += 1;
+        let index = self.output.len() as u32;
+        self.seen.insert(ty, index);
+        // A placeholder, until the node's children are built.
+        self.output.push(TypeKind::Never);
+        Ok(index)
+    }
+
+    /// Complete the node at `index`, as the traversal returns from it.
+    fn end(&mut self, index: u32, kind: TypeKind) -> Type {
+        self.depth -= 1;
+        self.output[index as usize] = kind;
+        Type::new_local(index)
+    }
+
+    /// Intern the graph and replace `roots`, which the substitution staged, by their interned
+    /// types, checked against the limits.
+    fn finish(self, roots: &mut [Type]) -> Result<(), TypeLimitExceeded> {
+        if !self.output.is_empty() {
+            let new_tys = store_types(self.output);
+            for root in roots.iter_mut() {
+                *root = remap_local_type(*root, &new_tys);
+            }
+        }
+        roots.iter().try_for_each(|root| root.check_limits())
+    }
+}
+
+/// Recursively substitute all inner types in a type, using the given substituer.
+pub fn substitute_type(
+    ty: Type,
+    substituer: &mut impl TypeSubstituer,
+) -> Result<Type, TypeLimitExceeded> {
+    let mut tys = [ty];
+    substitute_types_in_place(&mut tys, substituer)?;
+    Ok(tys[0])
 }
 
 /// Recursively instantiate type/effect variables, preserving recursive type graphs.
@@ -88,26 +137,30 @@ pub(crate) fn map_type_recursive(ty: Type, mapper: &mut impl TypeMapper) -> Type
 }
 
 /// Recursively substitute all inner types in a list of types, using the given substituer.
-pub fn substitute_types(tys: &[Type], substituer: &mut impl TypeSubstituer) -> Vec<Type> {
+pub fn substitute_types(
+    tys: &[Type],
+    substituer: &mut impl TypeSubstituer,
+) -> Result<Vec<Type>, TypeLimitExceeded> {
     let mut tys = tys.to_vec();
-    substitute_types_in_place(&mut tys, substituer);
-    tys
+    substitute_types_in_place(&mut tys, substituer)?;
+    Ok(tys)
 }
 
-/// Recursively substitute all inner types in a list of types in place.
-pub fn substitute_types_in_place(tys: &mut [Type], substituer: &mut impl TypeSubstituer) {
+/// Recursively substitute all inner types in a list of types in place. On error, `tys` is
+/// unchanged.
+pub fn substitute_types_in_place(
+    tys: &mut [Type],
+    substituer: &mut impl TypeSubstituer,
+) -> Result<(), TypeLimitExceeded> {
     let mut kinds = Vec::new();
-    let mut seen = FxHashMap::default();
-    for ty in tys.iter_mut() {
-        *ty = substitute_type_rec(*ty, substituer, &mut kinds, &mut seen);
-    }
-    if kinds.is_empty() {
-        return;
-    }
-    let new_tys = store_types(&kinds);
-    for ty in tys {
-        *ty = remap_local_type(*ty, &new_tys);
-    }
+    let mut graph = SubstitutionGraph::new(&mut kinds);
+    let mut roots = tys
+        .iter()
+        .map(|ty| substitute_type_rec(*ty, substituer, &mut graph))
+        .collect::<Result<Vec<_>, _>>()?;
+    graph.finish(&mut roots)?;
+    tys.copy_from_slice(&roots);
+    Ok(())
 }
 
 /// Recursively substitute type fields in place, sharing one substitution batch.
@@ -115,66 +168,65 @@ pub fn substitute_type_fields_in_place<T>(
     items: &mut [T],
     mut get_type: impl for<'a> FnMut(&'a mut T) -> &'a mut Type,
     substituer: &mut impl TypeSubstituer,
-) {
-    let mut kinds = Vec::new();
-    let mut seen = FxHashMap::default();
-    for item in items.iter_mut() {
-        let ty = get_type(item);
-        *ty = substitute_type_rec(*ty, substituer, &mut kinds, &mut seen);
+) -> Result<(), TypeLimitExceeded> {
+    let mut tys: Vec<_> = items.iter_mut().map(|item| *get_type(item)).collect();
+    substitute_types_in_place(&mut tys, substituer)?;
+    for (item, ty) in items.iter_mut().zip(tys) {
+        *get_type(item) = ty;
     }
-    if kinds.is_empty() {
-        return;
-    }
-    let new_tys = store_types(&kinds);
-    for item in items {
-        let ty = get_type(item);
-        *ty = remap_local_type(*ty, &new_tys);
-    }
+    Ok(())
 }
 
 /// Recursively substitute all inner types in a function type, using the given substituer.
-pub fn substitute_fn_type(fn_ty: &FnType, substituer: &mut impl TypeSubstituer) -> FnType {
+pub fn substitute_fn_type(
+    fn_ty: &FnType,
+    substituer: &mut impl TypeSubstituer,
+) -> Result<FnType, TypeLimitExceeded> {
     let mut fn_ty = fn_ty.clone();
-    substitute_fn_type_in_place(&mut fn_ty, substituer);
-    fn_ty
+    substitute_fn_type_in_place(&mut fn_ty, substituer)?;
+    Ok(fn_ty)
 }
 
-/// Recursively substitute all inner types in a function type in place.
-pub fn substitute_fn_type_in_place(fn_ty: &mut FnType, substituer: &mut impl TypeSubstituer) {
+/// Recursively substitute all inner types in a function type in place. On error, `fn_ty` is
+/// unchanged.
+pub fn substitute_fn_type_in_place(
+    fn_ty: &mut FnType,
+    substituer: &mut impl TypeSubstituer,
+) -> Result<(), TypeLimitExceeded> {
     let mut kinds = Vec::new();
-    let mut seen = FxHashMap::default();
-    for arg in &mut fn_ty.args {
-        arg.ty = substitute_type_rec(arg.ty, substituer, &mut kinds, &mut seen);
-        arg.mut_ty = substituer.substitute_mut_type(arg.mut_ty);
+    let mut graph = SubstitutionGraph::new(&mut kinds);
+    let mut substituted = substitute_fn_type_rec(fn_ty, substituer, &mut graph)?;
+    let mut tys: Vec<_> = substituted.args.iter().map(|arg| arg.ty).collect();
+    tys.push(substituted.ret);
+    graph.finish(&mut tys)?;
+    substituted.ret = tys.pop().unwrap();
+    for (arg, ty) in substituted.args.iter_mut().zip(tys) {
+        arg.ty = ty;
     }
-    fn_ty.ret = substitute_type_rec(fn_ty.ret, substituer, &mut kinds, &mut seen);
-    fn_ty.effects = substituer.substitute_effect_type(&fn_ty.effects);
-    if kinds.is_empty() {
-        return;
-    }
-    let new_tys = store_types(&kinds);
-    for arg in &mut fn_ty.args {
-        arg.ty = remap_local_type(arg.ty, &new_tys);
-    }
-    fn_ty.ret = remap_local_type(fn_ty.ret, &new_tys);
+    substituted.check_limits()?;
+    *fn_ty = substituted;
+    Ok(())
 }
 
-/// Recursively substitute all inner types in a subscript type in place.
+/// Recursively substitute all inner types in a subscript type in place. On error,
+/// `subscript_ty` is unchanged.
 pub fn substitute_subscript_type_in_place(
     subscript_ty: &mut SubscriptType,
     substituer: &mut impl TypeSubstituer,
-) {
+) -> Result<(), TypeLimitExceeded> {
     let mut kinds = Vec::new();
-    let mut seen = FxHashMap::default();
-    *subscript_ty = substitute_subscript_type_rec(subscript_ty, substituer, &mut kinds, &mut seen);
-    if kinds.is_empty() {
-        return;
+    let mut graph = SubstitutionGraph::new(&mut kinds);
+    let mut substituted = substitute_subscript_type_rec(subscript_ty, substituer, &mut graph)?;
+    let mut tys: Vec<_> = substituted.args.iter().map(|arg| arg.ty).collect();
+    tys.push(substituted.ret);
+    graph.finish(&mut tys)?;
+    substituted.ret = tys.pop().unwrap();
+    for (arg, ty) in substituted.args.iter_mut().zip(tys) {
+        arg.ty = ty;
     }
-    let new_tys = store_types(&kinds);
-    for arg in &mut subscript_ty.args {
-        arg.ty = remap_local_type(arg.ty, &new_tys);
-    }
-    subscript_ty.ret = remap_local_type(subscript_ty.ret, &new_tys);
+    substituted.check_limits()?;
+    *subscript_ty = substituted;
+    Ok(())
 }
 
 fn remap_local_type(ty: Type, new_tys: &[Type]) -> Type {
@@ -185,29 +237,24 @@ fn remap_local_type(ty: Type, new_tys: &[Type]) -> Type {
 fn substitute_type_rec(
     ty: Type,
     substituer: &mut impl TypeSubstituer,
-    output: &mut Vec<TypeKind>,
-    seen: &mut FxHashMap<Type, u32>,
-) -> Type {
+    graph: &mut SubstitutionGraph,
+) -> Result<Type, TypeLimitExceeded> {
     // Fast path: ask the substituer whether it can affect this type at all.
     if !substituer.affects_type(ty) {
-        return ty;
+        return Ok(ty);
     }
 
     // Do substitution for this specific type
     let ty = substituer.substitute_type(ty);
 
     // Has this type already been substituted?
-    if let Some(index) = seen.get(&ty) {
+    if let Some(index) = graph.seen.get(&ty) {
         // Yes, return the index in output
-        return Type::new_local(*index);
+        return Ok(Type::new_local(*index));
     }
 
-    // No, add it to the list of seen types
-    let this_ty_index = output.len() as u32;
-    seen.insert(ty, this_ty_index);
-
-    // And put a placeholder for now in the output list
-    output.push(TypeKind::Never);
+    // No, start a node for it
+    let this_ty_index = graph.begin(ty)?;
 
     // Recurse into the type kind
     let type_data: TypeKind = { ty.data().clone() };
@@ -216,31 +263,31 @@ fn substitute_type_rec(
         Variable(var) => Variable(var),
         Native(ty) => Native(b(NativeType::new(
             ty.bare_ty.clone(),
-            substitute_types_rec(&ty.arguments, substituer, output, seen),
+            substitute_types_rec(&ty.arguments, substituer, graph)?,
         ))),
         Variant(tys) => Variant(
             tys.into_iter()
-                .map(|(name, ty)| (name, substitute_type_rec(ty, substituer, output, seen)))
-                .collect(),
+                .map(|(name, ty)| Ok((name, substitute_type_rec(ty, substituer, graph)?)))
+                .collect::<Result<_, _>>()?,
         ),
-        Tuple(tys) => Tuple(substitute_types_rec(&tys, substituer, output, seen)),
+        Tuple(tys) => Tuple(substitute_types_rec(&tys, substituer, graph)?),
         Record(fields) => Record(
             fields
                 .into_iter()
-                .map(|(name, ty)| (name, substitute_type_rec(ty, substituer, output, seen)))
-                .collect(),
+                .map(|(name, ty)| Ok((name, substitute_type_rec(ty, substituer, graph)?)))
+                .collect::<Result<_, _>>()?,
         ),
-        Function(fn_ty) => Function(b(substitute_fn_type_rec(&fn_ty, substituer, output, seen))),
+        Function(fn_ty) => Function(b(substitute_fn_type_rec(&fn_ty, substituer, graph)?)),
         Subscript(subscript) => Subscript(b(substitute_subscript_type_rec(
-            &subscript, substituer, output, seen,
-        ))),
+            &subscript, substituer, graph,
+        )?)),
         Named(NamedType {
             def: decl,
             params: args,
             effect_params,
         }) => Named(NamedType {
             def: decl,
-            params: substitute_types_rec(&args, substituer, output, seen),
+            params: substitute_types_rec(&args, substituer, graph)?,
             effect_params: effect_params
                 .iter()
                 .map(|eff| substituer.substitute_effect_type(eff))
@@ -250,8 +297,7 @@ fn substitute_type_rec(
     };
 
     // Write back the actual kind into the output list
-    output[this_ty_index as usize] = kind;
-    Type::new_local(this_ty_index)
+    Ok(graph.end(this_ty_index, kind))
 }
 
 fn map_type_rec(
@@ -389,38 +435,35 @@ fn map_subscript_member_type(
 fn substitute_types_rec(
     tys: &[Type],
     substituer: &mut impl TypeSubstituer,
-    output: &mut Vec<TypeKind>,
-    seen: &mut FxHashMap<Type, u32>,
-) -> Vec<Type> {
+    graph: &mut SubstitutionGraph,
+) -> Result<Vec<Type>, TypeLimitExceeded> {
     tys.iter()
-        .map(|ty| substitute_type_rec(*ty, substituer, output, seen))
+        .map(|ty| substitute_type_rec(*ty, substituer, graph))
         .collect()
 }
 
 fn substitute_fn_type_rec(
     fn_ty: &FnType,
     substituer: &mut impl TypeSubstituer,
-    output: &mut Vec<TypeKind>,
-    seen: &mut FxHashMap<Type, u32>,
-) -> FnType {
-    let args = substitute_fn_arg_types_rec(&fn_ty.args, substituer, output, seen);
-    let ret = substitute_type_rec(fn_ty.ret, substituer, output, seen);
+    graph: &mut SubstitutionGraph,
+) -> Result<FnType, TypeLimitExceeded> {
+    let args = substitute_fn_arg_types_rec(&fn_ty.args, substituer, graph)?;
+    let ret = substitute_type_rec(fn_ty.ret, substituer, graph)?;
     let effects = substituer.substitute_effect_type(&fn_ty.effects);
-    FnType::new(args, ret, effects)
+    Ok(FnType::new(args, ret, effects))
 }
 
 fn substitute_fn_arg_types_rec(
     args: &[FnArgType],
     substituer: &mut impl TypeSubstituer,
-    output: &mut Vec<TypeKind>,
-    seen: &mut FxHashMap<Type, u32>,
-) -> Vec<FnArgType> {
+    graph: &mut SubstitutionGraph,
+) -> Result<Vec<FnArgType>, TypeLimitExceeded> {
     args.iter()
         .map(|arg| {
-            FnArgType::new(
-                substitute_type_rec(arg.ty, substituer, output, seen),
+            Ok(FnArgType::new(
+                substitute_type_rec(arg.ty, substituer, graph)?,
                 substituer.substitute_mut_type(arg.mut_ty),
-            )
+            ))
         })
         .collect()
 }
@@ -428,17 +471,16 @@ fn substitute_fn_arg_types_rec(
 fn substitute_subscript_type_rec(
     subscript: &SubscriptType,
     substituer: &mut impl TypeSubstituer,
-    output: &mut Vec<TypeKind>,
-    seen: &mut FxHashMap<Type, u32>,
-) -> SubscriptType {
-    let args = substitute_fn_arg_types_rec(&subscript.args, substituer, output, seen);
-    let ret = substitute_type_rec(subscript.ret, substituer, output, seen);
-    SubscriptType::new(
+    graph: &mut SubstitutionGraph,
+) -> Result<SubscriptType, TypeLimitExceeded> {
+    let args = substitute_fn_arg_types_rec(&subscript.args, substituer, graph)?;
+    let ret = substitute_type_rec(subscript.ret, substituer, graph)?;
+    Ok(SubscriptType::new(
         args,
         ret,
         substitute_subscript_member_type(subscript.ref_member.as_ref(), substituer),
         substitute_subscript_member_type(subscript.mut_member.as_ref(), substituer),
-    )
+    ))
 }
 
 fn substitute_subscript_member_type(

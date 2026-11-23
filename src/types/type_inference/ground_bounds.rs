@@ -19,7 +19,8 @@ use crate::{
         effects::EffType,
         mutability::MutType,
         r#type::{
-            FnArgType, SubscriptMemberType, SubscriptResultConvention, Type, TypeKind, store_types,
+            FnArgType, SubscriptMemberType, SubscriptResultConvention, Type, TypeKind,
+            TypeLimitExceeded, store_types,
         },
         type_like::TypeLike,
     },
@@ -93,8 +94,15 @@ impl BoundOperation {
     }
 }
 
+/// Why a bound has no result yet, or none at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct UnresolvedBound;
+pub(super) enum BoundError {
+    /// A constructor decision is unknown: the bound may have a result once it is known.
+    Unresolved,
+    /// The bound would be too large a type: a product of two recursive types has a member per
+    /// pair of their members, so it can exceed the height limit although they do not.
+    TooLarge(TypeLimitExceeded),
+}
 
 type EffectMeet<'a> = Option<&'a mut dyn FnMut(&EffType, &EffType) -> EffType>;
 
@@ -106,9 +114,9 @@ pub(super) fn ground_bound(
     left: Type,
     right: Type,
     operation: BoundOperation,
-) -> Result<Option<Type>, UnresolvedBound> {
+) -> Result<Option<Type>, BoundError> {
     if !left.is_constant() || !right.is_constant() {
-        return Err(UnresolvedBound);
+        return Err(BoundError::Unresolved);
     }
     bound_product(left, right, operation, None, false)
 }
@@ -134,7 +142,7 @@ pub(super) fn selected_bound(
     right: Type,
     operation: BoundOperation,
     effect_meet: EffectMeet<'_>,
-) -> Result<Option<Type>, UnresolvedBound> {
+) -> Result<Option<Type>, BoundError> {
     bound_product(left, right, operation, effect_meet, true)
 }
 
@@ -148,7 +156,7 @@ fn bound_product(
     operation: BoundOperation,
     effect_meet: EffectMeet<'_>,
     mark_collapsed_meet: bool,
-) -> Result<Option<Type>, UnresolvedBound> {
+) -> Result<Option<Type>, BoundError> {
     let mut product = Product {
         effect_meet,
         ..Product::default()
@@ -164,7 +172,7 @@ fn bound_product(
         index += 1;
     }
     if product.unresolved {
-        return Err(UnresolvedBound);
+        return Err(BoundError::Unresolved);
     }
 
     // Only failure of a join propagates: a failed meet has the valid result
@@ -227,7 +235,9 @@ fn bound_product(
         product.states.len(),
         reachable.len()
     );
-    Ok(Some(store_types(&reachable)[0]))
+    let ty = store_types(&reachable)[0];
+    ty.check_limits().map_err(BoundError::TooLarge)?;
+    Ok(Some(ty))
 }
 
 /// Compact the finished graph, preserving global children and recursive edges.
@@ -564,13 +574,13 @@ mod tests {
             .unify_sub_type(array_type(unknown), span, Type::variable_id(1), span)
             .unwrap();
         assert_eq!(
-            inference.substitute_in_type(Type::variable_id(1)),
+            inference.substitute_in_type(Type::variable_id(1)).unwrap(),
             array_type(unknown)
         );
-        assert_eq!(inference.substitute_in_type(unknown), unknown);
+        assert_eq!(inference.substitute_in_type(unknown).unwrap(), unknown);
         inference.rollback_to(snapshot);
         assert_eq!(
-            inference.substitute_in_type(Type::variable_id(1)),
+            inference.substitute_in_type(Type::variable_id(1)).unwrap(),
             Type::variable_id(1)
         );
     }
@@ -726,23 +736,40 @@ mod tests {
     fn ground_bounds_coprime_recursive_stress() {
         // Coprime periods force a multiplicative product, with no unfolding
         // cutoff. The independent stream model also fixes the result period.
-        let mut a = vec![Type::never(); 17];
-        let mut b = vec![Type::never(); 19];
-        a[0] = int_type();
-        b[1] = int_type();
-        let expected: Vec<_> = (0..17 * 19)
-            .map(|i| {
-                if a[i % 17] == int_type() || b[i % 19] == int_type() {
-                    int_type()
-                } else {
-                    Type::never()
-                }
-            })
-            .collect();
-        let (left, right, expected) = (recursive(&a), recursive(&b), recursive(&expected));
+        let periods = |p: usize, q: usize| {
+            let mut a = vec![Type::never(); p];
+            let mut b = vec![Type::never(); q];
+            a[0] = int_type();
+            b[1] = int_type();
+            let expected: Vec<_> = (0..p * q)
+                .map(|i| {
+                    if a[i % p] == int_type() || b[i % q] == int_type() {
+                        int_type()
+                    } else {
+                        Type::never()
+                    }
+                })
+                .collect();
+            (recursive(&a), recursive(&b), expected)
+        };
+        // Two nodes per step: 2 × 5 × 7 members, within the height limit.
+        let (left, right, expected) = periods(5, 7);
+        let expected = recursive(&expected);
         for (left, right) in [(left, right), (right, left)] {
             assert_eq!(bound(left, right, BoundOperation::Join), Some(expected));
         }
+        // 2 × 17 × 19 members are beyond it, although each input is within it.
+        let (left, right, _) = periods(17, 19);
+        assert!(matches!(
+            ground_bound(left, right, BoundOperation::Join),
+            Err(BoundError::TooLarge(TypeLimitExceeded::Height(_)))
+        ));
+        // So is an acyclic type around them, which inherits the height of their product.
+        let wrap = |ty| TypeKind::Tuple(vec![ty]).store();
+        assert!(matches!(
+            ground_bound(wrap(left), wrap(right), BoundOperation::Join),
+            Err(BoundError::TooLarge(TypeLimitExceeded::Height(_)))
+        ));
     }
 
     #[test]
@@ -1024,7 +1051,7 @@ mod tests {
         ] {
             assert_eq!(
                 ground_bound(ty, ty, BoundOperation::Join),
-                Err(UnresolvedBound)
+                Err(BoundError::Unresolved)
             );
         }
     }
@@ -1041,7 +1068,7 @@ mod tests {
         let callback = |arg| Type::function_by_val([arg], int_type());
         assert_eq!(
             ground_bound(callback(a), callback(b), BoundOperation::Meet),
-            Err(UnresolvedBound)
+            Err(BoundError::Unresolved)
         );
         assert_eq!(bound(int_type(), bool_type(), BoundOperation::Join), None);
         assert_eq!(
