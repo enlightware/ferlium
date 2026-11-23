@@ -44,7 +44,7 @@ use crate::{
         type_like::{TypeLike, instantiate_types},
         type_mapper::{BitmapInstantiationMapper, EffectErasingMapper, TypeMapper},
         type_scheme::{PubTypeConstraint, TypeScheme},
-        type_visitor::{TypeInnerVisitor, collect_ty_vars},
+        type_visitor::{OncePerType, TypeInnerVisitor, collect_ty_vars},
     },
 };
 
@@ -944,12 +944,12 @@ impl TraitSolver<'_> {
                 }
             }
         }
-        let mut check = Check {
+        let mut check = OncePerType::new(Check {
             solver: self,
             public: true,
-        };
+        });
         constraint.visit(&mut check);
-        check.public
+        check.visitor.public
     }
 
     /// Whether reduction keeps `constraint` as a requirement of the item. The type that it is

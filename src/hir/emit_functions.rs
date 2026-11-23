@@ -78,7 +78,7 @@ use crate::{
         type_scheme::{
             PubTypeConstraint, TypeScheme, extra_parameters_from_constraints, normalize_types,
         },
-        type_visitor::{TyVarsCollector, collect_ty_vars},
+        type_visitor::{OncePerType, TyVarsCollector, collect_ty_vars},
         typing_env::{SubscriptMemberTypingContext, TypingEnv, YieldTypingContext},
     },
 };
@@ -4023,7 +4023,7 @@ where
     let head_boundary = ConstraintBoundary::from_seed_ty_vars(input_quantifiers.iter().copied());
     let related_constraints = head_boundary.accessible_constraints(&all_constraints);
     let mut quantifiers = input_quantifiers.to_vec();
-    let mut collector = TyVarsCollector(&mut quantifiers);
+    let mut collector = OncePerType::new(TyVarsCollector(&mut quantifiers));
     for constraint in related_constraints.iter() {
         constraint.visit(&mut collector);
     }

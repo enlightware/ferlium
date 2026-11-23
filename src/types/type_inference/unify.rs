@@ -55,7 +55,7 @@ use crate::{
         type_like::{TypeLike, instantiate_types},
         type_mapper::{BitmapInstantiationMapper, EffectErasingMapper, TypeMapper},
         type_scheme::{ConstraintOrigin, PubTypeConstraint},
-        type_visitor::TypeInnerVisitor,
+        type_visitor::{OncePerType, TypeInnerVisitor},
     },
 };
 
@@ -3454,9 +3454,9 @@ impl UnifiedTypeInference {
                 self.0.push(eff_ty.clone());
             }
         }
-        let mut rows = Rows(Vec::new());
+        let mut rows = OncePerType::new(Rows(Vec::new()));
         ty.visit(&mut rows);
-        for row in rows.0 {
+        for row in rows.visitor.0 {
             if let Some((first, second)) = self.effects.combined_declared_variables(&row) {
                 return Err(internal_compilation_error!(EffectVariablesCombined {
                     first,

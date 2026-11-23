@@ -676,8 +676,8 @@ impl TypeLike for PubTypeConstraint {
                 element_ty,
                 ..
             } => {
-                tuple_ty.data().visit(visitor);
-                element_ty.data().visit(visitor);
+                tuple_ty.visit(visitor);
+                element_ty.visit(visitor);
             }
             ProjectionSubscriptIs { subscript_ty, .. } => {
                 subscript_ty.visit(visitor);
@@ -687,15 +687,15 @@ impl TypeLike for PubTypeConstraint {
                 payload_ty,
                 ..
             } => {
-                variant_ty.data().visit(visitor);
-                payload_ty.data().visit(visitor);
+                variant_ty.visit(visitor);
+                payload_ty.visit(visitor);
             }
             VariantPayloadLayout { payload_ty, .. } => {
                 // The enclosing variant is provenance, not another semantic type obligation. Its
                 // graph is mapped above to keep evidence identity current, while only `payload_ty`
                 // determines accessibility and quantification, exactly like the `Value<B>` this
                 // requirement supplies at runtime.
-                payload_ty.data().visit(visitor);
+                payload_ty.visit(visitor);
             }
             VariantPayloadStorage {
                 variant_ty,
@@ -704,8 +704,8 @@ impl TypeLike for PubTypeConstraint {
             } => {
                 // The whole variant type decides the storage, so its variables are those of
                 // the obligation.
-                variant_ty.data().visit(visitor);
-                payload_ty.data().visit(visitor);
+                variant_ty.visit(visitor);
+                payload_ty.visit(visitor);
             }
             HaveTrait {
                 input_tys,
@@ -714,10 +714,10 @@ impl TypeLike for PubTypeConstraint {
                 ..
             } => {
                 for ty in input_tys {
-                    ty.data().visit(visitor);
+                    ty.visit(visitor);
                 }
                 for ty in output_tys {
-                    ty.data().visit(visitor);
+                    ty.visit(visitor);
                 }
                 for eff in output_effs {
                     visitor.visit_eff_ty(eff);

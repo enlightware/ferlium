@@ -13,7 +13,7 @@ use crate::{
         type_mapper::{SimpleInstantiationMapper, TypeMapper},
         type_visitor::{
             ContainsAnyTyVars, ContainsOnlyTyVars, EffectVarsCollector, MutVarsCollector,
-            TyVarsCollector, TypeInnerVisitor,
+            OncePerType, TyVarsCollector, TypeInnerVisitor,
         },
     },
 };
@@ -40,20 +40,20 @@ pub trait TypeLike {
     /// Return all type variables contained in this type
     fn inner_ty_vars(&self) -> Vec<TypeVar> {
         let mut vars = vec![];
-        self.visit(&mut TyVarsCollector(&mut vars));
+        self.visit(&mut OncePerType::new(TyVarsCollector(&mut vars)));
         vars.into_iter().unique().collect()
     }
 
     /// Return all mutability variables contained in this type
     fn inner_mut_ty_vars(&self) -> Vec<MutVar> {
         let mut vars = vec![];
-        self.visit(&mut MutVarsCollector(&mut vars));
+        self.visit(&mut OncePerType::new(MutVarsCollector(&mut vars)));
         vars.into_iter().unique().collect()
     }
 
     /// Return all effect variables contained as input (i.e. must be retained)
     fn fill_with_input_effect_vars(&self, vars: &mut FxHashSet<EffectVar>) {
-        self.visit(&mut EffectVarsCollector(vars));
+        self.visit(&mut OncePerType::new(EffectVarsCollector(vars)));
     }
 
     /// Return all effect variables contained as input (i.e. must be retained)

@@ -231,3 +231,33 @@ fn defaulting_reports_type_limits() {
         assert_eq!(at, "(T, T): R");
     }
 }
+
+/// `n` structural aliases in a ring, each holding the next one twice, and a function taking the
+/// first: the paths through the ring double at each member.
+fn ring_of_joins(n: usize) -> String {
+    let aliases = (0..n)
+        .map(|i| format!("type R{i} = T{i}(R{0}, R{0}) | N{i};", (i + 1) % n))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{aliases}\nfn f(x: R0) -> R0 {{ x }}")
+}
+
+/// A recursive type costs the compiler its members, not its paths, of which there can be
+/// exponentially many: the largest ring that the height limit allows compiles, also as the input
+/// of a written impl, whose effects are checked along every path.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_types_cost_their_members_not_their_paths() {
+    // The ring has a member for each alias and each payload, so its height is twice its length,
+    // plus one for `()`.
+    let longest = (TYPE_HEIGHT_LIMIT as usize - 1) / 2;
+    let ring = ring_of_joins(longest);
+    assert_val_eq!(TestSession::new().run(&format!("{ring}\n0")), int(0));
+    let src = format!(
+        "{ring}\nstruct Wrap<T>(T)\ntrait Marker<Self> {{}}\nimpl Marker for Wrap<R0> {{}}\n0"
+    );
+    assert_val_eq!(TestSession::new().run(&src), int(0));
+    let src = format!("{}\n0", ring_of_joins(longest + 1));
+    let (_, at) = type_limit_error(&src, CompilerLimitKind::TypeHeight);
+    assert!(at.starts_with('T'), "{at}");
+}

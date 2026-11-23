@@ -47,7 +47,7 @@ use super::{
 };
 
 #[cfg(debug_assertions)]
-use crate::types::type_visitor::AllVarsCollector;
+use crate::types::type_visitor::{AllVarsCollector, OncePerType};
 
 /// Whether an implementation's output effect fits the one a requirement names, by polarity:
 /// a performed effect may be smaller, a received one larger. Rows are compared effect by effect,
@@ -433,21 +433,21 @@ impl<'a> TraitSolver<'a> {
         let mut mut_vars = FxHashSet::default();
         let mut eff_vars = FxHashSet::default();
         {
-            let mut collector = AllVarsCollector {
+            let mut collector = OncePerType::new(AllVarsCollector {
                 ty_vars: &mut ty_vars,
                 mut_vars: &mut mut_vars,
                 effect_vars: &mut eff_vars,
-            };
+            });
             for ty in imp_input_tys.iter().chain(imp_output_tys) {
                 ty.visit(&mut collector);
             }
         }
         {
-            let mut collector = AllVarsCollector {
+            let mut collector = OncePerType::new(AllVarsCollector {
                 ty_vars: &mut ty_vars,
                 mut_vars: &mut mut_vars,
                 effect_vars: &mut eff_vars,
-            };
+            });
             for constraint in imp_constraints {
                 constraint.visit(&mut collector);
             }

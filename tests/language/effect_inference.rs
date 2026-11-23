@@ -2934,6 +2934,40 @@ fn impl_inputs_cannot_fix_effects() {
     );
 }
 
+/// An impl input uses an effect once per path from the input to the type holding it: a recursive
+/// type holds it once for all its unrollings, but a type reached by two paths uses it twice.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn impl_inputs_use_each_effect_once_per_path() {
+    let marker = "struct Wrap<T>(T)\ntrait Marker<Self> {}";
+    let impl_for = |ty: &str| format!("impl<! E> Marker for Wrap<{ty}<(() -> int ! E)>> {{}}");
+    // Through a cycle, once.
+    let list = "type L<T> = Next(L<T>) | Callback(T) | End;";
+    let src = format!("{list}\n{marker}\n{}\n0", impl_for("L"));
+    assert_val_eq!(TestSession::new().run(&src), int(0));
+    // Through two paths into a recursive type, twice.
+    let join = "type J<T> = Both(K<T>, K<T>) | End;\ntype K<T> = Back(J<T>) | Callback(T);";
+    expect_input_restriction(
+        &format!("{join}\n{marker}\n{}", impl_for("J")),
+        ImplEffectRestriction::RepeatedInInput,
+    );
+    // A ring whose paths double at each member, with its only effect at the member the input
+    // reaches first: every path that goes round reaches it again only through that member, so it
+    // is used once. The paths are not enumerated, as the ring is as long as the height limit
+    // allows.
+    let n = 62;
+    let ring = (0..n)
+        .map(|i| {
+            let next = format!("R{}<T>", (i + 1) % n);
+            let callback = if i == 0 { " | Callback(T)" } else { "" };
+            format!("type R{i}<T> = T{i}({next}, {next}){callback} | N{i};")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let src = format!("{ring}\n{marker}\n{}\n0", impl_for("R0"));
+    assert_val_eq!(TestSession::new().run(&src), int(0));
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn every_function_form_selects_the_effect_polymorphic_impl() {

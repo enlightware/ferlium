@@ -71,7 +71,7 @@ use crate::{
         },
         type_like::TypeLike,
         type_scheme::{PubTypeConstraint, TypeScheme, extra_parameters_from_constraints},
-        type_visitor::TypeInnerVisitor,
+        type_visitor::{OncePerType, TypeInnerVisitor},
     },
 };
 
@@ -2357,13 +2357,13 @@ impl Module {
                 }
             }
         }
-        let mut find = Find {
+        let mut find = OncePerType::new(Find {
             module: self,
             others,
             found: None,
-        };
+        });
         item.visit(&mut find);
-        find.found
+        find.visitor.found
     }
 
     /// The first private trait or type that `requirement` names: its trait, then its types.

@@ -18,7 +18,6 @@ use dyn_clone::DynClone;
 use dyn_eq::DynEq;
 use enum_as_inner::EnumAsInner;
 use indexmap::IndexSet;
-use itertools::Itertools;
 use nonmax::NonMaxU32;
 use rustc_hash::FxBuildHasher;
 use ustr::{Ustr, ustr};
@@ -788,9 +787,9 @@ impl TypeLike for FnType {
     fn visit(&self, visitor: &mut impl TypeInnerVisitor) {
         self.args.iter().for_each(|arg| {
             visitor.visit_mut_ty(arg.mut_ty);
-            arg.ty.data().visit(visitor)
+            arg.ty.visit(visitor)
         });
-        self.ret.data().visit(visitor);
+        self.ret.visit(visitor);
         visitor.visit_eff_ty(&self.effects);
     }
 
@@ -809,14 +808,6 @@ impl TypeLike for FnType {
         }
     }
 
-    fn inner_ty_vars(&self) -> Vec<TypeVar> {
-        signature_ty_vars(&self.args, self.ret)
-    }
-
-    fn inner_mut_ty_vars(&self) -> Vec<MutVar> {
-        signature_mut_vars(&self.args, self.ret)
-    }
-
     fn fill_with_input_effect_vars(&self, vars: &mut FxHashSet<EffectVar>) {
         for arg in &self.args {
             arg.ty.fill_with_inner_effect_vars(vars);
@@ -829,37 +820,13 @@ impl TypeLike for FnType {
     }
 }
 
-/// The type variables of a signature of `args` and `ret`, in order, from the cached summaries of
-/// their types. A walk would go through a member of a recursive type once per path to it, and
-/// these paths can be exponentially many.
-fn signature_ty_vars(args: &[FnArgType], ret: Type) -> Vec<TypeVar> {
-    args.iter()
-        .map(|arg| arg.ty)
-        .chain([ret])
-        .flat_map(|ty| ty.inner_ty_vars())
-        .unique()
-        .collect()
-}
-
-/// The mutability variables of a signature of `args` and `ret`, as `signature_ty_vars`.
-fn signature_mut_vars(args: &[FnArgType], ret: Type) -> Vec<MutVar> {
-    args.iter()
-        .flat_map(|arg| {
-            let own = arg.mut_ty.as_variable().copied();
-            own.into_iter().chain(arg.ty.inner_mut_ty_vars())
-        })
-        .chain(ret.inner_mut_ty_vars())
-        .unique()
-        .collect()
-}
-
 impl TypeLike for SubscriptType {
     fn visit(&self, visitor: &mut impl TypeInnerVisitor) {
         self.args.iter().for_each(|arg| {
             visitor.visit_mut_ty(arg.mut_ty);
-            arg.ty.data().visit(visitor)
+            arg.ty.visit(visitor)
         });
-        self.ret.data().visit(visitor);
+        self.ret.visit(visitor);
         for member in self.members() {
             visitor.visit_eff_ty(&member.effects);
         }
@@ -885,14 +852,6 @@ impl TypeLike for SubscriptType {
                 result_convention: member.result_convention,
             }),
         }
-    }
-
-    fn inner_ty_vars(&self) -> Vec<TypeVar> {
-        signature_ty_vars(&self.args, self.ret)
-    }
-
-    fn inner_mut_ty_vars(&self) -> Vec<MutVar> {
-        signature_mut_vars(&self.args, self.ret)
     }
 
     fn fill_with_input_effect_vars(&self, vars: &mut FxHashSet<EffectVar>) {
@@ -1495,7 +1454,9 @@ impl TypeLike for Type {
     }
 
     fn visit(&self, visitor: &mut impl TypeInnerVisitor) {
-        self.data().visit(visitor)
+        if visitor.enter_type(*self) {
+            self.data().visit(visitor)
+        }
     }
 
     // Overrides of the default `TypeLike` query methods that consult the
@@ -1558,13 +1519,57 @@ impl FormatWith<TypeDisplayEnv<'_, '_>> for Type {
     }
 }
 
+thread_local! {
+    /// The numbers of the members of recursive types printed so far by the outermost qualified
+    /// printing of a type, see `FormatWith<QualifiedNameEnv>` for `Type`.
+    static QUALIFIED_PRINTING: RefCell<Option<FxHashMap<Type, u32>>> = const { RefCell::new(None) };
+}
+
+/// A qualified name is the identity of what it names, so it spells out a type in full, except
+/// that a member of a recursive type is printed in full once, numbered `#n=`, and as `#n` when
+/// reached again, through a cycle or another path. Spelled out on every path, a recursive type
+/// whose members each refer twice to the next would double in length with each member.
 impl FormatWith<QualifiedNameEnv<'_>> for Type {
     fn fmt_with(&self, f: &mut fmt::Formatter, env: &QualifiedNameEnv<'_>) -> fmt::Result {
-        self.with_cycle_detection(
-            |ty, (f, env)| ty.data().fmt_with(f, env),
-            |_, (f, _)| write!(f, "Self"),
-            (f, env),
-        )
+        let outermost = QUALIFIED_PRINTING.with(|numbers| {
+            let mut numbers = numbers.borrow_mut();
+            let outermost = numbers.is_none();
+            if outermost {
+                *numbers = Some(FxHashMap::default());
+            }
+            outermost
+        });
+        let result = fmt_qualified_type(*self, f, env);
+        if outermost {
+            QUALIFIED_PRINTING.with(|numbers| *numbers.borrow_mut() = None);
+        }
+        result
+    }
+}
+
+fn fmt_qualified_type(ty: Type, f: &mut fmt::Formatter, env: &QualifiedNameEnv<'_>) -> fmt::Result {
+    if !ty.is_global_recursive() {
+        return ty.data().fmt_with(f, env);
+    }
+    // `Ok` numbers a first printing, `Err` refers to an earlier one.
+    let number = QUALIFIED_PRINTING.with(|numbers| {
+        let mut numbers = numbers.borrow_mut();
+        let numbers = numbers.as_mut().expect("an outermost qualified printing");
+        match numbers.get(&ty) {
+            Some(&number) => Err(number),
+            None => {
+                let number = numbers.len() as u32;
+                numbers.insert(ty, number);
+                Ok(number)
+            }
+        }
+    });
+    match number {
+        Err(number) => write!(f, "#{number}"),
+        Ok(number) => {
+            write!(f, "#{number}=")?;
+            ty.data().fmt_with(f, env)
+        }
     }
 }
 
@@ -2439,7 +2444,9 @@ impl TypeKind {
     pub fn visit(&self, visitor: &mut impl TypeInnerVisitor) {
         // helper for doing cycle detection on type
         fn process_ty(ty: Type, visitor: &mut impl TypeInnerVisitor) {
-            ty.with_cycle_detection(|ty, visitor| ty.data().visit(visitor), |_, _| (), visitor)
+            if visitor.enter_type(ty) {
+                ty.with_cycle_detection(|ty, visitor| ty.data().visit(visitor), |_, _| (), visitor)
+            }
         }
 
         // start visit
@@ -4215,6 +4222,41 @@ mod tests {
             ty = Type::tuple(vec![ty, ty]);
         }
         assert_eq!(ty.metrics(), (41, u32::MAX), "the size saturates");
+    }
+
+    #[test]
+    fn qualified_printing_numbers_revisited_recursive_members() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let names = QualifiedNameEnv::new_from_module(env.current, env.modules);
+        let print = |ty: Type| ty.format_with(&names).to_string();
+        let unit = Type::unit();
+
+        // `type R = A(R, R) | N`, of two members, `R` and its payload: each is printed once,
+        // and `R` is referred to afterwards.
+        let variant = TypeKind::Variant(vec![(ustr("A"), Type::new_local(1)), (ustr("N"), unit)]);
+        let payload = TypeKind::Tuple(vec![Type::new_local(0), Type::new_local(0)]);
+        let r = store_types(&[variant, payload])[0];
+        assert_eq!(print(r), "#0=A #1=(#0, #0) | N");
+
+        // A ring of members, each referring twice to the next through its payload, is printed
+        // once per member, although the paths through it double at each member.
+        let n = 40;
+        let kinds = (0..n)
+            .flat_map(|i| {
+                let next = Type::new_local(2 * ((i + 1) % n));
+                [
+                    TypeKind::Variant(vec![
+                        (ustr(&format!("T{i}")), Type::new_local(2 * i + 1)),
+                        (ustr(&format!("N{i}")), unit),
+                    ]),
+                    TypeKind::Tuple(vec![next, next]),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let ring = store_types(&kinds)[0];
+        let printed = print(ring);
+        assert_eq!(printed.matches('=').count(), 2 * n as usize, "{printed}");
     }
 
     #[test]

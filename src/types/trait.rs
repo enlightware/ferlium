@@ -30,7 +30,7 @@ use crate::{
         type_mapper::BitmapInstantiationMapper,
         type_scheme::{PubTypeConstraint, TypeScheme},
         type_scheme_display::{TypeConstraintRenderStyle, format_pub_type_constraint_with_style},
-        type_visitor::TyVarsCollector,
+        type_visitor::{OncePerType, TyVarsCollector},
     },
 };
 
@@ -810,7 +810,7 @@ impl Trait {
                     });
                 }
                 let mut additional_ty_vars = FxHashSet::default();
-                let mut collector = TyVarsCollector(&mut additional_ty_vars);
+                let mut collector = OncePerType::new(TyVarsCollector(&mut additional_ty_vars));
                 output_tys.iter().for_each(|ty| ty.visit(&mut collector));
                 quantifiers.extend(additional_ty_vars);
             }

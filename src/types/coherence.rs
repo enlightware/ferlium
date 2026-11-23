@@ -1,6 +1,8 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::VecDeque;
+
 use ustr::ustr;
 
 use crate::{
@@ -28,7 +30,7 @@ use crate::{
         type_like::{TypeLike, instantiate_types},
         type_mapper::{BitmapInstantiationMapper, EffectErasingMapper, SimpleInstantiationMapper},
         type_scheme::PubTypeConstraint,
-        type_visitor::{TypeInnerVisitor, collect_ty_vars},
+        type_visitor::{OncePerType, TypeInnerVisitor, collect_ty_vars},
     },
 };
 
@@ -93,9 +95,9 @@ fn has_effect_requirement(key: &TraitKey) -> bool {
     let TraitKey::Blanket(key) = key else {
         return false;
     };
-    let mut rows = EffectRowCollector::default();
+    let mut rows = OncePerType::new(EffectRowCollector::default());
     key.sub_key.constraints.visit(&mut rows);
-    !rows.0.is_empty()
+    !rows.visitor.0.is_empty()
 }
 
 /// Collects every occurrence of an effect row in the types it visits.
@@ -109,34 +111,179 @@ impl TypeInnerVisitor for EffectRowCollector {
 }
 
 /// Effects never select impls, so each effect in an impl's inputs must be a variable of the impl,
-/// used once: such an input applies whatever the effects of a query.
+/// used once. A type holding an effect uses it once per simple path from the inputs to it:
+/// `Two<F, F>` uses the effect of `F` twice, but a recursive type uses its effects once for all
+/// its unrollings.
 fn check_impl_leaves_effects_open(
     trait_id: TraitId,
     input_tys: &[Type],
     span: Location,
 ) -> Result<(), InternalCompilationError> {
-    let restricted = |ty: Type, restriction: ImplEffectRestriction| {
+    let restricted = |input: usize, restriction: ImplEffectRestriction| {
         internal_compilation_error!(TraitImplInputRestrictsEffect {
             trait_ref: trait_id,
-            input_ty: ty,
+            input_ty: input_tys[input],
             restriction,
             impl_span: span,
         })
     };
+    let graph = InputGraph::new(input_tys);
     let mut seen = FxHashSet::default();
-    for &input_ty in input_tys {
-        let mut rows = EffectRowCollector::default();
-        input_ty.visit(&mut rows);
-        for row in rows.0 {
+    for &(holder, input) in &graph.holders {
+        for row in effect_rows(&holder.data()) {
             let Some(var) = row.to_single_variable() else {
-                return Err(restricted(input_ty, ImplEffectRestriction::FixedInInput));
+                return Err(restricted(input, ImplEffectRestriction::FixedInInput));
             };
             if !seen.insert(var) {
-                return Err(restricted(input_ty, ImplEffectRestriction::RepeatedInInput));
+                return Err(restricted(input, ImplEffectRestriction::RepeatedInInput));
             }
         }
     }
+    for &(holder, _) in &graph.holders {
+        if let Some(input) = graph.second_simple_path(holder) {
+            return Err(restricted(input, ImplEffectRestriction::RepeatedInInput));
+        }
+    }
     Ok(())
+}
+
+/// The effect rows that a type holds itself, not through its children.
+fn effect_rows(kind: &TypeKind) -> Vec<EffType> {
+    match kind {
+        TypeKind::Function(function) => vec![function.effects.clone()],
+        TypeKind::Subscript(subscript) => subscript
+            .members()
+            .map(|member| member.effects.clone())
+            .collect(),
+        TypeKind::Named(named) => named.effect_params.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// The types that an impl's inputs reach. A path through them is a sequence of occurrences, so
+/// that `(F, F)` reaches `F` by two paths. A recursive type makes the graph cyclic, and the paths
+/// through it can be exponentially many, so they are not enumerated.
+struct InputGraph<'a> {
+    inputs: &'a [Type],
+    /// The children of each type reached, at each of their occurrences.
+    children: FxHashMap<Type, Vec<Type>>,
+    /// The types reached that hold effect rows, each with the first input reaching it.
+    holders: Vec<(Type, usize)>,
+}
+
+impl<'a> InputGraph<'a> {
+    fn new(inputs: &'a [Type]) -> Self {
+        let mut children = FxHashMap::default();
+        let mut holders = Vec::new();
+        for (input, &root) in inputs.iter().enumerate() {
+            let mut stack = vec![root];
+            while let Some(ty) = stack.pop() {
+                if children.contains_key(&ty) {
+                    continue;
+                }
+                let kind = ty.data();
+                if !effect_rows(&kind).is_empty() {
+                    holders.push((ty, input));
+                }
+                let mut occurrences = Vec::new();
+                kind.for_each_inner_type(|child| occurrences.push(child));
+                stack.extend(occurrences.iter().rev());
+                children.insert(ty, occurrences);
+            }
+        }
+        Self {
+            inputs,
+            children,
+            holders,
+        }
+    }
+
+    /// The types that `node` leads to, `None` being the root that leads to the inputs.
+    fn out(&self, node: Option<Type>) -> &[Type] {
+        match node {
+            None => self.inputs,
+            Some(ty) => &self.children[&ty],
+        }
+    }
+
+    /// If the inputs reach `target` by a second simple path, the input where it starts. One
+    /// simple path P is found first; any other leaves P at some node u by another edge, and then
+    /// reaches `target` without going through the part of P up to u.
+    fn second_simple_path(&self, target: Type) -> Option<usize> {
+        let path = self.shortest_path(target);
+        let (_, first_input) = path[0];
+        let mut prefix = FxHashSet::default();
+        for &(node, taken) in &path {
+            if let Some(ty) = node {
+                prefix.insert(ty);
+            }
+            let others = self
+                .out(node)
+                .iter()
+                .enumerate()
+                .filter(|&(edge, ty)| edge != taken && !prefix.contains(ty));
+            if node.is_none() {
+                // The second path starts at another input.
+                for (input, &ty) in others {
+                    if self.reaches_avoiding([ty], target, &prefix) {
+                        return Some(input);
+                    }
+                }
+            } else if self.reaches_avoiding(others.map(|(_, &ty)| ty), target, &prefix) {
+                return Some(first_input);
+            }
+        }
+        None
+    }
+
+    /// A shortest path from the root to `target`, as the nodes it goes through, `None` being the
+    /// root, each with the index of the edge it takes.
+    fn shortest_path(&self, target: Type) -> Vec<(Option<Type>, usize)> {
+        let mut parents = FxHashMap::<Type, (Option<Type>, usize)>::default();
+        let mut queue = VecDeque::from([None]);
+        while let Some(node) = queue.pop_front() {
+            for (edge, &child) in self.out(node).iter().enumerate() {
+                if Some(child) == node || parents.contains_key(&child) {
+                    continue;
+                }
+                parents.insert(child, (node, edge));
+                if child == target {
+                    let mut path = Vec::new();
+                    let mut at = Some(child);
+                    while let Some(ty) = at {
+                        let (parent, edge) = parents[&ty];
+                        path.push((parent, edge));
+                        at = parent;
+                    }
+                    path.reverse();
+                    return path;
+                }
+                queue.push_back(Some(child));
+            }
+        }
+        unreachable!("the inputs reach every holder of effect rows")
+    }
+
+    /// Whether a walk from `sources` reaches `target` without entering `avoided`.
+    fn reaches_avoiding(
+        &self,
+        sources: impl IntoIterator<Item = Type>,
+        target: Type,
+        avoided: &FxHashSet<Type>,
+    ) -> bool {
+        let mut reached = FxHashSet::default();
+        let mut stack: Vec<Type> = sources.into_iter().collect();
+        while let Some(ty) = stack.pop() {
+            if ty == target {
+                return true;
+            }
+            if avoided.contains(&ty) || !reached.insert(ty) {
+                continue;
+            }
+            stack.extend(&self.children[&ty]);
+        }
+        false
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

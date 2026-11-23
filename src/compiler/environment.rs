@@ -23,6 +23,8 @@ use crate::{
 struct EnvironmentCollector<'a> {
     modules: &'a Modules,
     roots: FxHashSet<ModuleId>,
+    /// The types already visited, which name no new module.
+    entered: FxHashSet<Type>,
 }
 
 impl EnvironmentCollector<'_> {
@@ -300,6 +302,9 @@ impl EnvironmentCollector<'_> {
 }
 
 impl TypeInnerVisitor for EnvironmentCollector<'_> {
+    fn enter_type(&mut self, ty: Type) -> bool {
+        self.entered.insert(ty)
+    }
     fn visit_ty_kind_start(&mut self, ty: &TypeKind) {
         match ty {
             TypeKind::Named(named) => {
@@ -341,6 +346,7 @@ pub(crate) fn collect_environment(
     let mut collector = EnvironmentCollector {
         modules,
         roots: module.deps().collect(),
+        entered: FxHashSet::default(),
     };
     if module.module_id() != STD_MODULE_ID && modules.get(STD_MODULE_ID).is_some() {
         collector.roots.insert(STD_MODULE_ID);
