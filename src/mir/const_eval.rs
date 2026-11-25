@@ -29,7 +29,8 @@ use crate::{
     },
 };
 
-/// Fuel granted to a single compile-time evaluation.
+/// Fuel granted to a single compile-time evaluation, spent at each fuel check and at each callee
+/// entered.
 ///
 /// These are a *compile-time budget*, not a runtime resource policy: they bound how much work the
 /// compiler will do speculatively for one call, and exhausting them costs an optimization rather
@@ -284,6 +285,7 @@ impl<'a> ConstEvaluator<'a> {
             MirOptimization::Disabled,
         );
         interpreter.observe_const_eval_barrier(self.optimization_barrier);
+        interpreter.spend_fuel_per_call();
         let arguments = arguments
             .into_iter()
             .map(|argument| match argument {
@@ -587,6 +589,33 @@ mod tests {
                 .run_entry(ExecutionTarget::Mir, module, f.function, vec![])
                 .is_ok(),
             "a refused compile-time evaluation must not poison the session"
+        );
+    }
+
+    /// Generic code can double a value at each call, through its dictionaries, in code that checks
+    /// no fuel, such as the `Value` impls that clone it: compile-time evaluation spends fuel at each
+    /// call, so it gives up long before the value is built.
+    #[test]
+    fn refuses_a_call_whose_values_double_at_each_call() {
+        let mut session = CompilerSession::new();
+        let chain = (1..40)
+            .map(|i| format!("fn f{i}(x) {{ f{}((x, x)) }}\n", i - 1))
+            .collect::<std::string::String>();
+        let module = compile(
+            &mut session,
+            &format!(
+                "fn f0(x) {{ 0 }}\n{chain}fn f40(x: int) -> int {{ f39((x, x)) }}\n\
+                 fn g() -> int {{ f40(1) }}"
+            ),
+        );
+        let sites = call_sites(body(&session, module, "g"));
+        let call = sites
+            .iter()
+            .find(|site| site.callee == function_id(&session, module, "f40"))
+            .expect("`f40` must be called directly");
+        assert_eq!(
+            refusal(try_call(&session, module, call, vec![int(1)])),
+            Some(NotFoldable::BudgetExceeded)
         );
     }
 

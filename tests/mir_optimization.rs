@@ -461,6 +461,51 @@ fn rendered_function_with_prefix<'a>(mir: &'a str, prefix: &str) -> &'a str {
     rest.find("\nfn ").map_or(rest, |end| &rest[..end])
 }
 
+/// Substituting a generic callee's type arguments can combine them into a type beyond the front
+/// end's limits although each is within them: such a call stays generic, neither specialized nor
+/// inlined. `(D10, D10, D10)` is beyond the type size limit; `P<E10>` is far within the type
+/// limits, but its representation is beyond the representation size limit; and the signature
+/// `(D10, D10, D10, int) -> int` is beyond the type size limit, although each of its types is
+/// within it.
+#[test]
+fn calls_whose_substituted_types_are_beyond_the_limits_stay_generic() {
+    let chain = |name: &str, last: usize, step: &dyn Fn(&str) -> String| {
+        (1..=last)
+            .map(|i| format!("type {name}{i} = {};", step(&format!("{name}{}", i - 1))))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let tuples = chain("D", 10, &|previous| format!("({previous}, {previous})"));
+    let pairs = chain("E", 10, &|previous| format!("P<{previous}>"));
+    let optimized = emit(
+        "limits",
+        &format!(
+            "type D0 = int;\n{tuples}\n\
+             struct P<T> {{ a: T, b: T }}\ntype E0 = int;\n{pairs}\n\
+             fn triple(x) -> int {{ let t = black_box((x, x, x)); 7 }}\n\
+             fn pair(x) -> int {{ let t = black_box(P {{ a: x, b: x }}); 7 }}\n\
+             fn rec(a, b, c, n: int) -> int {{ if n == 0 {{ 0 }} else {{ rec(a, b, c, n - 1) }} }}\n\
+             fn wrap(x, n: int) -> int {{ rec(x, x, x, n) }}\n\
+             fn tuples(x: D10) -> int {{ triple(x) }}\n\
+             fn pairs(x: E10) -> int {{ pair(x) }}\n\
+             fn signatures(x: D10) -> int {{ wrap(x, 3) }}"
+        ),
+        MirOptimization::Enabled,
+    );
+    for (caller, callee) in [
+        ("tuples", "triple"),
+        ("pairs", "pair"),
+        ("signatures", "wrap"),
+    ] {
+        let body = rendered_function_with_prefix(&optimized, caller);
+        assert!(body.contains(&format!("call limits::{callee}(")), "{body}");
+        assert!(
+            !optimized.contains(&format!("{callee}#spec:")),
+            "{optimized}"
+        );
+    }
+}
+
 /// Counts `call` operations in rendered MIR.
 fn calls(mir: &str) -> usize {
     mir.lines()

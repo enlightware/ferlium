@@ -585,3 +585,24 @@ fn walks_of_composed_representations_stop_beyond_the_limit() {
         assert_eq!(at, "x", "{tag}");
     }
 }
+
+/// Generic code can double a type argument at each call, through its dictionaries, which the type
+/// limits do not see. Optimization specializes and inlines only within those limits, and
+/// compile-time evaluation spends fuel at each call, so such a chain compiles promptly.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_code_doubling_its_arguments_compiles() {
+    let chain = |k: usize| {
+        (1..=k)
+            .map(|i| format!("fn f{i}(x) {{ f{}((x, x)) }}\n", i - 1))
+            .collect::<String>()
+    };
+    // `g` would build 2^30 integers, and is never called.
+    let src = format!(
+        "fn f0(x) {{ 0 }}\n{}fn g() -> int {{ f30(1) }}\n0",
+        chain(30)
+    );
+    assert_val_eq!(TestSession::new().run(&src), int(0));
+    let src = format!("fn f0(x) {{ 0 }}\n{}f4(1)", chain(4));
+    assert_val_eq!(TestSession::new().run(&src), int(0));
+}

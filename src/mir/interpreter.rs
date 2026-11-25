@@ -277,6 +277,11 @@ impl<'a> Interpreter<'a> {
         self.reached_const_eval_barrier = false;
     }
 
+    /// Makes entering each callee spend a unit of fuel, see [`EvalCtx::enter_callee`].
+    pub(crate) fn spend_fuel_per_call(&mut self) {
+        self.ctx.spend_fuel_per_call();
+    }
+
     /// Whether the callee configured by [`Self::observe_const_eval_barrier`] was entered.
     pub(crate) fn reached_const_eval_barrier(&self) -> bool {
         self.reached_const_eval_barrier
@@ -380,7 +385,7 @@ impl<'a> Interpreter<'a> {
         let boundary = Self::call_boundary(&parameter_tags, &bindings);
         #[cfg(debug_assertions)]
         self.check_call_boundary(&boundary, CallPhase::Before, false);
-        if let Err(error) = self.run_function(key, bindings) {
+        if let Err(error) = self.run_function(key, bindings, span) {
             self.reclaim_frame_storage(entry_top);
             return Err(error);
         }
@@ -479,7 +484,7 @@ impl<'a> Interpreter<'a> {
             call_parameter_kinds(self.function(key)).len(),
             "known-argument call must bind every parameter of its callee"
         );
-        self.run_function(key, bindings)?;
+        self.run_function(key, bindings, span)?;
         Ok(if let Some(ret) = ret {
             let slot = ret
                 .boxed_mut(&mut self.ctx)
@@ -591,7 +596,12 @@ impl<'a> Interpreter<'a> {
     /// result through the return out-pointer parameter, so this returns no value. Final HIR places
     /// `CheckCallDepth` in recursive functions; lowering preserves that check explicitly, so frame
     /// entry only maintains the counter and does not impose an additional backend-specific limit.
-    fn run_function(&mut self, key: FunctionKey, args: Vec<Binding>) -> Result<(), RuntimeError> {
+    fn run_function(
+        &mut self,
+        key: FunctionKey,
+        args: Vec<Binding>,
+        span: Location,
+    ) -> Result<(), RuntimeError> {
         let entered = FunctionId::new(key.module, key.identity);
         if self
             .const_eval_barrier
@@ -599,6 +609,10 @@ impl<'a> Interpreter<'a> {
         {
             self.reached_const_eval_barrier = true;
             self.ctx.exhaust_fuel();
+        }
+        if let Err(error) = self.ctx.enter_callee(span) {
+            Self::discard_argument_values(args);
+            return Err(error);
         }
         let function = self.function(key);
         // A function returning its result as a value is passed its result place all the same.
@@ -1520,7 +1534,7 @@ impl<'a> Interpreter<'a> {
                 if self.function(key).result_convention() != CallResultConvention::NoValue {
                     args.push(Binding::Place(self.alloc_cell(Value::uninit(), span)?));
                 }
-                self.run_function(key, args)
+                self.run_function(key, args, span)
             })()
         } else {
             // Delegate to the shared runtime with the callee's module given explicitly; the
@@ -1969,7 +1983,7 @@ impl<'a> Interpreter<'a> {
                 }
             };
             args.push(Binding::Place(out.clone()));
-            self.run_function(key, args)?;
+            self.run_function(key, args, span)?;
             let place = self
                 .load_copy(&out)
                 .as_primitive_ty::<PlaceResult>()
@@ -1982,7 +1996,12 @@ impl<'a> Interpreter<'a> {
 
         // Enter the accessor frame, recording the stack top so `end_project` can later reclaim its
         // cells. A recursive accessor carries the same explicit prologue check as any other
-        // recursive function.
+        // recursive function. Entering it spends fuel as entering any callee; resuming it at
+        // `end_project` continues the same call.
+        if let Err(error) = self.ctx.enter_callee(span) {
+            Self::discard_argument_values(args);
+            return Err(error);
+        }
         self.ctx.call_depth += 1;
         let func = self.function(key);
         let acc_slots = self.bind_parameters(func, args);
@@ -2214,7 +2233,7 @@ impl<'a> Interpreter<'a> {
             let boundary = Self::call_boundary(&call_parameter_kinds(func), &args);
             #[cfg(debug_assertions)]
             self.check_call_boundary(&boundary, CallPhase::Before, false);
-            self.run_function(key, args)?;
+            self.run_function(key, args, span)?;
             // Reached only on a *normal* return — an error `?`-propagated above, so the post-condition
             // (which holds only on normal completion) is not checked on the error path.
             #[cfg(debug_assertions)]
@@ -3604,6 +3623,87 @@ mod fatal_exit_tests {
             output.status
         );
         assert!(stderr.contains(MESSAGE), "{stderr}");
+    }
+}
+
+#[cfg(test)]
+mod fuel_tests {
+    use ustr::ustr;
+
+    use super::*;
+    use crate::{ExecutionTarget, Path};
+
+    /// The least fuel with which `function` of `module` runs to completion, entering a callee
+    /// spending a unit of fuel if `per_call`.
+    fn least_fuel(
+        session: &CompilerSession,
+        module: ModuleId,
+        function: LocalFunctionId,
+        per_call: bool,
+    ) -> usize {
+        (0..10_000)
+            .find(|&fuel| {
+                let limits = ReferenceInterpreterLimits::default().with_fuel_limit(Some(fuel));
+                let mut interpreter = Interpreter::with_limits_and_stage(
+                    module,
+                    session,
+                    limits,
+                    MirOptimization::Disabled,
+                );
+                if per_call {
+                    interpreter.spend_fuel_per_call();
+                }
+                interpreter.run_main(module, function).is_ok()
+            })
+            .expect("the function must complete with some fuel")
+    }
+
+    /// When entering a callee spends fuel, every callee entered does, not only the callees of
+    /// calls: the `Value::drop` that a drop dispatches to and those it runs in turn, and yielding
+    /// and addressor subscripts. Each function enters as many of them, and its few other calls do
+    /// not grow with them.
+    #[test]
+    fn every_callee_entered_spends_fuel_when_calls_do() {
+        let count = 32;
+        let fields = vec!["D(z)"; count].join(", ");
+        let bindings = |access: &str| {
+            (0..count)
+                .map(|i| format!("let a{i} = {access};"))
+                .collect::<String>()
+        };
+        let src = format!(
+            "struct D(int)
+             impl Value for D {{
+                 fn eq(a: D, b: D) -> bool {{ true }}
+                 fn to_string(a: D) -> string {{ \"d\" }}
+                 fn hash(a: D, s: &mut hasher) {{ () }}
+                 fn clone(a: D) -> D {{ D(0) }}
+                 fn drop(a: &mut D) {{ () }}
+             }}
+             subscript cell(value: int) -> int {{ ref {{ let local = value; yield local }} }}
+             subscript first(values: &mut (int, int)) -> int {{ ref mut {{ values.0 }} }}
+             pub fn drops() -> int {{ let z = 0; let t = ({fields}); 0 }}
+             pub fn yields() -> int {{ let v = 1; {} 0 }}
+             pub fn addresses() -> int {{ let mut values = (1, 2); {} 0 }}",
+            bindings("v->[cell]"),
+            bindings("values->[first]"),
+        );
+        let mut session = CompilerSession::new();
+        session.set_allow_experimental(true);
+        session.set_allow_unsafe(true);
+        let module = session
+            .compile_for(ExecutionTarget::Mir, &src, "fuel", Path::single_str("fuel"))
+            .unwrap()
+            .module_id;
+        for name in ["drops", "yields", "addresses"] {
+            let function = session
+                .expect_fresh_module(module)
+                .get_local_function_id(ustr(name))
+                .unwrap();
+            let without = least_fuel(&session, module, function, false);
+            let with = least_fuel(&session, module, function, true);
+            assert!(with >= without + count, "{name}: {without} then {with}");
+        }
     }
 }
 

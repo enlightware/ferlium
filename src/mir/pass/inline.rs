@@ -47,7 +47,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::{
     OptimizationStage, SemanticCallees, Specializations, budget,
     cost::{self, Growth, GrowthBase},
-    monomorphize,
+    monomorphize::{self, NotSubstituted},
     site::OperationIndex,
 };
 use crate::{
@@ -151,6 +151,10 @@ pub(crate) enum NotInlinable {
     /// Inlining here would grow this caller beyond [`budget::INLINE_LOOP_GROWTH`], or, for a site
     /// outside loops, its code outside loops beyond [`budget::INLINE_FUNCTION_GROWTH`].
     GrowthBudgetExhausted,
+    /// The callee's body, instantiated at the call's type arguments, has a type or a signature
+    /// beyond the limits that the front end enforces (see
+    /// [`monomorphize::within_front_end_limits`]).
+    InstantiationBeyondLimits,
 }
 
 impl NotInlinable {
@@ -171,6 +175,9 @@ impl NotInlinable {
             Self::ColdCallSite => "call site is on a failure path",
             Self::CalleeTooLarge => "callee is over the size budget",
             Self::GrowthBudgetExhausted => "caller is at its growth budget",
+            Self::InstantiationBeyondLimits => {
+                "the instantiated body exceeds a type or representation limit"
+            }
         }
     }
 }
@@ -514,20 +521,29 @@ fn concrete_body<'a>(
     if instantiation.ty_args.iter().any(Type::is_variable) {
         return Err(NotInlinable::Generic);
     }
+    // The arguments themselves first, before the body is read.
+    if !monomorphize::within_front_end_limits(instantiation.ty_args.iter().copied(), &env) {
+        return Err(NotInlinable::InstantiationBeyondLimits);
+    }
     let module = session.expect_fresh_module(callee.module);
     let Some(function) = module.get_function_by_id(callee.function) else {
         return Err(NotInlinable::Generic);
     };
     let scheme = &function.definition.ty_scheme;
-    Ok(Cow::Owned(match specializations {
-        Some(specializations) => specializations
-            .substituted_body(callee, instantiation, scheme, body, env)
-            .ok_or(NotInlinable::Generic)?,
+    let substituted = match specializations {
+        Some(specializations) => {
+            specializations.substituted_body(callee, instantiation, scheme, body, env)
+        }
         // The optimization report runs after the table is consumed, and makes one pass, so it has
         // nothing to memoize into and nothing to gain from it.
-        None => monomorphize::substitute_body(body, scheme, instantiation, env)
-            .map_err(|_| NotInlinable::Generic)?,
-    }))
+        None => monomorphize::substitute_body(body, scheme, instantiation, env),
+    };
+    substituted
+        .map(Cow::Owned)
+        .map_err(|refusal| match refusal {
+            NotSubstituted::Limit(_) => NotInlinable::Generic,
+            NotSubstituted::BeyondFrontEndLimits => NotInlinable::InstantiationBeyondLimits,
+        })
 }
 
 /// Collects the parameters the executable body still reads in one linear scan.

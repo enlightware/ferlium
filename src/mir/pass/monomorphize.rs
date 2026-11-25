@@ -79,11 +79,15 @@ use crate::{
     std::value::{dynamic_product_member_layouts, type_has_static_layout},
     types::{
         effects::{EffType, Effect, EffectVar, PrimitiveEffect},
-        r#type::{CallImplType, FnType, Type, TypeKind, TypeVar},
+        mutability::MutType,
+        r#type::{
+            CallImplType, FnType, REPRESENTATION_HEIGHT_LIMIT, REPRESENTATION_SIZE_LIMIT, Type,
+            TypeKind, TypeVar,
+        },
         type_like::TypeLike,
         type_mapper::{BitmapInstantiationMapper, TypeMapper},
         type_matching::{erase_type_effects, match_erased_type},
-        type_properties::concrete_type_is_trivial_copy,
+        type_properties::{RepresentationMetrics, concrete_type_is_trivial_copy},
         type_scheme::TypeScheme,
     },
 };
@@ -750,8 +754,12 @@ impl Specializations {
         };
         let specialized = match specialize(body, scheme, &key, own, env) {
             Ok(body) => body,
-            Err(error) => {
+            Err(NotSubstituted::Limit(error)) => {
                 self.limit_error.borrow_mut().get_or_insert(error);
+                return None;
+            }
+            Err(NotSubstituted::BeyondFrontEndLimits) => {
+                self.reject(key);
                 return None;
             }
         };
@@ -876,22 +884,21 @@ impl Specializations {
         scheme: &TypeScheme<FnType>,
         body: &Function,
         env: ModuleEnv<'_>,
-    ) -> Option<Function> {
+    ) -> Result<Function, NotSubstituted> {
         let key = (callee, instantiation.clone());
         if let Some(existing) = self.substituted.borrow().get(&key) {
-            return Some(existing.clone());
+            return Ok(existing.clone());
         }
-        let substituted = match substitute_body(body, scheme, instantiation, env) {
-            Ok(body) => body,
-            Err(error) => {
-                self.limit_error.borrow_mut().get_or_insert(error);
-                return None;
-            }
-        };
+        let substituted =
+            substitute_body(body, scheme, instantiation, env).inspect_err(|error| {
+                if let NotSubstituted::Limit(error) = error {
+                    self.limit_error.borrow_mut().get_or_insert(*error);
+                }
+            })?;
         self.substituted
             .borrow_mut()
             .insert(key, substituted.clone());
-        Some(substituted)
+        Ok(substituted)
     }
 
     /// A specialization's generated name.
@@ -1025,21 +1032,24 @@ pub(crate) fn specialize(
     key: &SpecializationKey,
     own: FunctionId,
     env: ModuleEnv<'_>,
-) -> Result<Function, CompilerLimit> {
+) -> Result<Function, NotSubstituted> {
     let subst = key.instantiation.substitution(scheme);
     // Bitmap rather than simple: one mapper is reused across every type in the body, which is what
     // makes its `affects_type` constant-time construction cost pay for itself.
     let mut mapper = BitmapInstantiationMapper::new(&subst);
 
     let mut edit = FunctionEdit::new(body.clone());
-    map_types(&mut edit, &mut mapper, env)?;
+    if !substitution_within_front_end_limits(&mut edit, &mut mapper, &env) {
+        return Err(NotSubstituted::BeyondFrontEndLimits);
+    }
+    map_types(&mut edit, &mut mapper, env).map_err(NotSubstituted::Limit)?;
     bind_dictionaries(&mut edit, &key.dictionaries);
     // Check callback forwarding while operands still name the original parameters.
     resolve_recursion(&mut edit, key, own);
     bind_callbacks(&mut edit, &key.callbacks);
     store_value_parameters(&mut edit, body);
     simplify_after_substitution(&mut edit, env);
-    settle_exits(&mut edit, scheme, &mut mapper, env)?;
+    settle_exits(&mut edit, scheme, &mut mapper, env).map_err(NotSubstituted::Limit)?;
     Ok(edit.finish(env))
 }
 
@@ -1170,15 +1180,18 @@ pub(crate) fn substitute_body(
     scheme: &TypeScheme<FnType>,
     instantiation: &Instantiation,
     env: ModuleEnv<'_>,
-) -> Result<Function, CompilerLimit> {
+) -> Result<Function, NotSubstituted> {
     let subst = instantiation.substitution(scheme);
     let mut mapper = BitmapInstantiationMapper::new(&subst);
 
     let mut edit = FunctionEdit::new(body.clone());
-    map_types(&mut edit, &mut mapper, env)?;
+    if !substitution_within_front_end_limits(&mut edit, &mut mapper, &env) {
+        return Err(NotSubstituted::BeyondFrontEndLimits);
+    }
+    map_types(&mut edit, &mut mapper, env).map_err(NotSubstituted::Limit)?;
     store_value_parameters(&mut edit, body);
     simplify_after_substitution(&mut edit, env);
-    settle_exits(&mut edit, scheme, &mut mapper, env)?;
+    settle_exits(&mut edit, scheme, &mut mapper, env).map_err(NotSubstituted::Limit)?;
     Ok(edit.finish(env))
 }
 
@@ -2721,6 +2734,117 @@ fn may_bind_callback(
     })
 }
 
+/// Whether each of `tys` is within the limits that the front end enforces on types and
+/// representations. A specialization or an inlined body makes the types of its callee's body
+/// concrete, and generic code can double a type argument at each call, through its dictionaries,
+/// or combine its arguments into a larger type: substitution must build no type that the front end
+/// would have rejected. The call stays generic otherwise.
+pub(crate) fn within_front_end_limits(
+    tys: impl IntoIterator<Item = Type>,
+    env: &ModuleEnv<'_>,
+) -> bool {
+    let mut metrics = RepresentationMetrics::new(env);
+    tys.into_iter().all(|ty| {
+        ty.check_limits().is_ok() && {
+            let (height, size) = metrics.height_and_size(ty);
+            height <= REPRESENTATION_HEIGHT_LIMIT && size <= REPRESENTATION_SIZE_LIMIT
+        }
+    })
+}
+
+/// Whether every type of `edit`'s body, substituted by `mapper`, is
+/// [`within_front_end_limits`], and every signature the body calls through is within the type
+/// limits as a whole: checked before the substitution uses any of them, for layouts in particular.
+fn substitution_within_front_end_limits(
+    edit: &mut FunctionEdit,
+    mapper: &mut impl TypeMapper,
+    env: &ModuleEnv<'_>,
+) -> bool {
+    let mut roots = TypeRoots::default();
+    roots
+        .0
+        .extend(edit.parameters().iter().map(|parameter| parameter.ty));
+    roots
+        .0
+        .extend(edit.constants().iter().map(|constant| constant.ty));
+    for block in edit.blocks().collect::<Vec<_>>() {
+        let block = edit.block_mut(block);
+        let invoked = match &mut block.terminator.kind {
+            TerminatorKind::Invoke { operation, .. } => Some(operation),
+            _ => None,
+        };
+        for operation in block.operations.iter_mut().chain(invoked) {
+            substitute_in_operation(operation, &mut roots);
+            if !substituted_signature_within_limits(operation, mapper) {
+                return false;
+            }
+        }
+    }
+    let substituted = roots.0.into_iter().filter_map(|ty| {
+        if mapper.affects_type(ty) {
+            Some(ty.map(mapper))
+        } else {
+            None
+        }
+    });
+    within_front_end_limits(substituted, env)
+}
+
+/// Whether the signature that `operation` calls or projects through, substituted by `mapper`, is
+/// within the type limits as a whole, as the front end checks a call's: each of its types can be
+/// within them, but not all together.
+fn substituted_signature_within_limits(
+    operation: &Operation,
+    mapper: &mut impl TypeMapper,
+) -> bool {
+    operation.call_site().is_none_or(|(_, ty, _)| {
+        let fn_ty = &ty.fn_ty;
+        let affected = fn_ty.args.iter().any(|arg| mapper.affects_type(arg.ty))
+            || mapper.affects_type(fn_ty.ret);
+        !affected || fn_ty.map(mapper).check_limits().is_ok()
+    })
+}
+
+/// `ty` substituted by `mapper`, if the result is [`within_front_end_limits`].
+fn substituted_within_front_end_limits(
+    ty: Type,
+    mapper: &mut impl TypeMapper,
+    env: &ModuleEnv<'_>,
+) -> Option<Type> {
+    let ty = ty.map(mapper);
+    within_front_end_limits([ty], env).then_some(ty)
+}
+
+/// Records the type that each substitution of a traversal starts from, and substitutes none.
+#[derive(Default)]
+struct TypeRoots(FxHashSet<Type>);
+
+impl TypeMapper for TypeRoots {
+    fn map_type(&mut self, ty: Type) -> Type {
+        ty
+    }
+    fn map_mut_type(&mut self, mut_ty: MutType) -> MutType {
+        mut_ty
+    }
+    fn map_effect_type(&mut self, eff_ty: &EffType) -> EffType {
+        eff_ty.clone()
+    }
+    fn affects_type(&mut self, ty: Type) -> bool {
+        self.0.insert(ty);
+        false
+    }
+}
+
+/// Why a callee's body was not substituted.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum NotSubstituted {
+    /// A substituted result is beyond a limit of MIR, a compilation error.
+    Limit(CompilerLimit),
+    /// A substituted type is beyond the limits that the front end enforces: the call stays
+    /// generic.
+    BeyondFrontEndLimits,
+}
+
 /// The specialization this call site should be pointed at, creating it if needed.
 fn specialization_for(
     operation: &Operation,
@@ -2754,6 +2878,10 @@ fn specialization_for(
         instantiation,
         dictionaries,
     } = candidate(operation, session, specializations)?;
+    // The arguments themselves first, before the body is read.
+    if !within_front_end_limits(instantiation.ty_args.iter().copied(), &env) {
+        return None;
+    }
     let module = session.expect_fresh_module(callee.module);
     let scheme = &module
         .get_function_by_id(callee.function)?
@@ -2893,6 +3021,9 @@ fn move_inline_sites(body: Function, from: ModuleId, to: ModuleId, env: ModuleEn
 /// one of its direct generic calls, making that callee eligible for specialization on a later
 /// round. These are detected separately: body size prices the first, while changed call metadata
 /// proves the second rather than treating arbitrary dictionary use as useful.
+///
+/// It asks layouts only of substituted types [`within_front_end_limits`]: [`specialize`] builds no
+/// other, and the limits bound the work of a layout query.
 fn worth_specializing(
     body: &Function,
     scheme: &TypeScheme<FnType>,
@@ -2984,7 +3115,8 @@ fn worth_specializing(
                 }
                 OperationKind::Clone { ty } | OperationKind::Drop { ty } | OperationKind::DropInitialized { ty }
                     if ty.is_variable()
-                        && concrete_type_is_trivial_copy(ty.map(&mut mapper), &env) =>
+                        && substituted_within_front_end_limits(*ty, &mut mapper, &env)
+                            .is_some_and(|ty| concrete_type_is_trivial_copy(ty, &env)) =>
                 {
                     return true;
                 }
@@ -2994,7 +3126,8 @@ fn worth_specializing(
                             operation.operands.first(),
                             Some(mir::Value::Parameter(id)) if bound.contains_key(id)
                         )
-                        && type_has_static_layout(ty.map(&mut mapper), operation.span.location, &env) =>
+                        && substituted_within_front_end_limits(*ty, &mut mapper, &env)
+                            .is_some_and(|ty| type_has_static_layout(ty, operation.span.location, &env)) =>
                 {
                     return true;
                 }
@@ -3033,7 +3166,11 @@ fn worth_specializing(
                     {
                         continue;
                     }
-                    let aggregate_ty = product.aggregate_ty.map(&mut mapper);
+                    let Some(aggregate_ty) =
+                        substituted_within_front_end_limits(product.aggregate_ty, &mut mapper, &env)
+                    else {
+                        continue;
+                    };
                     let witness_tys = product
                         .layout_witness_tys
                         .iter()
@@ -3066,7 +3203,8 @@ fn worth_specializing(
                     ..
                 } if operation.operands.get(2).is_some_and(|witness| {
                     matches!(witness, mir::Value::Parameter(id) if bound.contains_key(id))
-                }) && type_has_static_layout(ty.map(&mut mapper), operation.span.location, &env) =>
+                }) && substituted_within_front_end_limits(*ty, &mut mapper, &env)
+                    .is_some_and(|ty| type_has_static_layout(ty, operation.span.location, &env)) =>
                 {
                     return true;
                 }
@@ -3076,11 +3214,8 @@ fn worth_specializing(
                     ..
                 } if operation.operands.last().is_some_and(|witness| {
                     matches!(witness, mir::Value::Parameter(id) if bound.contains_key(id))
-                }) && type_has_static_layout(
-                    metadata.payload_ty.map(&mut mapper),
-                    operation.span.location,
-                    &env,
-                ) =>
+                }) && substituted_within_front_end_limits(metadata.payload_ty, &mut mapper, &env)
+                    .is_some_and(|ty| type_has_static_layout(ty, operation.span.location, &env)) =>
                 {
                     return true;
                 }

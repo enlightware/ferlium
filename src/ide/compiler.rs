@@ -1419,17 +1419,16 @@ mod tests {
     }
     #[test]
     fn compiler_limits_in_mir_inspection_are_reported_without_a_panic() {
+        // Specializing `inner` makes a zero-sized result one level deeper than the limit.
         let mut source = "struct E0 {}\n".to_string();
-        for level in 1..=10 {
+        for level in 1..=64 {
             let member = level - 1;
-            source.push_str(&format!(
-                "struct E{level} {{ left: E{member}, right: E{member} }}\n"
-            ));
+            source.push_str(&format!("struct E{level} {{ inner: E{member} }}\n"));
         }
         source.push_str(
             "fn inner<T>(x: T) -> (T, T, T) { (x, x, x) }
             fn outer<T>(x: T, count: &mut int) -> int { count += 1; inner(x); 1 }
-            fn run(x: E10, count: &mut int) -> int { outer(x, count) }",
+            fn run(x: E64, count: &mut int) -> int { outer(x, count) }",
         );
         let mut compiler = Compiler::new();
         assert!(compiler.compile_report(&source).succeeded);

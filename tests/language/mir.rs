@@ -3621,17 +3621,18 @@ fn zero_sized_result_limits_reached_during_substitution_are_compilation_errors()
         compiler::error::{CompilationErrorImpl, CompilerLimitKind},
     };
 
+    // `E64` is as deep as a zero-sized result can be, and `(E64, E64, E64)` one level deeper, while
+    // both are within the front end's limits, so specializing `inner` reaches the result limit. A
+    // result beyond the front end's limits would leave the call generic instead.
     let mut source = "struct E0 {}\n".to_string();
-    for level in 1..=10 {
+    for level in 1..=64 {
         let member = level - 1;
-        source.push_str(&format!(
-            "struct E{level} {{ left: E{member}, right: E{member} }}\n"
-        ));
+        source.push_str(&format!("struct E{level} {{ inner: E{member} }}\n"));
     }
     source.push_str(
         "fn inner<T>(x: T) -> (T, T, T) { (x, x, x) }
          fn outer<T>(x: T, count: &mut int) -> int { count += 1; inner(x); 1 }
-         fn run(x: E10, count: &mut int) -> int { outer(x, count) }",
+         fn run(x: E64, count: &mut int) -> int { outer(x, count) }",
     );
     let mut session = CompilerSession::new();
     session.set_mir_optimization(MirOptimization::Enabled);
@@ -3647,8 +3648,8 @@ fn zero_sized_result_limits_reached_during_substitution_are_compilation_errors()
     let CompilationErrorImpl::CompilerLimitExceeded(error) = &*error else {
         panic!("{error:?}");
     };
-    assert_eq!(error.kind, CompilerLimitKind::ZeroSizedResultNodes);
-    assert_eq!((error.actual, error.limit), (6142, 4096));
+    assert_eq!(error.kind, CompilerLimitKind::ZeroSizedResultDepth);
+    assert_eq!((error.actual, error.limit), (65, 64));
     let modules = session.modules();
     let info = modules.info(modules.id_by_path(&path).unwrap()).unwrap();
     assert!(info.is_stale());

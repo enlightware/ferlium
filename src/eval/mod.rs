@@ -188,6 +188,11 @@ pub struct EvalCtx<'a> {
     pub environment_cell_limit: usize,
     /// remaining execution fuel; `None` means fuel checks are disabled
     fuel_remaining: Option<usize>,
+    /// Whether entering a callee spends a unit of fuel, besides the fuel checks in the code.
+    /// Compile-time evaluation sets it: the code that the language trusts to terminate, such as the
+    /// `Value` impls the compiler generates, checks no fuel, yet its work grows with the values it
+    /// goes through, which generic code can double at each call.
+    fuel_per_call: bool,
     /// Whether this executor can still safely run Ferlium code.
     execution_state: ExecutionState,
     /// One diagnostic cell for all native calls in this host invocation.
@@ -220,6 +225,22 @@ impl<'a> EvalCtx<'a> {
     /// Get the compiler session.
     pub fn compiler_session(&self) -> &'a CompilerSession {
         self.compiler_session
+    }
+
+    /// Makes entering each callee spend a unit of fuel, see [`Self::fuel_per_call`].
+    pub(crate) fn spend_fuel_per_call(&mut self) {
+        self.fuel_per_call = true;
+    }
+
+    /// Spends the unit of fuel of entering a callee at `span`, if entering one spends fuel. Every
+    /// entry of a script body or a native calls it, the first entry of an accessor included, but
+    /// not its resumption.
+    pub(crate) fn enter_callee(&mut self, span: Location) -> Result<(), RuntimeError> {
+        if self.fuel_per_call {
+            self.check_fuel(span)
+        } else {
+            Ok(())
+        }
     }
 
     /// Makes the next fuel check fail, ending execution through the ordinary exhaustion path.
@@ -345,6 +366,7 @@ impl<'a> EvalCtx<'a> {
             call_depth_limit: limits.execution.call_depth_limit,
             environment_cell_limit: limits.environment_cell_limit,
             fuel_remaining: limits.execution.fuel_limit,
+            fuel_per_call: false,
             execution_state: ExecutionState::Running,
             native_failure: Default::default(),
             module_id: module,
@@ -482,6 +504,7 @@ impl<'a> EvalCtx<'a> {
     ) -> EvalResult {
         let mut arguments = CallArgsStorageGuard::new(arguments);
         self.ensure_runnable()
+            .and_then(|()| self.enter_callee(location))
             .map_err(|err| err.with_frame(function, location))?;
         let module = self.compiler_session.expect_fresh_module(function.module);
         let metadata = module.get_function_by_id(function.function).unwrap();
