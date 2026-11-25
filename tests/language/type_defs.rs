@@ -1228,6 +1228,41 @@ fn invalid_trait_constraint_bindings_report_structured_errors() {
     }
 }
 
+/// A type parameter hides the module's types of its name, whether applied or not; applying it is
+/// an error, as it takes no arguments.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn applied_type_parameters_hide_module_types_of_their_name() {
+    let error = TestSession::new()
+        .fail_compilation(
+            "enum T<! E> { End, R(() -> int ! E) }\nfn f<T>(x: T, y: T<! read>) -> int { 1 }",
+        )
+        .into_inner();
+    match error {
+        CompilationErrorImpl::WrongNumberOfEffectArguments {
+            type_name,
+            expected: 0,
+            got: 1,
+            ..
+        } => assert_eq!(type_name, ustr("T")),
+        other => panic!("expected WrongNumberOfEffectArguments, got {other:?}"),
+    }
+    let error = TestSession::new()
+        .fail_compilation("struct T<U>(U)\nfn f<T>(x: T, y: T<int>) -> int { 1 }")
+        .into_inner();
+    assert!(
+        matches!(
+            error,
+            CompilationErrorImpl::WrongNumberOfArguments {
+                expected: 0,
+                got: 1,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn duplicate_generic_params_report_structured_errors() {

@@ -872,7 +872,15 @@ impl ast::PType {
                 args,
                 effect_args,
             } => {
-                if let Some(resolved) = resolve_type_path(path, env, modules_used)? {
+                // A type parameter hides the module's types of its name, as for a bare name, and
+                // takes no arguments, of either kind.
+                if let [(name, name_span)] = &path.segments[..]
+                    && let Some(ty_var) = generic_ty_params.get(name)
+                {
+                    expect_type_argument_count(0, *name_span, args.len(), span)?;
+                    expect_effect_argument_count(path, 0, *name_span, effect_args.len(), span)?;
+                    Type::variable(*ty_var)
+                } else if let Some(resolved) = resolve_type_path(path, env, modules_used)? {
                     let desugared_args = desugar_type_arguments(
                         args,
                         env,
@@ -892,14 +900,6 @@ impl ast::PType {
                         None,
                     )
                     .map_err(|error| with_function_type_hint(error, args, span))?
-                } else if let [(name, name_span)] = &path.segments[..] {
-                    let Some(ty_var) = generic_ty_params.get(name) else {
-                        return Err(internal_compilation_error!(TypeNotFound(span)));
-                    };
-                    // A type parameter takes no arguments, of either kind.
-                    expect_type_argument_count(0, *name_span, args.len(), span)?;
-                    expect_effect_argument_count(path, 0, *name_span, effect_args.len(), span)?;
-                    Type::variable(*ty_var)
                 } else {
                     return Err(internal_compilation_error!(TypeNotFound(span)));
                 }
