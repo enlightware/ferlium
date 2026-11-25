@@ -1032,3 +1032,39 @@ fn a_type_that_is_an_alias_of_itself_is_shown_once() {
         .fail_compilation("fn f<t>(x: t) { let r: Some(t) | None = x; x + 0; }")
         .expect_trait_impl_not_found("Num", &["Self = Option<Self>"]);
 }
+
+/// A recursive alias of `n` members, each holding the next one and a parameter of its own, so that
+/// its members stay distinct.
+fn parameter_ring(name: &str, n: usize) -> String {
+    let params = (0..n)
+        .map(|i| format!("{name}P{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    (0..n)
+        .map(|i| {
+            format!(
+                "type {name}{i}<{params}> = Cons({name}P{i}, {name}{}<{params}>) | Nil;\n",
+                (i + 1) % n
+            )
+        })
+        .collect()
+}
+
+/// Unifying two recursive types of coprime periods meets each member of one with each member of the
+/// other, here 62 × 63 pairs, as 63 members are the most that the type height limit allows. It
+/// meets them one after the other rather than nested, so the stack it needs does not grow with the
+/// pairs.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_types_of_coprime_periods_unify() {
+    let (p, q) = (62, 63);
+    let holes = |n: usize| vec!["_"; n].join(", ");
+    let src = format!(
+        "{}{}fn f(x: R0<{}>, y: S0<{}>, c: bool) -> int {{\n    let z = if c {{\n        x\n    }} else {{\n        y\n    }};\n    0\n}}\n0",
+        parameter_ring("R", p),
+        parameter_ring("S", q),
+        holes(p),
+        holes(q),
+    );
+    assert_val_eq!(TestSession::new().run(&src), int(0));
+}
