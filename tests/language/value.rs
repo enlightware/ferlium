@@ -4672,3 +4672,21 @@ fn a_field_read_two_members_deep_in_a_temporary_drops_the_temporary() {
         assert_val_eq!(session.run(&format!("{src}{read}")), int(2));
     }
 }
+
+/// In a generic recursive group whose members reach each other along many paths, here each holding
+/// the next one twice, deriving `Value` costs the members, not the paths.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn value_evidence_of_recursive_groups_costs_their_members() {
+    let n = 16;
+    let ring = (0..n)
+        .map(|i| {
+            format!(
+                "enum E{i}<T> {{ A(E{j}<T>, E{j}<T>), N(T) }}\n",
+                j = (i + 1) % n
+            )
+        })
+        .collect::<String>();
+    let src = format!("{ring}fn f<T>(x: E0<T>) -> E0<T> {{ x }}\n0");
+    assert_val_eq!(TestSession::new().run(&src), int(0));
+}

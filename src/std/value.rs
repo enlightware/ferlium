@@ -1418,56 +1418,52 @@ pub(crate) fn generated_value_storage_constraints(
         .collect()
 }
 
+/// Collects into `evidence` the `Value` evidence of `ty`, a part of `root`. Each type is walked
+/// once, so it is evidence once: met again, on the walk's path or after its walk, it adds nothing,
+/// but for the root, whose recursive occurrences are evidence too. So a recursive group whose
+/// members reach each other along many paths costs its members, not its paths.
 fn collect_generated_value_evidence_types(
     ty: Type,
     root: Type,
     env: &impl TypeLayoutEnv,
-    active: &mut FxHashSet<Type>,
+    visited: &mut FxHashSet<Type>,
     evidence: &mut Vec<Type>,
-) -> bool {
+) {
     if ty.is_constant() || ty.is_function() || ty.is_subscript() {
-        return true;
+        return;
     }
-    if !active.insert(ty) {
+    if !visited.insert(ty) {
         if ty == root && !evidence.contains(&ty) {
             evidence.push(ty);
         }
-        return true;
+        return;
     }
 
     let data = ty.data().clone();
-    let derivable = match data {
-        TypeKind::Tuple(fields) => fields.into_iter().all(|field| {
-            collect_generated_value_evidence_types(field, root, env, active, evidence)
-        }),
+    match data {
+        TypeKind::Tuple(fields) => {
+            for field in fields {
+                collect_generated_value_evidence_types(field, root, env, visited, evidence);
+            }
+        }
         TypeKind::Record(fields) | TypeKind::Variant(fields) => {
-            fields.into_iter().all(|(_, field)| {
-                collect_generated_value_evidence_types(field, root, env, active, evidence)
-            })
+            for (_, field) in fields {
+                collect_generated_value_evidence_types(field, root, env, visited, evidence);
+            }
         }
         TypeKind::Named(named) => {
             if named_value_is_compiler_derived(named.def, env) {
                 let shape = env
                     .type_def(named.def)
                     .instantiated_shape_with_effects(&named.params, &named.effect_params);
-                collect_generated_value_evidence_types(shape, root, env, active, evidence)
+                collect_generated_value_evidence_types(shape, root, env, visited, evidence);
             } else {
-                if !evidence.contains(&ty) {
-                    evidence.push(ty);
-                }
-                true
-            }
-        }
-        TypeKind::Variable(_) | TypeKind::Native(_) => {
-            if !evidence.contains(&ty) {
                 evidence.push(ty);
             }
-            true
         }
-        TypeKind::Function(_) | TypeKind::Subscript(_) | TypeKind::Never => true,
-    };
-    active.remove(&ty);
-    derivable
+        TypeKind::Variable(_) | TypeKind::Native(_) => evidence.push(ty),
+        TypeKind::Function(_) | TypeKind::Subscript(_) | TypeKind::Never => {}
+    }
 }
 
 /// Return the external `Value` evidence from which a compiler-derived dictionary can be built.
@@ -1496,8 +1492,8 @@ pub(crate) fn generated_value_evidence_types(
         return None;
     }
     let mut evidence = Vec::new();
-    collect_generated_value_evidence_types(ty, ty, env, &mut FxHashSet::default(), &mut evidence)
-        .then_some(evidence)
+    collect_generated_value_evidence_types(ty, ty, env, &mut FxHashSet::default(), &mut evidence);
+    Some(evidence)
 }
 
 /// Return whether a complete `Value` dictionary for this application is synthesized by the
