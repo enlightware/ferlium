@@ -2874,6 +2874,97 @@ fn effect_after_type_arguments_is_an_argument_of_the_outer_type() {
     }
 }
 
+/// A definition with effect parameters takes as many effect arguments wherever it is named: a bare
+/// name gives none, also in its own shape or in a recursive alias. A recursive alias can give
+/// concrete effects to a definition outside its group; within it, a reference passes the
+/// definition's effect parameters unchanged, which an alias has none of.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn named_types_take_their_effect_arguments_everywhere() {
+    let def = "enum A<! E> { End, R(() -> int ! E) }";
+    for usage in [
+        "fn f(x: A) -> int { 1 }",
+        "enum B { Go(A) }",
+        "type X = Done | Wrap(A, X);",
+    ] {
+        let error = TestSession::new().fail_compilation(&format!("{def}\n{usage}"));
+        let CompilationErrorImpl::WrongNumberOfEffectArguments {
+            type_name,
+            expected: 1,
+            got: 0,
+            ..
+        } = &*error
+        else {
+            panic!("{usage}: {error:?}")
+        };
+        assert_eq!(*type_name, ustr("A"), "{usage}");
+    }
+    let error =
+        TestSession::new().fail_compilation("enum A<! E> { End, R(() -> int ! E), Next(A) }");
+    assert!(
+        matches!(
+            &*error,
+            CompilationErrorImpl::WrongNumberOfEffectArguments {
+                expected: 1,
+                got: 0,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_val_eq!(
+        TestSession::new().run(&format!(
+            "{def}\ntype X = Done | Wrap(A<! read>, X);\nfn f(x: X) -> int {{ 1 }}\nf(Done)"
+        )),
+        int(1)
+    );
+    TestSession::new()
+        .fail_compilation(
+            "enum A<! E> { End, R(() -> int ! E), Go(X) }\ntype X = Done | Wrap(A<! read>, X);",
+        )
+        .expect_non_regular_recursive_generic_shape("A");
+}
+
+/// An error about the arguments of a type names that type: a type parameter takes none of either
+/// kind, and the hint to move effects onto a function type concerns the type given them, not one
+/// that holds it.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn effect_argument_errors_concern_the_type_given_them() {
+    for src in [
+        "fn f<T>(x: T<! read>) -> int { 0 }",
+        "type X<T> = Done | Wrap(T<! read>, X<T>);",
+    ] {
+        let error = TestSession::new().fail_compilation(src);
+        let CompilationErrorImpl::WrongNumberOfEffectArguments {
+            type_name,
+            expected: 0,
+            got: 1,
+            ..
+        } = &*error
+        else {
+            panic!("{src}: {error:?}")
+        };
+        assert_eq!(*type_name, ustr("T"), "{src}");
+    }
+    let defs = "struct Pair<A, B>(A, B)\nstruct Box<T>(T)";
+    for usage in [
+        "fn f(x: Pair<Box<int ! read>, () -> int>) -> int { 0 }",
+        "type X = Done | Wrap(Pair<Box<int ! read>, () -> int>, X);",
+    ] {
+        let error = TestSession::new().fail_compilation(&format!("{defs}\n{usage}"));
+        let CompilationErrorImpl::WrongNumberOfEffectArguments {
+            type_name,
+            function_type_span: None,
+            ..
+        } = &*error
+        else {
+            panic!("{usage}: {error:?}")
+        };
+        assert_eq!(*type_name, ustr("Box"), "{usage}");
+    }
+}
+
 const CALL_THROUGH_TRAIT: &str = indoc! { r#"
     trait Run<Self |-> ! E> {
         fn run(x: Self) -> int ! E;

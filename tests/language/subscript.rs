@@ -1599,8 +1599,9 @@ fn projection_fallback_on_tuple_newtype_reports_projection_context() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn projection_subscript_rejects_effect_parameterized_receiver_for_now() {
-    assert_invalid_subscript_definition(
-        indoc! { r#"
+    // A receiver cannot give effect arguments, so it names such a type without its arguments.
+    let error = experimental_session()
+        .fail_compilation(indoc! { r#"
             #[private_repr]
             struct EffectBox<! E> {
                 run: () -> () ! E,
@@ -1611,9 +1612,18 @@ fn projection_subscript_rejects_effect_parameterized_receiver_for_now() {
                     1
                 }
             }
-        "# },
-        SubscriptDefinitionSubject::Subscript(ustr("value")),
-        InvalidSubscriptDefinitionKind::ProjectionReceiverGenericParametersMismatch,
+        "# })
+        .into_inner();
+    assert!(
+        matches!(
+            error,
+            CompilationErrorImpl::WrongNumberOfEffectArguments {
+                expected: 1,
+                got: 0,
+                ..
+            }
+        ),
+        "{error:?}"
     );
 }
 

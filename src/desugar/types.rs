@@ -178,6 +178,13 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
                     0,
                     span,
                 )?;
+                expect_effect_argument_count(
+                    path,
+                    self.env.type_def_effect_param_count(*type_def),
+                    self.env.type_def_span(*type_def),
+                    0,
+                    span,
+                )?;
                 return Ok(Type::named(*type_def, Vec::new()));
             }
         }
@@ -195,18 +202,18 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
         &mut self,
         path: &ast::Path,
         args: &[ast::TypeSpan<Parsed>],
+        effect_args: Vec<EffType>,
         span: Location,
     ) -> Result<Type, InternalCompilationError> {
         if let [(name, name_span)] = &path.segments[..] {
-            if self.generic_ty_params.contains_key(name) {
-                return Err(internal_compilation_error!(WrongNumberOfArguments {
-                    expected: 0,
-                    expected_span: *name_span,
-                    got: args.len(),
-                    got_span: span,
-                }));
+            if let Some(&ty_var) = self.generic_ty_params.get(name) {
+                // A type parameter takes no arguments, of either kind.
+                expect_type_argument_count(0, *name_span, args.len(), span)?;
+                expect_effect_argument_count(path, 0, *name_span, effect_args.len(), span)?;
+                return Ok(Type::variable(ty_var));
             }
             if let Some(alias) = self.aliases.get(name).cloned() {
+                expect_effect_argument_count(path, 0, span, effect_args.len(), span)?;
                 return self.resolve_local_alias_with_args(&alias, args, span);
             }
             if let Some(type_def) = self.type_defs.get(name) {
@@ -214,6 +221,13 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
                     self.env.type_def_param_names(*type_def).len(),
                     self.env.type_def_span(*type_def),
                     args.len(),
+                    span,
+                )?;
+                expect_effect_argument_count(
+                    path,
+                    self.env.type_def_effect_param_count(*type_def),
+                    self.env.type_def_span(*type_def),
+                    effect_args.len(),
                     span,
                 )?;
                 let desugared_args = args
@@ -224,7 +238,7 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
                     TypeKind::Named(NamedType {
                         def: *type_def,
                         params: desugared_args,
-                        effect_params: vec![],
+                        effect_params: effect_args,
                     }),
                     None,
                 ));
@@ -239,7 +253,7 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
                 resolved,
                 path,
                 desugared_args,
-                vec![],
+                effect_args,
                 span,
                 self.env,
                 Some(&mut self.kinds),
@@ -307,17 +321,11 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
                 args,
                 effect_args,
             } => {
-                if !effect_args.is_empty() {
-                    return Err(internal_compilation_error!(WrongNumberOfEffectArguments {
-                        type_name: path_last_name(path),
-                        expected: 0,
-                        expected_span: span,
-                        got: effect_args.len(),
-                        got_span: span,
-                        function_type_span: function_type_with_effects_span(args, span),
-                    }));
-                }
-                self.desugar_path_with_args(path, args, span)?
+                // An alias has no effect parameters, so its effect arguments are concrete effects,
+                // as in its function types.
+                let effect_args = desugar_effect_arguments(effect_args, None)?;
+                self.desugar_path_with_args(path, args, effect_args, span)
+                    .map_err(|error| with_function_type_hint(error, args, span))?
             }
             Variant(types) => {
                 let mut seen = FxHashMap::default();
@@ -885,15 +893,13 @@ impl ast::PType {
                     )
                     .map_err(|error| with_function_type_hint(error, args, span))?
                 } else if let [(name, name_span)] = &path.segments[..] {
-                    if generic_ty_params.contains_key(name) {
-                        return Err(internal_compilation_error!(WrongNumberOfArguments {
-                            expected: 0,
-                            expected_span: *name_span,
-                            got: args.len(),
-                            got_span: span,
-                        }));
-                    }
-                    return Err(internal_compilation_error!(TypeNotFound(span)));
+                    let Some(ty_var) = generic_ty_params.get(name) else {
+                        return Err(internal_compilation_error!(TypeNotFound(span)));
+                    };
+                    // A type parameter takes no arguments, of either kind.
+                    expect_type_argument_count(0, *name_span, args.len(), span)?;
+                    expect_effect_argument_count(path, 0, *name_span, effect_args.len(), span)?;
+                    Type::variable(*ty_var)
                 } else {
                     return Err(internal_compilation_error!(TypeNotFound(span)));
                 }
@@ -1725,7 +1731,8 @@ fn function_type_with_effects_span(
     })
 }
 
-/// Point an error about too many effect arguments at the function type they may be meant for.
+/// Point an error about too many effect arguments given by the application of `args` at `span` at
+/// the function type they may be meant for. An error of a nested application keeps its own hint.
 fn with_function_type_hint(
     error: InternalCompilationError,
     args: &[ast::TypeSpan<Parsed>],
@@ -1739,14 +1746,16 @@ fn with_function_type_hint(
             got,
             got_span,
             ..
-        } if got > expected => internal_compilation_error!(WrongNumberOfEffectArguments {
-            type_name,
-            expected,
-            expected_span,
-            got,
-            got_span,
-            function_type_span: function_type_with_effects_span(args, span),
-        }),
+        } if got > expected && got_span == span => {
+            internal_compilation_error!(WrongNumberOfEffectArguments {
+                type_name,
+                expected,
+                expected_span,
+                got,
+                got_span,
+                function_type_span: function_type_with_effects_span(args, span),
+            })
+        }
         error => InternalCompilationError::new(error),
     }
 }
@@ -1765,6 +1774,13 @@ fn desugar_resolved_type_without_args(
         ResolvedTypePath::TypeDef(type_def) => {
             expect_type_argument_count(
                 env.type_def_param_names(type_def).len(),
+                env.type_def_span(type_def),
+                0,
+                span,
+            )?;
+            expect_effect_argument_count(
+                path,
+                env.type_def_effect_param_count(type_def),
                 env.type_def_span(type_def),
                 0,
                 span,
