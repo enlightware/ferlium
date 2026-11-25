@@ -139,10 +139,13 @@ fuzz-effect-soundness:
 fuzz-effect-selection:
 	$(call fuzz_run,$(FUZZ_ENV),effect_selection,,$(FUZZ_NO_LEAK_CHECK) $(FUZZ_GENERATOR_FLAGS))
 
+fuzz-deep-types:
+	$(call fuzz_run,$(FUZZ_ENV),deep_types,,$(FUZZ_NO_LEAK_CHECK) $(FUZZ_GENERATOR_FLAGS))
+
 fuzz-optimization-leaks:
 	$(call fuzz_run,$(FUZZ_ENV_LEAKS),grammar_optimization_differential,$(GRAMMAR_SEEDS),)
 
-fuzz: fuzz-ide fuzz-grammar fuzz-optimization fuzz-effect-soundness fuzz-effect-selection
+fuzz: fuzz-ide fuzz-grammar fuzz-optimization fuzz-effect-soundness fuzz-effect-selection fuzz-deep-types
 
 fuzz-cmin-ide:
 	$(call fuzz_cmin,ide_compile_any)
@@ -159,7 +162,10 @@ fuzz-cmin-effect-soundness:
 fuzz-cmin-effect-selection:
 	$(call fuzz_cmin,effect_selection)
 
-fuzz-cmin: fuzz-cmin-ide fuzz-cmin-grammar fuzz-cmin-optimization fuzz-cmin-effect-soundness fuzz-cmin-effect-selection
+fuzz-cmin-deep-types:
+	$(call fuzz_cmin,deep_types)
+
+fuzz-cmin: fuzz-cmin-ide fuzz-cmin-grammar fuzz-cmin-optimization fuzz-cmin-effect-soundness fuzz-cmin-effect-selection fuzz-cmin-deep-types
 
 repl-hir:
 	RUST_BACKTRACE=1 cargo run --example ferlium -- --hir $(ARGS)
@@ -222,11 +228,13 @@ update-license-headers:
 .PHONY: fuzz-optimization-leaks
 .PHONY: fuzz-effect-soundness
 .PHONY: fuzz-effect-selection
+.PHONY: fuzz-deep-types
 .PHONY: fuzz
 .PHONY: fuzz-cmin-ide
 .PHONY: fuzz-cmin-grammar
 .PHONY: fuzz-cmin-effect-soundness
 .PHONY: fuzz-cmin-effect-selection
+.PHONY: fuzz-cmin-deep-types
 .PHONY: fuzz-cmin-optimization
 .PHONY: fuzz-cmin
 .PHONY: repl-hir

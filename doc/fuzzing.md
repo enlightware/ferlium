@@ -58,6 +58,7 @@ Targets:
 - `effect_soundness` (`make fuzz-effect-soundness`) generates programs combining traits with output effects, impls, generic callers and fallible callbacks, traits whose default methods rely on effect bounds, custom `Value` impls with effect prerequisites, and impls that require one another in a circle.
   Each program also carries a web of impls, compiled in several orders that must agree.
 - `effect_selection` (`make fuzz-effect-selection`) generates programs in which effects could reach impl selection.
+- `deep_types` (`make fuzz-deep-types`) generates programs that chain and double the shapes that make types deep or large, past the compiler's limits.
 
 The raw byte target ignores invalid UTF-8 and inputs larger than 32 KiB.
 The grammar targets ignore invalid decision tapes, very large tapes, and generated source larger than 32 KiB.
@@ -98,3 +99,6 @@ The effect selection target makes the same backend checks as the effect soundnes
 - a pure callback is accepted unless an impl it reaches requires an effect.
 
 Its programs are compiled as trusted code, so that they can implement `Value`.
+
+The deep types target makes the same backend checks, and checks that the compiler accepts each program or rejects it with one of its limits.
+Its artifacts are generator inputs: `decode_deep_types_program` prints the program one generates, and `deep_types_census` checks programs from pseudo-random inputs and reports the slowest.

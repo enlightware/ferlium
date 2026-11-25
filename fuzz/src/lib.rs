@@ -8,6 +8,7 @@
 //! what they assert about the program, not in what programs they see — and a change to the profile
 //! moves every grammar target at once.
 
+pub mod deep_types;
 pub mod effect_oracle;
 pub mod effect_selection;
 pub mod effect_soundness;

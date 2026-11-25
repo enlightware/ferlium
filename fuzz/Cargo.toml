@@ -83,3 +83,24 @@ path = "src/bin/effect_selection_census.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "deep_types"
+path = "fuzz_targets/deep_types.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_deep_types_program"
+path = "src/bin/decode_deep_types_program.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "deep_types_census"
+path = "src/bin/deep_types_census.rs"
+test = false
+doc = false
+bench = false
