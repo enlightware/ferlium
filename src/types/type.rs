@@ -1759,7 +1759,8 @@ pub struct TypeDef {
 /// in it replaced by its own definition's shape, down to the leaves whose layout does not depend on
 /// what they hold, natives, callables and variables (`RepresentationMetrics`). Parameters count as no
 /// part, so that a named type's representation follows from its definition's summary and those of
-/// its arguments, without expanding anything.
+/// its arguments, without expanding it, but where an argument lies on a cycle, as
+/// `RepresentationMetrics` explains.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RepresentationSummary {

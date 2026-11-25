@@ -133,7 +133,8 @@ impl TrivialCopyWalk {
 /// The metrics of the representation of a type: the type with each named type in it replaced by its
 /// definition's shape, down to the leaves whose layout does not depend on what they hold, natives,
 /// callables and variables. They follow from the type itself and the summaries of the definitions
-/// it names (`RepresentationSummary`), so computing them expands nothing.
+/// it names (`RepresentationSummary`): computing them expands a named type only where its summary
+/// cannot give them, as below.
 ///
 /// The height bounds the stack of a walk that expands named types and does not revisit a type it is
 /// walking; the size, counting a repeated part at each occurrence, bounds the work of one that does
@@ -159,10 +160,32 @@ pub(crate) struct RepresentationMetrics<'a, E> {
     group: Option<&'a FxHashSet<TypeDefId>>,
     /// The metrics of each type whose group is complete.
     done: FxHashMap<Type, Metrics>,
-    /// The types of the incomplete groups, in the order the walk met them: Tarjan's stack.
-    stack: Vec<Type>,
+    /// The types of the incomplete groups, in the order the walk met them, each with how it is
+    /// measured: Tarjan's stack.
+    stack: Vec<Visit>,
     /// For each type of `stack`, the smallest index in it that its walk reached.
     low: FxHashMap<Type, usize>,
+}
+
+/// A type that the walk met, with how it measures it, decided then, and the children it walks.
+struct Visit {
+    ty: Type,
+    measure: Measure,
+    children: Vec<Type>,
+}
+
+/// How the walk measures a type.
+enum Measure {
+    /// A parameter of the definition being summarized, of this index, which counts as no part.
+    Param(usize),
+    /// One part: a leaf, or a reference to a definition of the group being summarized.
+    Part,
+    /// One part above its children: the members of a product or a variant, or the shape of a
+    /// named type that the walk measures itself.
+    Above,
+    /// A named type, by its definition's summary given its arguments: its children are those at
+    /// the parameters that occur.
+    Summary(NamedType),
 }
 
 /// The metrics of a representation, and of the occurrences in it of the parameters being
@@ -387,19 +410,45 @@ impl<'a, E: TypeDefEnv> RepresentationMetrics<'a, E> {
                 .any(|(arg, param)| param.depth.is_some() && arg.is_global_recursive())
     }
 
-    /// The children of `ty` in the walk: its shape given its arguments for a named type that
-    /// [`Self::expands`], its children in its representation otherwise.
-    fn children(&self, ty: Type) -> Vec<Type> {
-        let named = ty.data().as_named().cloned();
-        if let Some(named) = named
-            && self.expands(&named)
-        {
-            let type_def = self.env.type_def(named.def);
-            let effects = vec![EffType::empty(); type_def.effect_param_count()];
-            let shape = type_def.instantiated_shape_with_effects(&named.params, &effects);
-            return vec![erase_type_effects(shape)];
+    /// How the walk measures `ty`, and its children: for a named type that [`Self::expands`], its
+    /// shape given its arguments.
+    fn visit(&self, ty: Type) -> Visit {
+        let kind = ty.data().clone();
+        let (measure, children) = match kind {
+            TypeKind::Variable(var) => match self.params.get(&var) {
+                Some(&index) => (Measure::Param(index), Vec::new()),
+                None => (Measure::Part, Vec::new()),
+            },
+            TypeKind::Named(named)
+                if self.group.is_some_and(|group| group.contains(&named.def)) =>
+            {
+                (Measure::Part, Vec::new())
+            }
+            TypeKind::Named(named) if self.expands(&named) => {
+                let type_def = self.env.type_def(named.def);
+                let effects = vec![EffType::empty(); type_def.effect_param_count()];
+                let shape = type_def.instantiated_shape_with_effects(&named.params, &effects);
+                (Measure::Above, vec![erase_type_effects(shape)])
+            }
+            TypeKind::Named(named) => {
+                let children = occurring_args(&named, self.env);
+                (Measure::Summary(named), children)
+            }
+            TypeKind::Tuple(members) => (Measure::Above, members),
+            TypeKind::Record(fields) | TypeKind::Variant(fields) => (
+                Measure::Above,
+                fields.into_iter().map(|(_, ty)| ty).collect(),
+            ),
+            TypeKind::Native(_)
+            | TypeKind::Function(_)
+            | TypeKind::Subscript(_)
+            | TypeKind::Never => (Measure::Part, Vec::new()),
+        };
+        Visit {
+            ty,
+            measure,
+            children,
         }
-        representation_children(ty, self.env)
     }
 
     /// Walk the type graph of `ty`, `depth` types deep.
@@ -413,9 +462,10 @@ impl<'a, E: TypeDefEnv> RepresentationMetrics<'a, E> {
             return Err(BeyondHeight);
         }
         let index = self.stack.len();
-        self.stack.push(ty);
+        let mut visit = self.visit(ty);
+        let children = std::mem::take(&mut visit.children);
+        self.stack.push(visit);
         self.low.insert(ty, index);
-        let children = self.children(ty);
         for &child in &children {
             if self.done.contains_key(&child) {
                 continue;
@@ -429,55 +479,47 @@ impl<'a, E: TypeDefEnv> RepresentationMetrics<'a, E> {
                 *low = (*low).min(child_low);
             }
         }
+        self.stack[index].children = children;
         if self.low[&ty] != index {
             return Ok(());
         }
         let group = self.stack.split_off(index);
         for member in &group {
-            self.low.remove(member);
+            self.low.remove(&member.ty);
         }
-        let metrics = if group.len() == 1 && !children.contains(&ty) {
-            self.node_metrics(ty, &children)
+        let metrics = if let [visit] = &group[..]
+            && !visit.children.contains(&ty)
+        {
+            self.node_metrics(visit)
         } else {
             // The other types of the group count as nothing in each: the group counts each once.
             let members = group
                 .iter()
-                .map(|&member| self.node_metrics(member, &self.children(member)))
+                .map(|member| self.node_metrics(member))
                 .collect::<Vec<_>>();
             Metrics::group(&members)
         };
         for member in group {
-            self.done.insert(member, metrics.clone());
+            self.done.insert(member.ty, metrics.clone());
         }
         Ok(())
     }
 
-    /// The metrics of `ty` from those of its `children`, of which those not done are in its group,
-    /// and count as nothing.
-    fn node_metrics(&self, ty: Type, children: &[Type]) -> Metrics {
+    /// The metrics of a visited type from those of its children, of which those not done are in
+    /// its group, and count as nothing.
+    fn node_metrics(&self, visit: &Visit) -> Metrics {
         let none = Metrics::default();
         let child = |child: &Type| self.done.get(child).unwrap_or(&none);
-        let kind = ty.data().clone();
-        match kind {
-            TypeKind::Variable(var) => match self.params.get(&var) {
-                Some(&index) => Metrics::param(index),
-                None => Metrics::part(),
-            },
-            TypeKind::Named(named)
-                if self.group.is_some_and(|group| group.contains(&named.def)) =>
-            {
-                Metrics::part()
-            }
-            TypeKind::Named(named) if self.expands(&named) => {
-                Metrics::above(children.iter().map(child))
-            }
+        match &visit.measure {
+            Measure::Param(index) => Metrics::param(*index),
+            Measure::Part => Metrics::part(),
+            Measure::Above => Metrics::above(visit.children.iter().map(child)),
             // An argument at a parameter that does not occur is not walked, and counts as nothing.
-            TypeKind::Named(named) => {
+            Measure::Summary(named) => {
                 let args = named.params.iter().map(child).collect::<Vec<_>>();
                 let type_def = self.env.type_def(named.def);
                 Metrics::named(&type_def.representation, &args)
             }
-            _ => Metrics::above(children.iter().map(child)),
         }
     }
 }
@@ -503,22 +545,25 @@ fn representation_children(ty: Type, env: &impl TypeDefEnv) -> Vec<Type> {
         TypeKind::Record(fields) | TypeKind::Variant(fields) => {
             fields.iter().map(|(_, ty)| *ty).collect()
         }
-        TypeKind::Named(named) => {
-            let params = &env.type_def(named.def).representation.params;
-            named
-                .params
-                .iter()
-                .zip(params)
-                .filter(|(_, param)| param.depth.is_some())
-                .map(|(&arg, _)| arg)
-                .collect()
-        }
+        TypeKind::Named(named) => occurring_args(named, env),
         TypeKind::Variable(_)
         | TypeKind::Native(_)
         | TypeKind::Function(_)
         | TypeKind::Subscript(_)
         | TypeKind::Never => Vec::new(),
     }
+}
+
+/// The arguments of `named` at the parameters that occur in its definition's representation.
+fn occurring_args(named: &NamedType, env: &impl TypeDefEnv) -> Vec<Type> {
+    let params = &env.type_def(named.def).representation.params;
+    named
+        .params
+        .iter()
+        .zip(params)
+        .filter(|(_, param)| param.depth.is_some())
+        .map(|(&arg, _)| arg)
+        .collect()
 }
 
 /// Summarize the representations of the type definitions of `module`, each after those it names:
