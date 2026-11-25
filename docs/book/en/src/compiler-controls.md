@@ -42,4 +42,4 @@ This keeps types that grow without bound from exhausting the compiler.
 A Rust host compiles and runs Ferlium source through a `CompilerSession`, as `examples/minimal.rs` in the repository shows.
 The host should compile on a thread with a generous stack, for instance 4 MiB in a release build and 32 MiB in a debug build.
 Rust gives a spawned thread 2 MiB by default, and Windows gives a main thread 1 MiB.
-To check a stack size, run the test `nesting_at_the_limit_compiles` with `RUST_MIN_STACK` set to it.
+To check a stack size, run the tests `nesting_at_the_limit_compiles` and `values_at_the_representation_limits_run` with `RUST_MIN_STACK` set to it.

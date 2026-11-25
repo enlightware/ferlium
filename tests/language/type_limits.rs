@@ -325,6 +325,43 @@ fn recursive_groups_are_limited_in_representation_height() {
     assert_eq!(at, "enum E0 { A(E1), N }");
 }
 
+/// Values at the limits of representations are built, compared and matched: those of the longest
+/// chain of structs, each holding the previous one, and of the longest recursive group, built 60
+/// levels deep, as its generated `Value` methods take about two calls per level, within the
+/// default call depth. The walks over them cost the compiler and the back ends stack at each level,
+/// so this test checks a stack size for hosts, as `nesting_at_the_limit_compiles` does: run it with
+/// `RUST_MIN_STACK` set to that size.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn values_at_the_representation_limits_run() {
+    let limit = REPRESENTATION_HEIGHT_LIMIT as usize;
+    // As in `struct_chains_are_limited_in_representation_height` and
+    // `recursive_groups_are_limited_in_representation_height`.
+    let chain = (limit - 3) / 2;
+    let ring = (limit - 2) / 3;
+    let structs = (1..=chain)
+        .map(|i| format!("struct S{i} {{ x: S{} }}\n", i - 1))
+        .collect::<String>();
+    let enums = (0..ring)
+        .map(|i| format!("enum E{i} {{ A(E{}), N }}\n", (i + 1) % ring))
+        .collect::<String>();
+    let builds = (1..=chain)
+        .map(|i| format!("    let v{i} = S{i} {{ x: v{} }};\n", i - 1))
+        .collect::<String>();
+    let last = 59;
+    let links = (0..last)
+        .rev()
+        .map(|i| format!("    let e{i} = E{i}::A(e{});\n", i + 1))
+        .collect::<String>();
+    let src = format!(
+        "struct S0 {{ x: int }}\n{structs}{enums}\
+         fn f() -> int {{\n    let v0 = S0 {{ x: 1 }};\n{builds}    let w = v{chain};\n    \
+         let e{last} = E{last}::N;\n{links}    match e0 {{\n        \
+         E0::A(next) => if w == v{chain} {{ 2 }} else {{ 1 }},\n        E0::N => 0,\n    }}\n}}\nf()"
+    );
+    assert_val_eq!(TestSession::new().run(&src), int(2));
+}
+
 /// `n` structs from `S1` to `Sn`, each holding the previous one twice, from `S0 { x: int }`.
 fn struct_pairs(n: usize) -> String {
     let structs = (1..=n)

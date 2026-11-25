@@ -27,7 +27,7 @@ use crate::{
             value_layout_for_type, variant_payload_offset, variant_payload_storage_for_type,
         },
     },
-    types::r#type::{Type, TypeKind},
+    types::r#type::{REPRESENTATION_HEIGHT_LIMIT, Type, TypeKind},
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
@@ -39,10 +39,14 @@ use std::{
 use ustr::Ustr;
 
 // Capability bounds, not an invocation-wide memory quota. Check before layout computation and
-// flattening, which otherwise expand a compact type DAG into an arbitrarily large tree.
+// flattening, which otherwise expand a compact type DAG into an arbitrarily large tree. The depth
+// is the front end's bound on representations, so that every value it accepts fits.
 const MAX_STORAGE_LEAVES: usize = 4096;
-const MAX_STORAGE_DEPTH: usize = 64;
+const MAX_STORAGE_DEPTH: usize = REPRESENTATION_HEIGHT_LIMIT as usize;
 const MAX_STORAGE_NODES: usize = 16384;
+// Native members borrowed from one another form a chain that no representation bounds: an opaque
+// native type can expose another instance of itself.
+const MAX_NATIVE_MEMBER_DEPTH: usize = 64;
 
 macro_rules! define_stamp_type {
     ($(#[$meta:meta])* $visibility:vis $name:ident) => {
@@ -2070,7 +2074,7 @@ impl Memory {
                 break;
             };
             depth += 1;
-            if depth >= MAX_STORAGE_DEPTH {
+            if depth >= MAX_NATIVE_MEMBER_DEPTH {
                 return Err(unsupported("native member nesting limit"));
             }
             ancestor = parent;

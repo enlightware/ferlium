@@ -547,8 +547,8 @@ impl<'a> ModuleRegistry<'a> {
 /// [`REPRESENTATION_HEIGHT_LIMIT`](crate::types::r#type::REPRESENTATION_HEIGHT_LIMIT). A host should
 /// compile on a thread with a generous stack, for instance 4 MiB in a release build and 32 MiB in
 /// a debug build. Rust gives a spawned thread 2 MiB by default, and Windows gives a main thread
-/// 1 MiB. The test `nesting_at_the_limit_compiles` checks a stack size: run it with
-/// `RUST_MIN_STACK` set to it.
+/// 1 MiB. The tests `nesting_at_the_limit_compiles` and `values_at_the_representation_limits_run`
+/// check a stack size: run them with `RUST_MIN_STACK` set to it.
 #[derive(Debug)]
 pub struct CompilerSession {
     /// Source table for this compilation session.
