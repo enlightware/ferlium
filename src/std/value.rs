@@ -14,6 +14,8 @@ use crate::{
     ast::{Path, UnnamedArg},
     compiler::error::{CompilerLimit, CompilerLimitKind, InternalCompilationError},
     containers::b,
+    desugar::DepGraphNode,
+    graph::find_strongly_connected_components,
     hir::{
         self, CallArgument, NodeArena, NodeId,
         dictionary::DictionaryReq,
@@ -1322,58 +1324,116 @@ pub(crate) fn generated_value_storage_requirements(
     span: Location,
     env: &impl TypeLayoutEnv,
 ) -> Vec<DictionaryReq> {
+    let walk = GeneratedValueStorageWalk::new(ty, env);
     let mut storages = Vec::new();
-    collect_generated_value_storages(ty, span, env, &mut FxHashSet::default(), &mut storages);
+    let mut visited = vec![false; walk.children.len()];
+    walk.collect(ty, span, env, &mut visited, &mut storages);
     storages
 }
 
-fn collect_generated_value_storages(
-    ty: Type,
-    span: Location,
-    env: &impl TypeLayoutEnv,
-    active: &mut FxHashSet<Type>,
-    storages: &mut Vec<DictionaryReq>,
-) {
-    // A closed type fixes every storage within it, and recursive types lead back to an active one.
-    if representation_is_closed(ty) || !active.insert(ty) {
-        return;
-    }
-    let data = ty.data().clone();
-    match data {
-        TypeKind::Tuple(fields) => {
-            for field in fields {
-                collect_generated_value_storages(field, span, env, active, storages);
+/// The types that [`generated_value_storage_requirements`] walks, each with the types it enters
+/// and its strongly connected component. A payload in the component of its variant leads back to
+/// it, so it is indirect, as [`representation_reaches`] would find: the walk needs no decision for
+/// it, which would go around the component again.
+struct GeneratedValueStorageWalk {
+    /// The position of each open type that the walk enters, closed types fixing every storage
+    /// within them.
+    nodes: FxHashMap<Type, usize>,
+    /// What the walk enters from each type: the fields of products, the payloads of variants, and
+    /// the shape of a named type whose `Value` dictionary is generated here.
+    children: Vec<Vec<Type>>,
+    component: Vec<usize>,
+}
+
+impl GeneratedValueStorageWalk {
+    fn new(root: Type, env: &impl TypeLayoutEnv) -> Self {
+        let mut nodes = FxHashMap::default();
+        let mut children = Vec::new();
+        let mut pending = vec![root];
+        while let Some(ty) = pending.pop() {
+            if nodes.contains_key(&ty) || representation_is_closed(ty) {
+                continue;
             }
-        }
-        TypeKind::Record(fields) => {
-            for (_, field) in fields {
-                collect_generated_value_storages(field, span, env, active, storages);
-            }
-        }
-        TypeKind::Variant(cases) => {
-            for (tag, payload_ty) in cases {
-                if let Ok(VariantPayloadStorageDecision::Evidence(storage)) =
-                    variant_payload_storage_decision(ty, tag, payload_ty, span, env)
-                    && !storages.contains(&storage)
-                {
-                    storages.push(storage);
+            nodes.insert(ty, children.len());
+            let data = ty.data().clone();
+            let entered = match data {
+                TypeKind::Tuple(fields) => fields,
+                TypeKind::Record(fields) | TypeKind::Variant(fields) => {
+                    fields.into_iter().map(|(_, field)| field).collect()
                 }
-                collect_generated_value_storages(payload_ty, span, env, active, storages);
+                TypeKind::Named(named) if named_value_is_compiler_derived(named.def, env) => {
+                    vec![
+                        env.type_def(named.def)
+                            .instantiated_shape_with_effects(&named.params, &named.effect_params),
+                    ]
+                }
+                _ => Vec::new(),
+            };
+            pending.extend(entered.iter().copied());
+            children.push(entered);
+        }
+        let graph: Vec<_> = children
+            .iter()
+            .map(|entered| {
+                DepGraphNode(
+                    entered
+                        .iter()
+                        .filter_map(|ty| nodes.get(ty).copied())
+                        .collect(),
+                )
+            })
+            .collect();
+        let mut component = vec![0; children.len()];
+        for (index, members) in find_strongly_connected_components(&graph)
+            .into_iter()
+            .enumerate()
+        {
+            for member in members {
+                component[member] = index;
             }
         }
-        TypeKind::Named(named) => {
-            if named_value_is_compiler_derived(named.def, env) {
-                let shape = env
-                    .type_def(named.def)
-                    .instantiated_shape_with_effects(&named.params, &named.effect_params);
-                collect_generated_value_storages(shape, span, env, active, storages);
-            }
+        Self {
+            nodes,
+            children,
+            component,
         }
-        TypeKind::Variable(_)
-        | TypeKind::Native(_)
-        | TypeKind::Function(_)
-        | TypeKind::Subscript(_)
-        | TypeKind::Never => {}
+    }
+
+    fn collect(
+        &self,
+        ty: Type,
+        span: Location,
+        env: &impl TypeLayoutEnv,
+        visited: &mut [bool],
+        storages: &mut Vec<DictionaryReq>,
+    ) {
+        let Some(&node) = self.nodes.get(&ty) else {
+            return;
+        };
+        if mem::replace(&mut visited[node], true) {
+            return;
+        }
+        let data = ty.data().clone();
+        let TypeKind::Variant(cases) = data else {
+            for &child in &self.children[node] {
+                self.collect(child, span, env, visited, storages);
+            }
+            return;
+        };
+        for (tag, payload_ty) in cases {
+            let recursive = self
+                .nodes
+                .get(&payload_ty)
+                .is_some_and(|&payload| self.component[payload] == self.component[node]);
+            if !recursive
+                && let Ok(VariantPayloadStorageDecision::Evidence(storage)) =
+                    variant_payload_storage_decision(ty, tag, payload_ty, span, env)
+                && !storages.contains(&storage)
+            {
+                storages.push(storage);
+            }
+            self.collect(payload_ty, span, env, visited, storages);
+        }
     }
 }
 

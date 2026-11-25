@@ -3388,6 +3388,23 @@ fn open_generic_variant_match_accepts_recursive_payload_storage() {
     );
 }
 
+/// In a generic recursive group, here a ring of enums each holding the next one, deriving `Value`
+/// needs no storage evidence for a payload in the component of its variant, which leads back to
+/// it, and decides the others as before, here the generic payloads.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn payload_storages_of_generic_recursive_groups_are_decided_by_component() {
+    let n = 8;
+    let ring = (0..n)
+        .map(|i| format!("enum E{i}<T> {{ A(E{}<T>), N(T) }}\n", (i + 1) % n))
+        .collect::<String>();
+    let src = format!(
+        "{ring}fn f<T>(x: E0<T>) -> E0<T> {{ x }}\n\
+         match f(E0::A(E1::N(2))) {{ A(next) => match next {{ N(x) => x, A(y) => 1 }}, N(x) => 0 }}"
+    );
+    assert_val_eq!(TestSession::new().run(&src), int(2));
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn variant_layout_and_ordinary_value_requirement_share_dictionary() {
