@@ -27,6 +27,27 @@ use crate::{
     },
 };
 
+/// What an unqualified type name means in a declaration, as desugaring resolves it: one of the
+/// declaration's type parameters first, then one of the module's named types.
+struct DeclarationScope<'a> {
+    generic_params: &'a ast::GenericParams,
+    ty_names: &'a FxHashMap<Ustr, usize>,
+}
+
+impl DeclarationScope<'_> {
+    /// The index of the module's named type that `path` refers to, if any.
+    fn named_type(&self, path: &ast::Path) -> Option<usize> {
+        let [(name, _)] = &path.segments[..] else {
+            return None;
+        };
+        let type_params = self.generic_params.type_params();
+        if type_params.iter().any(|(param, _)| param == name) {
+            return None;
+        }
+        self.ty_names.get(name).copied()
+    }
+}
+
 /// A reference to name of a type, either an alias or a definition, in parsed AST.
 enum NamedTypeData {
     Alias(PTypeAlias),
@@ -61,25 +82,37 @@ impl NamedTypeData {
             Def(def) => def.generic_params.effect_params(),
         }
     }
+    fn scope<'a>(&'a self, ty_names: &'a FxHashMap<Ustr, usize>) -> DeclarationScope<'a> {
+        use NamedTypeData::*;
+        let generic_params = match self {
+            Alias(alias) => &alias.generic_params,
+            Def(def) => &def.generic_params,
+        };
+        DeclarationScope {
+            generic_params,
+            ty_names,
+        }
+    }
 
     /// Summarizes the local named-type references made by this alias or type definition.
     fn cycle_info(&self, ty_names: &FxHashMap<Ustr, usize>) -> TypeCycleInfo {
+        let scope = self.scope(ty_names);
         let mut info = TypeCycleInfo::default();
         match self {
             NamedTypeData::Alias(alias) => {
-                info.collect_from_type(&alias.ty.0, ty_names, false);
+                info.collect_from_type(&alias.ty.0, &scope, false);
             }
             NamedTypeData::Def(def) => {
                 // Type definitions depend on both their shape and their where-clause
                 // types. Bounds can mention local named types too, so they must take
                 // part in the same dependency graph.
-                info.collect_from_type(&def.shape, ty_names, false);
+                info.collect_from_type(&def.shape, &scope, false);
                 for constraint in &def.where_clause {
                     for input in &constraint.input_types {
-                        info.collect_from_type(&input.ty.0, ty_names, false);
+                        info.collect_from_type(&input.ty.0, &scope, false);
                     }
                     for output in &constraint.output_types {
-                        info.collect_from_type(&output.ty.0, ty_names, false);
+                        info.collect_from_type(&output.ty.0, &scope, false);
                     }
                 }
             }
@@ -94,44 +127,20 @@ impl NamedTypeData {
         ty_names: &FxHashMap<Ustr, usize>,
         ty_refs: &[NamedTypeData],
     ) -> Result<(), InternalCompilationError> {
+        let scope = self.scope(ty_names);
+        let check = |ty: &ast::PType, span: Location| {
+            validate_regular_generic_refs_in_type(ty, span, &scope, scc_set, ty_refs)
+        };
         match self {
-            NamedTypeData::Alias(alias) => validate_regular_generic_refs_in_type(
-                &alias.ty.0,
-                alias.ty.1,
-                &alias.generic_params,
-                scc_set,
-                ty_names,
-                ty_refs,
-            ),
+            NamedTypeData::Alias(alias) => check(&alias.ty.0, alias.ty.1),
             NamedTypeData::Def(def) => {
-                validate_regular_generic_refs_in_type(
-                    &def.shape,
-                    def.span,
-                    &def.generic_params,
-                    scc_set,
-                    ty_names,
-                    ty_refs,
-                )?;
+                check(&def.shape, def.span)?;
                 for constraint in &def.where_clause {
                     for input in &constraint.input_types {
-                        validate_regular_generic_refs_in_type(
-                            &input.ty.0,
-                            input.ty.1,
-                            &def.generic_params,
-                            scc_set,
-                            ty_names,
-                            ty_refs,
-                        )?;
+                        check(&input.ty.0, input.ty.1)?;
                     }
                     for output in &constraint.output_types {
-                        validate_regular_generic_refs_in_type(
-                            &output.ty.0,
-                            output.ty.1,
-                            &def.generic_params,
-                            scc_set,
-                            ty_names,
-                            ty_refs,
-                        )?;
+                        check(&output.ty.0, output.ty.1)?;
                     }
                 }
                 Ok(())
@@ -293,9 +302,8 @@ fn is_regular_recursive_effect_application(
 fn validate_regular_generic_refs_in_type(
     ty: &ast::PType,
     span: Location,
-    current_generic_params: &ast::GenericParams,
+    scope: &DeclarationScope<'_>,
     scc_set: &FxHashSet<usize>,
-    ty_names: &FxHashMap<Ustr, usize>,
     ty_refs: &[NamedTypeData],
 ) -> Result<(), InternalCompilationError> {
     use ast::PType::*;
@@ -313,41 +321,35 @@ fn validate_regular_generic_refs_in_type(
             // require recursive type-level computation, and
             // `A<! E, F> = Leaf | Node(A<! F, E>)`, whose instances would
             // multiply with each permutation of its effects.
-            if let [(name, _)] = &path.segments[..]
-                && let Some(target_index) = ty_names.get(name)
-                && scc_set.contains(target_index)
+            if let Some(target_index) = scope.named_type(path)
+                && scc_set.contains(&target_index)
             {
-                let target = &ty_refs[*target_index];
+                let target = &ty_refs[target_index];
                 let target_generic_params = target.generic_params();
                 let target_effect_params = target.effect_params();
                 if (!target_generic_params.is_empty()
                     && !is_regular_recursive_generic_application(
-                        current_generic_params.type_params(),
+                        scope.generic_params.type_params(),
                         target_generic_params,
                         args,
                     ))
                     || (!target_effect_params.is_empty()
                         && !is_regular_recursive_effect_application(
-                            current_generic_params.effect_params(),
+                            scope.generic_params.effect_params(),
                             target_effect_params,
                             effect_args,
                         ))
                 {
                     return Err(internal_compilation_error!(InvalidRecursiveType {
-                        kind: InvalidRecursiveTypeKind::NonRegularGenericShape { name: *name },
+                        kind: InvalidRecursiveTypeKind::NonRegularGenericShape {
+                            name: target.name()
+                        },
                         span,
                     }));
                 }
             }
             for (arg, arg_span) in args {
-                validate_regular_generic_refs_in_type(
-                    arg,
-                    *arg_span,
-                    current_generic_params,
-                    scc_set,
-                    ty_names,
-                    ty_refs,
-                )?;
+                validate_regular_generic_refs_in_type(arg, *arg_span, scope, scc_set, ty_refs)?;
             }
         }
         Variant(variants) => {
@@ -355,9 +357,8 @@ fn validate_regular_generic_refs_in_type(
                 validate_regular_generic_refs_in_type(
                     payload,
                     *payload_span,
-                    current_generic_params,
+                    scope,
                     scc_set,
-                    ty_names,
                     ty_refs,
                 )?;
             }
@@ -367,50 +368,31 @@ fn validate_regular_generic_refs_in_type(
                 validate_regular_generic_refs_in_type(
                     element,
                     *element_span,
-                    current_generic_params,
+                    scope,
                     scc_set,
-                    ty_names,
                     ty_refs,
                 )?;
             }
         }
         Record(fields) => {
             for (_, (field, field_span)) in fields {
-                validate_regular_generic_refs_in_type(
-                    field,
-                    *field_span,
-                    current_generic_params,
-                    scc_set,
-                    ty_names,
-                    ty_refs,
-                )?;
+                validate_regular_generic_refs_in_type(field, *field_span, scope, scc_set, ty_refs)?;
             }
         }
-        Array(inner) => validate_regular_generic_refs_in_type(
-            &inner.0,
-            inner.1,
-            current_generic_params,
-            scc_set,
-            ty_names,
-            ty_refs,
-        )?,
+        Array(inner) => {
+            validate_regular_generic_refs_in_type(&inner.0, inner.1, scope, scc_set, ty_refs)?
+        }
         Function(fn_type) => {
             for arg in &fn_type.args {
                 validate_regular_generic_refs_in_type(
-                    &arg.ty.0,
-                    arg.ty.1,
-                    current_generic_params,
-                    scc_set,
-                    ty_names,
-                    ty_refs,
+                    &arg.ty.0, arg.ty.1, scope, scc_set, ty_refs,
                 )?;
             }
             validate_regular_generic_refs_in_type(
                 &fn_type.ret.0,
                 fn_type.ret.1,
-                current_generic_params,
+                scope,
                 scc_set,
-                ty_names,
                 ty_refs,
             )?;
         }
@@ -433,39 +415,22 @@ struct TypeCycleInfo {
 
 impl TypeCycleInfo {
     /// Collects local named-type references from one parsed type, noting whether they cross a sum boundary.
-    fn collect_from_type(
-        &mut self,
-        ty: &ast::PType,
-        ty_names: &FxHashMap<Ustr, usize>,
-        guarded: bool,
-    ) {
+    fn collect_from_type(&mut self, ty: &ast::PType, scope: &DeclarationScope<'_>, guarded: bool) {
         use ast::PType::*;
         match ty {
             Path(path) => {
-                if let [(name, _)] = &path.segments[..]
-                    && let Some(index) = ty_names.get(name)
-                {
-                    if guarded {
-                        self.guarded_refs.insert(*index);
-                    } else {
-                        self.unguarded_refs.insert(*index);
-                    }
+                if let Some(index) = scope.named_type(path) {
+                    self.insert_ref(index, guarded);
                 }
             }
             AppliedPath { path, args, .. } => {
                 // A generic use such as `List<T>` contributes the same dependency as
                 // `List`; its arguments may contribute additional local dependencies.
-                if let [(name, _)] = &path.segments[..]
-                    && let Some(index) = ty_names.get(name)
-                {
-                    if guarded {
-                        self.guarded_refs.insert(*index);
-                    } else {
-                        self.unguarded_refs.insert(*index);
-                    }
+                if let Some(index) = scope.named_type(path) {
+                    self.insert_ref(index, guarded);
                 }
                 for (arg, _) in args {
-                    self.collect_from_type(arg, ty_names, guarded);
+                    self.collect_from_type(arg, scope, guarded);
                 }
             }
             Variant(variants) => {
@@ -475,7 +440,7 @@ impl TypeCycleInfo {
                     // payload is tracked independently so we can later prove that at
                     // least one branch terminates outside the current SCC.
                     let mut payload_info = TypeCycleInfo::default();
-                    payload_info.collect_from_type(payload, ty_names, true);
+                    payload_info.collect_from_type(payload, scope, true);
                     let payload_refs = payload_info.refs();
                     self.guarded_refs.extend(payload_info.guarded_refs);
                     self.unguarded_refs.extend(payload_info.unguarded_refs);
@@ -484,22 +449,30 @@ impl TypeCycleInfo {
             }
             Tuple(elements) => {
                 for (element, _) in elements {
-                    self.collect_from_type(element, ty_names, guarded);
+                    self.collect_from_type(element, scope, guarded);
                 }
             }
             Record(fields) => {
                 for (_, (field, _)) in fields {
-                    self.collect_from_type(field, ty_names, guarded);
+                    self.collect_from_type(field, scope, guarded);
                 }
             }
-            Array(inner) => self.collect_from_type(&inner.0, ty_names, guarded),
+            Array(inner) => self.collect_from_type(&inner.0, scope, guarded),
             Function(fn_type) => {
                 for arg in &fn_type.args {
-                    self.collect_from_type(&arg.ty.0, ty_names, guarded);
+                    self.collect_from_type(&arg.ty.0, scope, guarded);
                 }
-                self.collect_from_type(&fn_type.ret.0, ty_names, guarded);
+                self.collect_from_type(&fn_type.ret.0, scope, guarded);
             }
             Never | Unit | Resolved(_) | Infer => {}
+        }
+    }
+
+    fn insert_ref(&mut self, index: usize, guarded: bool) {
+        if guarded {
+            self.guarded_refs.insert(index);
+        } else {
+            self.unguarded_refs.insert(index);
         }
     }
 

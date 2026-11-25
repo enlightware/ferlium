@@ -1263,6 +1263,24 @@ fn applied_type_parameters_hide_module_types_of_their_name() {
     );
 }
 
+/// In a type declaration, a type parameter hides the module's type of its name, so it makes no
+/// recursive reference to it: not to the declaration itself, nor to another declaration, with
+/// which it would otherwise make a recursive group.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn type_parameters_hide_module_types_in_declarations() {
+    for src in [
+        "struct Box<Box>(Box)\nfn f(x: Box<int>) -> int { x.0 }\nf(Box(3))",
+        "struct A<B>(B)\nstruct B { x: A<int> }\nfn f(x: B) -> int { x.x.0 }\nf(B { x: A(3) })",
+        "enum R<T> { End, Next(R<T>), Hold(T) }\n\
+         enum T { Leaf, Go(R<int>) }\n\
+         fn f(x: T) -> int { match x { T::Leaf => 0, T::Go(r) => 3 } }\n\
+         f(T::Go(R::Hold(2)))",
+    ] {
+        assert_val_eq!(TestSession::new().run(src), int(3));
+    }
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn duplicate_generic_params_report_structured_errors() {
