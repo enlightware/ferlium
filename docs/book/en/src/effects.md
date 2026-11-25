@@ -51,6 +51,7 @@ This propagation is transitive: effects flow through chains of calls.
 
 Generic code can abstract over effects in the same way it abstracts over types.
 For example, a function parameter may have type `(int) -> int ! E`, where `E` stands for the callback's effect set.
+The names `read`, `write` and `fallible` always mean the primitive effects, so they cannot name an effect variable or a trait's effect output.
 
 ## Effect variables and callbacks
 

@@ -1324,6 +1324,15 @@ pub(crate) fn extend_generic_eff_params(
         .map_or(0, |index| index + 1);
     let mut generic_eff_params = existing.clone();
     for (generic_index, param) in generic_params.iter().enumerate() {
+        // Effect resolution reads a primitive effect's name as that effect, so a parameter of that
+        // name could never be referred to.
+        if primitive_effect_by_name(param.0).is_some() {
+            return Err(internal_compilation_error!(InvalidGenericParams {
+                owner,
+                kind: InvalidGenericParamsKind::PrimitiveEffectParam { name: param.0 },
+                span: param.1,
+            }));
+        }
         let eff_var = EffectVar::new(next_index + generic_index as u32);
         if generic_eff_params.insert(param.0, eff_var).is_some() {
             return Err(internal_compilation_error!(InvalidGenericParams {

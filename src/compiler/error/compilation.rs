@@ -259,6 +259,7 @@ impl PrivateNameKind {
 pub enum InvalidGenericParamsKind {
     DuplicateParam { name: Ustr },
     DuplicateEffectParam { name: Ustr },
+    PrimitiveEffectParam { name: Ustr },
     RestrictedTypeParameter { name: Ustr },
 }
 
@@ -278,6 +279,13 @@ impl InvalidGenericParamsKind {
             Self::DuplicateEffectParam { name } => {
                 format!(
                     "Duplicate generic effect parameter `{name}` in {}",
+                    owner.description()
+                )
+            }
+            Self::PrimitiveEffectParam { name } => {
+                format!(
+                    "Generic effect parameter `{name}` in {} has the name of a primitive effect, \
+                     which `{name}` always means",
                     owner.description()
                 )
             }
@@ -1161,7 +1169,7 @@ impl InvalidRecursiveTypeKind {
     pub fn message(&self) -> String {
         match self {
             Self::NonRegularGenericShape { name } => format!(
-                "Recursive generic type `{name}` is non-regular; recursive references must use the type parameters unchanged"
+                "Recursive generic type `{name}` is non-regular; recursive references must use the type and effect parameters unchanged"
             ),
         }
     }

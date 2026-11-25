@@ -18,7 +18,6 @@ use crate::{
     module::{TraitId, Visibility, check_public_declarations, id::Id},
     std::value::{check_representation_metrics, value_layout_formula_for_type},
     types::{
-        effects::EffectVar,
         never::reject_reserved_name,
         r#trait::{
             SEALED_ATTRIBUTE, Trait, TraitAssociatedConst, TraitImplPolicy, TraitMethodIndex,
@@ -53,6 +52,13 @@ impl NamedTypeData {
         match self {
             Alias(alias) => alias.generic_params.type_params(),
             Def(def) => def.generic_params.type_params(),
+        }
+    }
+    fn effect_params(&self) -> &[UstrSpan] {
+        use NamedTypeData::*;
+        match self {
+            Alias(alias) => alias.generic_params.effect_params(),
+            Def(def) => def.generic_params.effect_params(),
         }
     }
 
@@ -92,7 +98,7 @@ impl NamedTypeData {
             NamedTypeData::Alias(alias) => validate_regular_generic_refs_in_type(
                 &alias.ty.0,
                 alias.ty.1,
-                alias.generic_params.type_params(),
+                &alias.generic_params,
                 scc_set,
                 ty_names,
                 ty_refs,
@@ -101,7 +107,7 @@ impl NamedTypeData {
                 validate_regular_generic_refs_in_type(
                     &def.shape,
                     def.span,
-                    def.generic_params.type_params(),
+                    &def.generic_params,
                     scc_set,
                     ty_names,
                     ty_refs,
@@ -111,7 +117,7 @@ impl NamedTypeData {
                         validate_regular_generic_refs_in_type(
                             &input.ty.0,
                             input.ty.1,
-                            def.generic_params.type_params(),
+                            &def.generic_params,
                             scc_set,
                             ty_names,
                             ty_refs,
@@ -121,7 +127,7 @@ impl NamedTypeData {
                         validate_regular_generic_refs_in_type(
                             &output.ty.0,
                             output.ty.1,
-                            def.generic_params.type_params(),
+                            &def.generic_params,
                             scc_set,
                             ty_names,
                             ty_refs,
@@ -268,34 +274,64 @@ fn is_regular_recursive_generic_application(
             })
 }
 
+/// Whether `effect_args`, given to a declaration of `target_effect_params` in the recursive SCC of
+/// one of `current_effect_params`, are the latter, unchanged and in order.
+fn is_regular_recursive_effect_application(
+    current_effect_params: &[UstrSpan],
+    target_effect_params: &[UstrSpan],
+    effect_args: &[ast::PEffect],
+) -> bool {
+    target_effect_params.len() == current_effect_params.len()
+        && effect_args.len() == current_effect_params.len()
+        && effect_args
+            .iter()
+            .zip(current_effect_params)
+            .all(|(arg, (expected_name, _))| arg.name.0 == *expected_name)
+}
+
 /// Walks a parsed type and checks same-SCC generic applications for regular recursive shape.
 fn validate_regular_generic_refs_in_type(
     ty: &ast::PType,
     span: Location,
-    current_generic_params: &[UstrSpan],
+    current_generic_params: &ast::GenericParams,
     scc_set: &FxHashSet<usize>,
     ty_names: &FxHashMap<Ustr, usize>,
     ty_refs: &[NamedTypeData],
 ) -> Result<(), InternalCompilationError> {
     use ast::PType::*;
     match ty {
-        AppliedPath { path, args, .. } => {
+        AppliedPath {
+            path,
+            args,
+            effect_args,
+        } => {
             // For now, recursive generic SCCs must be regular: every recursive
             // application of a generic declaration in the SCC must pass the
-            // current declaration's type parameters through unchanged. This
-            // rejects shapes such as `Tree<T> = Leaf | Node(Tree<(T, T)>)`,
-            // which would otherwise require recursive type-level computation.
+            // current declaration's type and effect parameters through
+            // unchanged. This rejects shapes such as
+            // `Tree<T> = Leaf | Node(Tree<(T, T)>)`, which would otherwise
+            // require recursive type-level computation, and
+            // `A<! E, F> = Leaf | Node(A<! F, E>)`, whose instances would
+            // multiply with each permutation of its effects.
             if let [(name, _)] = &path.segments[..]
                 && let Some(target_index) = ty_names.get(name)
                 && scc_set.contains(target_index)
             {
-                let target_generic_params = ty_refs[*target_index].generic_params();
-                if !target_generic_params.is_empty()
+                let target = &ty_refs[*target_index];
+                let target_generic_params = target.generic_params();
+                let target_effect_params = target.effect_params();
+                if (!target_generic_params.is_empty()
                     && !is_regular_recursive_generic_application(
-                        current_generic_params,
+                        current_generic_params.type_params(),
                         target_generic_params,
                         args,
-                    )
+                    ))
+                    || (!target_effect_params.is_empty()
+                        && !is_regular_recursive_effect_application(
+                            current_generic_params.effect_params(),
+                            target_effect_params,
+                            effect_args,
+                        ))
                 {
                     return Err(internal_compilation_error!(InvalidRecursiveType {
                         kind: InvalidRecursiveTypeKind::NonRegularGenericShape { name: *name },
@@ -800,10 +836,18 @@ fn desugar_recursive_aliases_in_scc(
         // generic references are accepted only when they use that alias's own
         // parameters unchanged; non-regular recursive generic shapes are rejected
         // by `RecursiveTypeBuilder`.
+        let owner = GenericParamsOwner::TypeAlias { name: alias.name.0 };
         let generic_ty_params = extend_generic_ty_params(
             &GenericTyParams::default(),
             alias.generic_params.type_params(),
-            GenericParamsOwner::TypeAlias { name: alias.name.0 },
+            owner,
+        )?;
+        // The group's types cannot refer to its effect parameters, whose names follow the rules of
+        // every declaration all the same.
+        extend_generic_eff_params(
+            &GenericEffParams::default(),
+            alias.generic_params.effect_params(),
+            owner,
         )?;
         builder.set_generic_ty_params(generic_ty_params);
         let ty = builder.desugar_root(alias_ref.index, &alias.ty.0, alias.ty.1)?;
@@ -1330,19 +1374,11 @@ impl ast::TraitDefinition {
             &generic_params,
             GenericParamsOwner::Trait { name: self.name.0 },
         )?;
-        let mut generic_eff_params = GenericEffParams::default();
-        for (index, (name, span)) in self.output_effect_names.iter().copied().enumerate() {
-            if generic_eff_params
-                .insert(name, EffectVar::new(index as u32))
-                .is_some()
-            {
-                return Err(internal_compilation_error!(InvalidGenericParams {
-                    owner: GenericParamsOwner::Trait { name: self.name.0 },
-                    kind: InvalidGenericParamsKind::DuplicateEffectParam { name },
-                    span,
-                }));
-            }
-        }
+        let generic_eff_params = extend_generic_eff_params(
+            &GenericEffParams::default(),
+            &self.output_effect_names,
+            GenericParamsOwner::Trait { name: self.name.0 },
+        )?;
         let mut next_effect_var = self.output_effect_names.len() as u32;
         let parent_constraints = desugar_type_constraints_with_next_effect_var(
             &self.parent_constraints,

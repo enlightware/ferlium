@@ -2649,6 +2649,85 @@ fn recursive_enum_values() {
         .expect_infinite_type_product_cycle("BadAlias");
 }
 
+/// A recursive group passes its effect parameters unchanged, as its type parameters: each
+/// permutation or fixed effect in a recursive reference would make another instance of the group.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_types_pass_their_effect_parameters_unchanged() {
+    let mut session = TestSession::new();
+    // A parameter can occur several times, and other effects anywhere but in a recursive reference.
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            enum A<! E> { End, R(() -> int ! E), S(() -> bool ! E), T(() -> int ! read), Go(B<! E>) }
+            enum B<! E> { Stop, Back(A<! E>) }
+            fn f(x: A<! read>) -> int { 0 }
+            f(A::End)
+        "# }),
+        int(0)
+    );
+    for src in [
+        "enum A<! E> { End, R(() -> int ! E), Next(A<! read>) }",
+        "enum A<! E, F> { End, R(() -> int ! E), S(() -> int ! F), Next(A<! F, E>) }",
+        "enum A<! E> { End, R(() -> int ! E), Go(B) }\nenum B { Stop, Back(A<! read>) }",
+    ] {
+        session
+            .fail_compilation(src)
+            .expect_non_regular_recursive_generic_shape("A");
+    }
+}
+
+/// A primitive effect's name always means that effect, so no effect parameter can take it: the
+/// parameter could never be referred to, and a recursive reference naming it would fix the effect.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn effect_parameters_cannot_take_the_name_of_a_primitive_effect() {
+    let mut session = TestSession::new();
+    for (src, owner, name) in [
+        (
+            "enum A<! read> { End, Next(A<! read>) }\n\
+             fn wrap(x: A<! read>) -> A<! write> { A::Next(x) }",
+            GenericParamsOwner::TypeDef { name: ustr("A") },
+            "read",
+        ),
+        (
+            "type R<! write> = End | Next(() -> int ! write);",
+            GenericParamsOwner::TypeAlias { name: ustr("R") },
+            "write",
+        ),
+        (
+            "type R<! read> = End | Next(R);",
+            GenericParamsOwner::TypeAlias { name: ustr("R") },
+            "read",
+        ),
+        (
+            "fn f<! fallible>(g: () -> int ! fallible) -> int { g() }",
+            GenericParamsOwner::Function { name: ustr("f") },
+            "fallible",
+        ),
+        (
+            "trait Run<Self |-> ! read> { fn run(x: Self) -> int ! read; }",
+            GenericParamsOwner::Trait { name: ustr("Run") },
+            "read",
+        ),
+    ] {
+        match session.fail_compilation(src).into_inner() {
+            CompilationErrorImpl::InvalidGenericParams {
+                owner: error_owner,
+                kind,
+                ..
+            } => {
+                assert_eq!(error_owner, owner, "{src}");
+                assert_eq!(
+                    kind,
+                    InvalidGenericParamsKind::PrimitiveEffectParam { name: ustr(name) },
+                    "{src}"
+                );
+            }
+            other => panic!("expected InvalidGenericParams for {src}, got {other:?}"),
+        }
+    }
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn recursive_generic_alias_instantiation_preserves_arguments_on_cycle_edges() {
