@@ -2021,6 +2021,28 @@ impl TypeDef {
             self.effect_param_count(),
             effect_params.len(),
         );
+        // Layout, the generated `Value` impls and the limits ask for the same instance again and
+        // again, and each substitution would rebuild it, a whole recursive group at a time, for
+        // interning to find it stored already.
+        // The key names no quantifier: the arguments stand for them in order, as `validate` checks
+        // for the type quantifiers and as the effect substitution below is built.
+        debug_assert!(
+            self.shape
+                .ty_quantifiers
+                .iter()
+                .enumerate()
+                .all(|(index, quantifier)| quantifier.name() == index as u32),
+            "Type definition `{}` has non-canonical type quantifier ordering",
+            self.name,
+        );
+        let key = ShapeInstance {
+            shape: self.shape.ty,
+            ty_args: params.to_vec(),
+            effect_args: effect_params.to_vec(),
+        };
+        if let Some(instance) = stored_shape_instance(&key) {
+            return instance;
+        }
         let ty_subst = self
             .shape
             .ty_quantifiers
@@ -2035,7 +2057,9 @@ impl TypeDef {
             .map(|(index, _)| EffectVar::new(index as u32))
             .zip(effect_params.iter().cloned())
             .collect();
-        instantiate_type(self.shape.ty, &(ty_subst, eff_subst))
+        let instance = instantiate_type(self.shape.ty, &(ty_subst, eff_subst));
+        store_shape_instance(key, instance);
+        instance
     }
 
     pub fn payload_scheme(&self, tag: Option<Ustr>) -> TypeScheme<Type> {
@@ -3324,6 +3348,19 @@ struct TypeUniverse {
     local_to_world: FxHashMap<Vec<TypeKind>, Vec<Type>>,
     /// Stored recursive nodes indexed by constructor attributes and world-0 children.
     recursive_candidates: FxHashMap<TypeKind, Vec<Type>>,
+    /// The shapes of type definitions instantiated so far. An instance is a function of its key
+    /// and holds stable global IDs like it, so entries need no invalidation, and live as long as
+    /// the types they name.
+    shape_instances: FxHashMap<ShapeInstance, Type>,
+}
+
+/// A substitution into the shape of a type definition: the shape, and the types and the effects
+/// that its type and effect quantifiers stand for, in the order of the quantifiers.
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct ShapeInstance {
+    shape: Type,
+    ty_args: Vec<Type>,
+    effect_args: Vec<EffType>,
 }
 
 impl TypeUniverse {
@@ -3332,6 +3369,7 @@ impl TypeUniverse {
             worlds: vec![TypeWorld::default()],
             local_to_world: FxHashMap::default(),
             recursive_candidates: FxHashMap::default(),
+            shape_instances: FxHashMap::default(),
         }
     }
 
@@ -3819,6 +3857,26 @@ pub fn store_types(types_data: &[TypeKind]) -> Vec<Type> {
         .try_write()
         .expect("Cannot get a write lock to type universes")
         .insert_types(types_data)
+}
+
+/// The instance of a type definition's shape that [`store_shape_instance`] recorded, if any. It
+/// reads the type universe as [`Type::data`] does.
+fn stored_shape_instance(key: &ShapeInstance) -> Option<Type> {
+    types().read().unwrap().shape_instances.get(key).copied()
+}
+
+/// Records the instance of a type definition's shape, if the type universe can be written to now.
+///
+/// The substitution that computes an instance stores types, so it runs between the lookup and this
+/// call, without the lock. It stores none when the instance exists already, such as the shape
+/// itself for a definition without parameters: a caller may then hold a type's data, and the
+/// instance is recorded another time. Unlike storing a type, which fails when the universe is
+/// held so that a possible deadlock shows, recording an instance is optional: it never waits, so
+/// it is skipped.
+fn store_shape_instance(key: ShapeInstance, instance: Type) {
+    if let Ok(mut universe) = types().try_write() {
+        universe.shape_instances.insert(key, instance);
+    }
 }
 
 /// Visit every interned `TypeKind` across all worlds.
@@ -5129,5 +5187,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_shape_instance_is_not_recorded_while_a_type_is_read() {
+        // An instance that exists already is computed without writing to the type universe, so
+        // the caller may hold a type's data, as before instances were recorded.
+        let shape = Type::tuple(vec![Type::variable_id(7), Type::variable_id(7)]);
+        let key = || ShapeInstance {
+            shape,
+            ty_args: Vec::new(),
+            effect_args: Vec::new(),
+        };
+        {
+            let _data = shape.data();
+            store_shape_instance(key(), shape);
+            assert_eq!(stored_shape_instance(&key()), None);
+        }
+        store_shape_instance(key(), shape);
+        assert_eq!(stored_shape_instance(&key()), Some(shape));
     }
 }
