@@ -62,24 +62,22 @@ impl CoherenceTypeUnifier {
         self.inner.add_ty_vars(count);
     }
 
-    fn unify_same_type_with_sub_effects(
+    /// Whether two types unify. A resource limit tells nothing about whether impls overlap, so it
+    /// is an error.
+    fn unifies(
         &mut self,
         current: Type,
         current_span: Location,
         expected: Type,
         expected_span: Location,
-    ) -> Result<(), InternalCompilationError> {
-        match self.inner.unify_same_type_with_sub_effects(
+    ) -> Result<bool, InternalCompilationError> {
+        let unified = self.inner.unify_same_type_with_sub_effects(
             current,
             current_span,
             expected,
             expected_span,
-        ) {
-            // Types too large to compare may be equal: exhaustion is never evidence that
-            // impls are disjoint.
-            Err(error) if error.is_compiler_limit() => Ok(()),
-            result => result,
-        }
+        );
+        Ok(InternalCompilationError::attempt(unified)?.is_some())
     }
 
     fn substitute_in_constraint(
@@ -387,7 +385,9 @@ pub(crate) fn check_trait_impl(
             // particular, helper inference may derive Value before its blanket is published.
             .filter(|(_, imp, _)| imp.public || imp.source_span.is_some())
     {
-        if impls_overlap(current, others, &new_key, &key, module_id)? {
+        if impls_overlap(current, others, &new_key, &key, module_id)
+            .map_err(|error| error.locate_limit(span))?
+        {
             return Err(internal_compilation_error!(OverlappingTraitImpls {
                 trait_ref: trait_id,
                 input_tys: input_tys.to_vec(),
@@ -493,7 +493,10 @@ pub(crate) fn check_module_coherence(
             if other_key.trait_id() != key.trait_id() {
                 continue;
             }
-            if impls_overlap(current, others, key, other_key, *other_module_id)? {
+            let impl_span = imp.source_span.unwrap_or_else(Location::new_synthesized);
+            if impls_overlap(current, others, key, other_key, *other_module_id)
+                .map_err(|error| error.locate_limit(impl_span))?
+            {
                 let input_tys = match key {
                     TraitKey::Concrete(key) => key.input_tys.clone(),
                     TraitKey::Blanket(key) => key.sub_key.input_tys.clone(),
@@ -502,7 +505,7 @@ pub(crate) fn check_module_coherence(
                     trait_ref: key.trait_id(),
                     input_tys,
                     generic_names: imp.generic_names.clone(),
-                    impl_span: imp.source_span.unwrap_or_else(Location::new_synthesized),
+                    impl_span,
                     existing_impl: existing_impl_header(other_key, other_imp, *other_module_id),
                     existing_span: other_imp.source_span,
                     effects_ignored: has_effect_requirement(key)
@@ -688,10 +691,7 @@ fn blanket_impls_overlap(
     let mut mapper = SimpleInstantiationMapper::new(&inst_subst);
     let rhs_inputs = erased(&instantiate_types(&rhs.input_tys, &mut mapper));
     for (&lhs_ty, &rhs_ty) in lhs_inputs.iter().zip(rhs_inputs.iter()) {
-        if ty_inf
-            .unify_same_type_with_sub_effects(lhs_ty, span, rhs_ty, span)
-            .is_err()
-        {
+        if !ty_inf.unifies(lhs_ty, span, rhs_ty, span)? {
             return Ok(false);
         }
     }
@@ -746,23 +746,14 @@ fn constraints_may_be_satisfiable(
         constraint,
         private_scope,
     } = pending.pop().unwrap();
-    let constraint = match ty_inf.substitute_in_constraint(&constraint) {
-        Ok(constraint) => constraint,
-        // A goal too large to state is undecided, as one beyond the recursion limit.
-        Err(error) if error.is_compiler_limit() => return Ok(true),
-        Err(error) => return Err(error),
-    };
+    let constraint = ty_inf.substitute_in_constraint(&constraint)?;
     // Another module may implement the trait for its own type substituted for a type-variable
     // head, so such a constraint is potentially satisfiable. The other constraints are decided
     // first, as they may still give the variable a concrete head.
     if is_open_world(current, others, &constraint) {
         let mut all_open = true;
         for scoped in &pending {
-            let constraint = match ty_inf.substitute_in_constraint(&scoped.constraint) {
-                Ok(constraint) => constraint,
-                Err(error) if error.is_compiler_limit() => return Ok(true),
-                Err(error) => return Err(error),
-            };
+            let constraint = ty_inf.substitute_in_constraint(&scoped.constraint)?;
             if !is_open_world(current, others, &constraint) {
                 all_open = false;
                 break;
@@ -866,10 +857,7 @@ fn repr_may_be(
     };
     let repr = erased(&[repr])[0];
     let span = Location::new_synthesized();
-    if ty_inf
-        .unify_same_type_with_sub_effects(repr, span, output_ty, span)
-        .is_err()
-    {
+    if !ty_inf.unifies(repr, span, output_ty, span)? {
         return Ok(false);
     }
     constraints_may_be_satisfiable(current, others, ty_inf, pending, next_ty_var_index, stack)
@@ -918,11 +906,17 @@ fn trait_constraint_may_be_satisfiable(
     }
 
     let query = (trait_id, input_tys.to_vec(), output_tys.to_vec());
-    // Prerequisites can nest ever larger goals, such as `[T]: P` requiring `[[T]]: P`. Resolution
-    // gives up beyond its recursion limit, so the search may stop there too, but only as an
-    // undecided goal: exhaustion is never evidence that the impls are disjoint.
+    // Prerequisites can nest ever more goals. Resolution gives up beyond its recursion limit, and
+    // so does the search: exhaustion tells nothing of whether the impls are disjoint, so it is an
+    // error, located at the impl.
     if stack.len() >= TRAIT_SOLVER_RECURSION_LIMIT {
-        return Ok(true);
+        return Err(internal_compilation_error!(
+            TraitSolverRecursionLimitExceeded {
+                trait_ref: trait_id,
+                input_tys: input_tys.to_vec(),
+                fn_span: Location::new_synthesized(),
+            }
+        ));
     }
     // A goal already being examined is assumed to hold, but the rest of the conjunction must
     // still be satisfiable.
@@ -1028,18 +1022,12 @@ fn concrete_impl_may_match_constraint(
     let candidate_inputs = erased(&key.input_tys);
     let candidate_outputs = erased(&imp.output_tys);
     for (&candidate_input_ty, &constraint_input_ty) in candidate_inputs.iter().zip(input_tys) {
-        if ty_inf
-            .unify_same_type_with_sub_effects(candidate_input_ty, span, constraint_input_ty, span)
-            .is_err()
-        {
+        if !ty_inf.unifies(candidate_input_ty, span, constraint_input_ty, span)? {
             return Ok(false);
         }
     }
     for (&candidate_output_ty, &constraint_output_ty) in candidate_outputs.iter().zip(output_tys) {
-        if ty_inf
-            .unify_same_type_with_sub_effects(candidate_output_ty, span, constraint_output_ty, span)
-            .is_err()
-        {
+        if !ty_inf.unifies(candidate_output_ty, span, constraint_output_ty, span)? {
             return Ok(false);
         }
     }
@@ -1085,18 +1073,12 @@ fn blanket_impl_may_match_constraint(
 
     let span = Location::new_synthesized();
     for (&candidate_input_ty, &constraint_input_ty) in candidate_inputs.iter().zip(input_tys) {
-        if ty_inf
-            .unify_same_type_with_sub_effects(candidate_input_ty, span, constraint_input_ty, span)
-            .is_err()
-        {
+        if !ty_inf.unifies(candidate_input_ty, span, constraint_input_ty, span)? {
             return Ok(false);
         }
     }
     for (&candidate_output_ty, &constraint_output_ty) in candidate_outputs.iter().zip(output_tys) {
-        if ty_inf
-            .unify_same_type_with_sub_effects(candidate_output_ty, span, constraint_output_ty, span)
-            .is_err()
-        {
+        if !ty_inf.unifies(candidate_output_ty, span, constraint_output_ty, span)? {
             return Ok(false);
         }
     }

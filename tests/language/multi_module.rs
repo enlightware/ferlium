@@ -5,7 +5,7 @@ use test_log::test;
 
 use ferlium::{
     CompilerSession, DiagnosticSeverity, ExecutionTarget, Path,
-    compiler::error::{CompilationErrorImpl, External},
+    compiler::error::{CompilationErrorImpl, CompilerLimitKind, External},
     compiler::test_support::{
         module_compilation_revision, module_diagnostics_len, module_entry_exists,
         module_has_compiled_version, module_has_mir_artifacts, module_is_stale, module_latest_deps,
@@ -2203,12 +2203,8 @@ fn public_impls_build_private_evidence_from_the_consumers_evidence() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn private_requirements_fail_at_the_public_impl_definition() {
-    for hidden_impl in [
-        "",
-        "impl<T> Hidden for [T] where [[T]]: Hidden, .. { fn hidden(x: [T]) -> int { hidden([x]) } }",
-    ] {
-        let mut session = TestSession::new();
-        let source = format!(
+    let source = |hidden_impl: &str| {
+        format!(
             r#"
             trait Hidden<Self> {{ fn hidden(x: Self) -> int; }}
             pub struct P<T>(T)
@@ -2216,15 +2212,34 @@ fn private_requirements_fail_at_the_public_impl_definition() {
             {hidden_impl}
             impl<T> Use for P<T> where [T]: Hidden, .. {{ fn use_(x: P<T>) -> int {{ hidden([x.0]) }} }}
         "#
-        );
-        assert!(
-            module_fails_with(&mut session, "a", &source, |e| matches!(
-                e,
-                CompilationErrorImpl::PrivateRequirementInPublicContract { .. }
-            )),
-            "{source}"
-        );
-    }
+        )
+    };
+    let mut session = TestSession::new();
+    let unimplemented = source("");
+    assert!(
+        module_fails_with(&mut session, "a", &unimplemented, |e| matches!(
+            e,
+            CompilationErrorImpl::PrivateRequirementInPublicContract { .. }
+        )),
+        "{unimplemented}"
+    );
+    // Reducing a private requirement that grows without end reaches the type limits, which is
+    // reported as such, at the public impl's requirement that reached it, not as a private
+    // requirement.
+    let mut session = TestSession::new();
+    let growing = source(
+        "impl<T> Hidden for [T] where [[T]]: Hidden, .. { fn hidden(x: [T]) -> int { hidden([x]) } }",
+    );
+    let error = session
+        .try_compile_module("a", &growing)
+        .err()
+        .expect("an error");
+    let CompilationErrorImpl::CompilerLimitExceeded(limit) = error.into_inner() else {
+        panic!("expected a type limit for:\n{growing}");
+    };
+    assert_eq!(limit.kind, CompilerLimitKind::TypeHeight);
+    let at = &growing[limit.span.start_usize()..limit.span.end_usize()];
+    assert_eq!(at, "[T]: Hidden");
 }
 
 #[test]
@@ -2276,6 +2291,45 @@ fn a_long_private_requirement_chain_retains_its_public_leaf() {
     let mut session = TestSession::new();
     compile_module(&mut session, "a", &source);
     assert_val_eq!(session.run("a::f(7)"), string("7"));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_private_requirement_chain_beyond_the_reduction_limit_is_an_error() {
+    // Like the chain above, but longer than reduction's work limit, which is reported as such.
+    let mut source = "trait Hidden<Self> { fn hidden(x: Self) -> string ! fallible; }\n".to_owned();
+    for index in 0..200 {
+        source.push_str(&format!("struct Layer{index}<T>(T)\n"));
+        if index < 199 {
+            let next = index + 1;
+            source.push_str(&format!(
+                "impl<T> Hidden for Layer{index}<T> where Layer{next}<T>: Hidden, .. {{
+                    fn hidden(x: Layer{index}<T>) -> string {{ hidden(Layer{next}(x.0)) }}
+                }}\n"
+            ));
+        } else {
+            source.push_str(&format!(
+                "impl<T> Hidden for Layer{index}<T> where T: Inspect, .. {{
+                    fn hidden(x: Layer{index}<T>) -> string {{ inspect(x.0) }}
+                }}\n"
+            ));
+        }
+    }
+    source.push_str("pub fn f<T>(x: T) -> string { hidden(Layer0(x)) }");
+    let mut session = TestSession::new();
+    let error = session
+        .try_compile_module("a", &source)
+        .err()
+        .expect("an error");
+    let CompilationErrorImpl::CompilerLimitExceeded(limit) = error.into_inner() else {
+        panic!("expected a reduction limit");
+    };
+    assert_eq!(limit.kind, CompilerLimitKind::ReductionSteps);
+    // At the public call whose requirement reduction expands.
+    assert_eq!(
+        limit.span.start_usize(),
+        source.rfind("hidden(Layer0").unwrap()
+    );
 }
 
 #[test]

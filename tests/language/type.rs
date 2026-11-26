@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use ferlium::{
-    compiler::error::CompilationErrorImpl,
+    compiler::error::{CompilationErrorImpl, CompilerLimitKind},
     format::{FormatWith, FormatWithData},
     std::{
         array::array_type,
@@ -1101,9 +1101,21 @@ fn ground_effect_prerequisites_keep_effect_polymorphic_providers() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn ever_growing_prerequisites_are_undecided_not_disjoint() {
-    // `[T]: P` requires `[[T]]: P`, and so on: the search stops at the recursion limit and does
-    // not conclude that the `R` impls are disjoint.
-    expect_overlap(indoc! { r#"
+    // `[T]: P` requires `[[T]]: P`, and so on: the goals grow until their types exceed the height
+    // limit, which is an error at the prerequisite that grows, and coherence never concludes that
+    // the `R` impls are disjoint.
+    let expect_too_high = |source: &str| {
+        let mut session = TestSession::new();
+        match session.fail_compilation(source).into_inner() {
+            CompilationErrorImpl::CompilerLimitExceeded(limit) => {
+                assert_eq!(limit.kind, CompilerLimitKind::TypeHeight);
+                let at = &source[limit.span.start_usize()..limit.span.end_usize()];
+                assert_eq!(at, "[[T]]: P");
+            }
+            other => panic!("expected a type height limit, got {other:?}"),
+        }
+    };
+    expect_too_high(indoc! { r#"
         trait P<Self> {}
         trait Q<Self> {}
         trait R<Self> {}
@@ -1113,7 +1125,7 @@ fn ever_growing_prerequisites_are_undecided_not_disjoint() {
         impl<T> P for [T] where [[T]]: P {}
     "# });
     // The same when the competing impl makes the prerequisite ground.
-    expect_overlap(indoc! { r#"
+    expect_too_high(indoc! { r#"
         trait P<Self> {}
         trait R<Self> {}
         impl<T> R for [T] where [T]: P {}
@@ -1122,13 +1134,42 @@ fn ever_growing_prerequisites_are_undecided_not_disjoint() {
     "# });
 }
 
+/// A chain of distinct goals longer than the recursion limit, whose types stay small, is an error
+/// at the impl: the search runs out before it can tell whether the impls overlap. Here they do
+/// not, as nothing ends the chain, yet exhaustion is no evidence of that either.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn prerequisite_chains_beyond_the_recursion_limit_are_errors() {
+    let n = 200;
+    let traits = (0..=n)
+        .map(|i| format!("trait P{i}<Self> {{}}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let chain = (0..n)
+        .map(|i| format!("impl<T> P{i} for [T] where [T]: P{} {{}}", i + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let concrete = "impl R for [int] {}";
+    let source = format!(
+        "trait R<Self> {{}}\n{traits}\nimpl<T> R for [T] where [T]: P0 {{}}\n{concrete}\n{chain}\n0"
+    );
+    match TestSession::new().fail_compilation(&source).into_inner() {
+        CompilationErrorImpl::TraitSolverRecursionLimitExceeded { fn_span, .. } => {
+            let at = &source[fn_span.start_usize()..fn_span.end_usize()];
+            assert_eq!(at, concrete);
+        }
+        other => panic!("expected the recursion limit, got {other:?}"),
+    }
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn prerequisite_chains_as_high_as_types_allow_are_undecided() {
     // `P` holds for any nesting of `W` around `int`, so both `R` impls apply to `B<W<…<int>…>>`,
     // and checking it must not prove the impls disjoint. Aliases nest `W` deeper than source may
     // nest a type, as deep as a type may be: `B<D126>` has the largest height. The height limit
-    // keeps such a chain within the recursion limit; ever larger goals reach it, as above.
+    // keeps such a chain within the recursion limit; ever larger goals reach the height limit, as
+    // above.
     let aliases = (1..=126)
         .map(|depth| format!("type D{depth} = W<D{}>;", depth - 1))
         .collect::<Vec<_>>()

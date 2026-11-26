@@ -10,7 +10,10 @@ use crate::{
     ast::Path,
     compiler::{
         diagnostics::CompilationWarning,
-        error::{InternalCompilationError, UnsupportedSubscriptFeatureKind},
+        error::{
+            CompilerLimit, CompilerLimitKind, InternalCompilationError,
+            UnsupportedSubscriptFeatureKind,
+        },
     },
     hir::{
         DrivenArgument,
@@ -283,9 +286,18 @@ pub(crate) fn trait_dictionary_evidence_binding(
         output_tys.to_vec(),
         output_effs.to_vec(),
     );
-    if ctx.active_dictionary_constructions.len() >= REDUCTION_WORK_LIMIT
-        || ctx.active_dictionary_constructions.contains(&requirement)
-    {
+    // Running out of depth is a limit; a repeated requirement is a dictionary that needs itself.
+    if ctx.active_dictionary_constructions.len() >= REDUCTION_WORK_LIMIT {
+        return Err(internal_compilation_error!(CompilerLimitExceeded(
+            CompilerLimit {
+                kind: CompilerLimitKind::DictionaryDepth,
+                actual: REDUCTION_WORK_LIMIT + 1,
+                limit: REDUCTION_WORK_LIMIT,
+                span,
+            }
+        )));
+    }
+    if ctx.active_dictionary_constructions.contains(&requirement) {
         return Err(internal_compilation_error!(TraitImplNotFound {
             trait_ref: trait_id,
             input_tys: input_tys.to_vec(),

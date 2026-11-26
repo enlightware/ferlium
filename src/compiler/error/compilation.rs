@@ -49,6 +49,10 @@ pub enum CompilerLimitKind {
     RepresentationSize,
     /// See `VALUE_SIZE_LIMIT`.
     ValueSize,
+    /// See `REDUCTION_WORK_LIMIT`.
+    ReductionSteps,
+    /// Dictionaries built inside one another, bounded by `REDUCTION_WORK_LIMIT`.
+    DictionaryDepth,
 }
 
 impl Display for CompilerLimitKind {
@@ -61,6 +65,8 @@ impl Display for CompilerLimitKind {
             Self::RepresentationHeight => "representation height",
             Self::RepresentationSize => "representation size",
             Self::ValueSize => "value size",
+            Self::ReductionSteps => "private requirement reduction steps",
+            Self::DictionaryDepth => "dictionary construction depth",
         })
     }
 }
@@ -1698,30 +1704,39 @@ impl InternalCompilationError {
         internal_compilation_error!(CompilerLimitExceeded(error.into()))
     }
 
-    /// Whether this error is a compiler limit, which a caller that tries an alternative on
-    /// failure must report rather than take as a failure of the attempt.
-    pub(crate) fn is_compiler_limit(&self) -> bool {
-        matches!(&*self.0, CompilationErrorImpl::CompilerLimitExceeded(_))
+    /// Whether this error is a resource limit of the compiler, `CompilerLimitExceeded` or the
+    /// trait solver's recursion limit: the compiler ran out of resources, and nothing is known of
+    /// the answer. A caller that tries an alternative on failure must report it rather than take
+    /// it as a failure of the attempt.
+    pub(crate) fn is_resource_limit(&self) -> bool {
+        matches!(
+            &*self.0,
+            CompilationErrorImpl::CompilerLimitExceeded(_)
+                | CompilationErrorImpl::TraitSolverRecursionLimitExceeded { .. }
+        )
     }
 
     /// The outcome of an attempt, such as matching a candidate implementation: `None` if it
     /// fails, which tells the caller something, such as that the candidate does not apply. A
-    /// compiler limit tells nothing, so it stays an error.
+    /// resource limit tells nothing, so it stays an error.
     pub(crate) fn attempt<T>(result: Result<T, Self>) -> Result<Option<T>, Self> {
         match result {
             Ok(value) => Ok(Some(value)),
-            Err(error) if error.is_compiler_limit() => Err(error),
+            Err(error) if error.is_resource_limit() => Err(error),
             Err(_) => Ok(None),
         }
     }
 
-    /// Give a compiler limit error without a span, such as one converted from
+    /// Give a resource limit error without a span, such as one converted from
     /// `TypeLimitExceeded`, the span of the operation that exceeded the limit.
     pub(crate) fn locate_limit(mut self, span: Location) -> Self {
-        if let CompilationErrorImpl::CompilerLimitExceeded(limit) = &mut *self.0
-            && limit.span.is_synthesized()
-        {
-            limit.span = span;
+        let error_span = match &mut *self.0 {
+            CompilationErrorImpl::CompilerLimitExceeded(limit) => &mut limit.span,
+            CompilationErrorImpl::TraitSolverRecursionLimitExceeded { fn_span, .. } => fn_span,
+            _ => return self,
+        };
+        if error_span.is_synthesized() {
+            *error_span = span;
         }
         self
     }

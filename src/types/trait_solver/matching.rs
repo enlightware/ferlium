@@ -1107,7 +1107,7 @@ impl<'a> TraitSolver<'a> {
             {
                 Ok(selection) => selection,
                 // A compiler limit does not tell that the requirement fails.
-                Err(err) if err.is_compiler_limit() => return Err(err),
+                Err(err) if err.is_resource_limit() => return Err(err),
                 Err(err) => {
                     log::trace!(
                         "Blanket impl constraint failed while solving {} for {:?}: {:?}",

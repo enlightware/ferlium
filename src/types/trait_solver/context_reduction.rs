@@ -16,7 +16,9 @@ use ustr::Ustr;
 
 use crate::{
     FxHashMap, FxHashSet, Location,
-    compiler::error::{CompilationErrorImpl, InternalCompilationError},
+    compiler::error::{
+        CompilationErrorImpl, CompilerLimit, CompilerLimitKind, InternalCompilationError,
+    },
     hir::{
         FnInstData, NodeArena, dictionary::DictionaryReq,
         emit_hir::instantiate_function_descr_in_place, function::CallableDefinition,
@@ -57,6 +59,8 @@ use super::{
     probe::{ConstraintAssumptions, TraitSolverProbe},
 };
 
+/// How many requirements reducing one public contract may expand; more is a `ReductionSteps`
+/// compiler limit.
 pub(crate) const REDUCTION_WORK_LIMIT: usize = 128;
 
 /// A definition-site choice, in the same variable space as its pending body.
@@ -1385,15 +1389,8 @@ impl TraitSolver<'_> {
                         &mut work,
                         &mut evidence,
                     )
-                    // Evidence that would need types too large to build is not found, as when the
-                    // work runs out: ever larger prerequisites are a chain that does not end.
-                    .map_err(|error| {
-                        if error.is_compiler_limit() {
-                            unresolved(&evidence.nodes[id].constraint)
-                        } else {
-                            error
-                        }
-                    })?
+                    // A resource limit is reported as such, at the requirement that reached it.
+                    .map_err(|error| error.locate_limit(evidence.nodes[id].constraint.use_site()))?
                 {
                     progress = true;
                     pending.extend((start..evidence.nodes.len()).rev());
@@ -1532,7 +1529,14 @@ impl TraitSolver<'_> {
             .collect::<Result<Vec<_>, _>>()?;
         inference
             .select_least_bounded_types(&waiting, Some(&own))
-            .map_err(|_| unresolved(constraint))?;
+            .map_err(|error| {
+                // A resource limit is reported as such, at the requirement that reached it.
+                if error.is_resource_limit() {
+                    error.locate_limit(constraint.use_site())
+                } else {
+                    unresolved(constraint)
+                }
+            })?;
         *work -= 1;
         Ok(true)
     }
@@ -1594,7 +1598,14 @@ impl TraitSolver<'_> {
         }
         evidence.nodes[id].constraint = constraint.clone();
         if *work == 0 {
-            return Err(unresolved(&constraint));
+            return Err(internal_compilation_error!(CompilerLimitExceeded(
+                CompilerLimit {
+                    kind: CompilerLimitKind::ReductionSteps,
+                    actual: REDUCTION_WORK_LIMIT + 1,
+                    limit: REDUCTION_WORK_LIMIT,
+                    span: constraint.use_site(),
+                }
+            )));
         }
         let mut ancestor = evidence.nodes[id].parent;
         let mut crosses_generated_value = false;

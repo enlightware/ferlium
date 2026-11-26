@@ -162,6 +162,8 @@ impl ImplSchedule {
         let mut remaining = self.candidates.iter().collect::<Vec<_>>();
         let mut committed = vec![false; self.helpers.len()];
         let mut blocked = FxHashMap::<Candidate, Vec<ImplAstIndex>>::default();
+        // The resource limit that a blocked attempt reached, if any.
+        let mut limits = FxHashMap::<Candidate, InternalCompilationError>::default();
         while let Some(position) = remaining.iter().position(|info| {
             !blocked.contains_key(&info.candidate)
                 && info.requires.iter().all(|scc| committed[*scc])
@@ -198,8 +200,19 @@ impl ImplSchedule {
                     log::trace!("Emission of {candidate:?} blocked by impls {blockers:?}");
                     ctx.output.restore(checkpoint);
                     blocked.insert(candidate, blockers);
+                    // A pending impl may still answer the query that reached a resource limit
+                    // first, so the attempt is retried; if it never can be, the limit is the error.
+                    match result {
+                        Err(error) if error.is_resource_limit() => {
+                            limits.insert(candidate, error);
+                        }
+                        _ => {
+                            limits.remove(&candidate);
+                        }
+                    }
                     continue;
                 }
+                limits.remove(&candidate);
                 ctx.output.impls.pending = Rc::default();
                 result?;
             }
@@ -213,6 +226,14 @@ impl ImplSchedule {
         }
         if remaining.is_empty() {
             return Ok(());
+        }
+        // Waiting no longer helps: an attempt that reached a resource limit fails with it, rather
+        // than as a dependency on the impls that blocked it.
+        if let Some(limit) = remaining
+            .iter()
+            .find_map(|info| limits.remove(&info.candidate))
+        {
+            return Err(limit);
         }
         let blocked = remaining
             .iter()

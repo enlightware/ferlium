@@ -189,6 +189,37 @@ fn an_impl_and_a_helper_needing_each_other_unfinished_are_rejected() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_recursion_limit_in_a_helper_is_not_a_dependency_on_its_users() {
+    // `helper` needs a chain of prerequisites longer than the recursion limit, whatever impls are
+    // still pending, so the limit is the error, not a dependency between `helper` and the impl
+    // that calls it.
+    let n = 134;
+    let mut header = (0..=n)
+        .map(|i| format!("trait T{i}<Self> {{}}"))
+        .chain((0..n).map(|i| format!("impl<T> T{i} for T where T: T{} {{}}", i + 1)))
+        .collect::<Vec<_>>();
+    header.push(format!("impl T{n} for int {{}}"));
+    header.push("fn need<T>(x: T) -> int where T: T0 { 0 }".to_owned());
+    header.push("trait Use<Self> { fn use_it(x: Self) -> int; }".to_owned());
+    let header = header.join("\n");
+    let items = [
+        "fn helper() -> int { need(1) }",
+        "impl<T> Use for [T] { fn use_it(x: [T]) -> int { helper() } }",
+    ];
+    for order in permutations(&items) {
+        let source = module(&header, &order, "helper()");
+        let error = TestSession::new().fail_compilation(&source);
+        match error.into_inner() {
+            CompilationErrorImpl::TraitSolverRecursionLimitExceeded { fn_span, .. } => {
+                assert_eq!(&source[fn_span.start_usize()..fn_span.end_usize()], "need")
+            }
+            other => panic!("expected TraitSolverRecursionLimitExceeded, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn a_generic_impl_and_a_generic_helper_calling_each_other_are_inferred() {
     // `helper` keeps its requirement on `Bag<T>`, which the impl provides when calling it.
     expect_in_every_order(

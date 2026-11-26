@@ -1139,6 +1139,11 @@ impl Settlement {
                 )
                 .and_then(|()| self.keeps_types(ty_inf));
             if let Err(error) = given {
+                // A resource limit fails compilation, rather than leaving the function out of
+                // the round, whose error a later round would discard.
+                if error.is_resource_limit() {
+                    return Err(error);
+                }
                 self.leave_out(index, error);
                 return Ok(false);
             }
@@ -4821,7 +4826,7 @@ where
                     coalesced = settlement.keeps_types(ty_inf);
                 }
                 if let Err(error) = coalesced {
-                    if error.is_compiler_limit() {
+                    if error.is_resource_limit() {
                         return Err(error);
                     }
                     left_out = Some((index, error));
@@ -5122,7 +5127,11 @@ where
             Ok(())
         })();
         match published {
-            Err(error) if settlement.is_some() => *round_error = Some(error),
+            // A resource limit fails compilation, rather than being kept for the end of the
+            // round, which discards it if the contracts change.
+            Err(error) if settlement.is_some() && !error.is_resource_limit() => {
+                *round_error = Some(error)
+            }
             published => published?,
         }
     }
