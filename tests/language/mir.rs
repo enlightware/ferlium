@@ -1206,6 +1206,34 @@ fn place_call_into_owned_local() {
     );
 }
 
+/// A pair of enums holding a recursive one, compared after a generic call and matched: splitting a
+/// local product that owns managed storage can leave another to split, so the managed split goes
+/// on until none is left. The semantic normalization checks, with debug assertions, that it left
+/// no work; `a_field_kept_whole_splits_once_a_local_of_its_own` checks the split itself.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn managed_products_split_until_none_is_left() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc::indoc! { r#"
+            fn same<X>(x: X) -> X { x }
+            enum L { C(L), N(int) }
+            enum E { A(L), B }
+            fn f() -> int {
+                let e = E::A(L::N(1));
+                let v = (e, e);
+                if same(v) == v and (match e { A(x) => 1, B => 1 }) == 1 {
+                    1
+                } else {
+                    0
+                }
+            }
+            f()
+        "# }),
+        int(1)
+    );
+}
+
 #[test]
 fn place_call_discarded() {
     // A discarded place-returning call still lowers (for its effects),

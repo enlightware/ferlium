@@ -336,7 +336,26 @@ pub(crate) fn split_local_products(func: &Function, env: ModuleEnv<'_>) -> Optio
 /// clone borrowing needs its whole lifetime in one place, while splitting it would need a clone
 /// per field. Which products stay whole is a function-wide choice by type, made on the original
 /// body and grown only, so it is bounded by the types in the function.
+///
+/// That choice concerns nested products: a root of such a type still splits. So a field kept
+/// whole, once a local of its own, may split in turn if no clone takes it whole, the clone that
+/// kept its type whole being that of another product. The split therefore starts again on its
+/// result until nothing splits, each time further down the shape of a root. A root splits only if
+/// its shape with nothing kept whole is within [`MAX_LEAVES`] and [`MAX_NODES`], which therefore
+/// bound the locals it becomes and the number of restarts.
 pub(crate) fn split_managed_local_products(
+    func: &Function,
+    env: ModuleEnv<'_>,
+    stage: OptimizationStage<'_>,
+) -> Option<Function> {
+    let mut body = split_managed_local_products_once(func, env, stage)?;
+    while let Some(next) = split_managed_local_products_once(&body, env, stage) {
+        body = next;
+    }
+    Some(body)
+}
+
+fn split_managed_local_products_once(
     func: &Function,
     env: ModuleEnv<'_>,
     stage: OptimizationStage<'_>,
@@ -486,7 +505,15 @@ fn split(
             match operation.kind {
                 OperationKind::Alloca { ty } => {
                     let shape = shapes.entry(ty).or_insert_with(|| {
-                        Shape::of(ty, env, managed.is_some(), whole).map(Rc::new)
+                        // A field kept whole may split once a local of its own, so the budgets
+                        // hold for the shape with nothing kept whole, across those splits.
+                        Shape::of(ty, env, managed.is_some(), whole)
+                            .filter(|_| {
+                                whole.is_empty()
+                                    || Shape::of(ty, env, managed.is_some(), &FxHashSet::default())
+                                        .is_some()
+                            })
+                            .map(Rc::new)
                     });
                     if let Some(shape) = shape
                         && !excluded.contains(&result)
@@ -2009,15 +2036,173 @@ mod tests {
         builder.set_terminator(entry, Terminator::ret(span));
         let original = builder.finish(env);
         let stage = OptimizationStage::Semantic(SemanticCallees::new(&session, None));
-        if let Some(split) = split_managed_local_products(&original, env, stage) {
+        let moves = |body: &Function| {
+            body.blocks()
+                .flat_map(|block| body.block(block).operations())
+                .filter(|operation| operation.kind == OperationKind::Move)
+                .count()
+        };
+        if let Some(split) = super::split_managed_local_products_once(&original, env, stage) {
             verify_function(&split, env);
-            let moves = split
+            assert_eq!(moves(&split), 1, "the whole move must stay one move");
+        }
+        // Once `moved.0` is a local of its own, both sides of the move are roots, and split
+        // together: the move becomes one per string.
+        let split = split_managed_local_products(&original, env, stage).expect("`moved` splits");
+        verify_function(&split, env);
+        assert_eq!(moves(&split), 2, "both sides of the move must split");
+    }
+
+    /// The types of the locals left by the managed split of a function with two locals:
+    /// `cloned: (Group, int)`, whose first field is cloned as a whole from a parameter, which keeps
+    /// `Group` whole when nested, and `nest`, a tuple of `groups` values of type `Group`, each
+    /// string of which is cloned from the parameter's. `Group` is a tuple of `strings` strings.
+    /// Returns them with `Group` and the type of `nest`, or `None` if nothing splits.
+    fn split_nest_of_groups_kept_whole(
+        strings: usize,
+        groups: usize,
+    ) -> (Option<Vec<Type>>, Type, Type) {
+        let group_source = format!("({})", vec!["string"; strings].join(", "));
+        let mut session = CompilerSession::new();
+        let module_id = session
+            .compile_for(
+                ExecutionTarget::Mir,
+                &format!(
+                    "fn group(x: {group_source}) -> {group_source} {{ x }}
+                     fn text(x: string) -> string {{ x }}"
+                ),
+                "split_again",
+                Path::single_str("split_again"),
+            )
+            .unwrap()
+            .module_id;
+        let module = session.expect_fresh_module(module_id);
+        let artifacts = session
+            .mir_artifacts_for(module_id, MirOptimization::Disabled)
+            .unwrap();
+        let clone_callee = |name: &str| {
+            let body = artifacts
+                .get(module.get_local_function_id(ustr(name)).unwrap())
+                .unwrap();
+            body.blocks()
+                .flat_map(|block| body.block(block).operations())
+                .find(|operation| matches!(operation.kind, OperationKind::Clone { .. }))
+                .unwrap()
+                .operands[2]
+                .clone()
+        };
+        let (group_clone, text_clone) = (clone_callee("group"), clone_callee("text"));
+        let env = session.modules().env_for(module);
+        let span = Location::new_synthesized();
+        let group = Type::tuple(vec![string_type(); strings]);
+        let outer = Type::tuple(vec![group, int_type()]);
+        let nest_ty = Type::tuple(vec![group; groups]);
+        let mut builder = FunctionBuilder::new("split_again".into(), Default::default());
+        let x = Value::Parameter(
+            builder.add_parameter(group, ParameterKind::Place(ArgConvention::Let)),
+        );
+        let entry = builder.add_block();
+        let cloned = builder
+            .append_operation(entry, Operation::alloca(span, outer))
+            .unwrap();
+        let nest = builder
+            .append_operation(entry, Operation::alloca(span, nest_ty))
+            .unwrap();
+        let target = field(&mut builder, entry, cloned, 0, group, outer, &session);
+        builder.append_operation(
+            entry,
+            Operation::clone_value(span, x.clone(), target, group_clone, group),
+        );
+        for member in 0..groups as isize {
+            let member = field(
+                &mut builder,
+                entry,
+                nest.clone(),
+                member,
+                group,
+                nest_ty,
+                &session,
+            );
+            for index in 0..strings as isize {
+                let source = field(
+                    &mut builder,
+                    entry,
+                    x.clone(),
+                    index,
+                    string_type(),
+                    group,
+                    &session,
+                );
+                let target = field(
+                    &mut builder,
+                    entry,
+                    member.clone(),
+                    index,
+                    string_type(),
+                    group,
+                    &session,
+                );
+                builder.append_operation(
+                    entry,
+                    Operation::clone_value(span, source, target, text_clone.clone(), string_type()),
+                );
+            }
+        }
+        builder.set_terminator(entry, Terminator::ret(span));
+        let original = builder.finish(env);
+        let stage = OptimizationStage::Semantic(SemanticCallees::new(&session, None));
+        let locals = split_managed_local_products(&original, env, stage).map(|split| {
+            verify_function(&split, env);
+            split
                 .blocks()
                 .flat_map(|block| split.block(block).operations())
-                .filter(|operation| operation.kind == OperationKind::Move)
-                .count();
-            assert_eq!(moves, 1, "the whole move must stay one move");
-        }
+                .filter_map(|operation| match operation.kind {
+                    OperationKind::Alloca { ty } => Some(ty),
+                    _ => None,
+                })
+                .collect()
+        });
+        (locals, group, nest_ty)
+    }
+
+    #[test]
+    fn a_field_kept_whole_splits_once_a_local_of_its_own() {
+        // `nest` first splits into two locals of the type kept whole. Nothing clones these as a
+        // whole: they split in turn, while the one `cloned` leaves stays.
+        let (locals, group, _) = split_nest_of_groups_kept_whole(2, 2);
+        let locals = locals.expect("fixture must split");
+        assert_eq!(
+            locals.iter().filter(|ty| **ty == string_type()).count(),
+            4,
+            "each string of `nest` must be a local"
+        );
+        assert_eq!(
+            locals.iter().filter(|ty| **ty == group).count(),
+            1,
+            "only the group cloned as a whole must stay one"
+        );
+        assert_eq!(
+            locals.len(),
+            6,
+            "`cloned` leaves that group and its integer"
+        );
+    }
+
+    #[test]
+    fn fields_kept_whole_count_towards_the_budget_of_their_root() {
+        // With its groups kept whole, `nest` has 8 leaves, but 72 once they split in turn, more
+        // than a root may become: it stays one local, and so does none of its strings appear.
+        let (strings, groups) = (9, 8);
+        assert!(groups <= MAX_LEAVES && strings * groups > MAX_LEAVES);
+        let (locals, group, nest_ty) = split_nest_of_groups_kept_whole(strings, groups);
+        let locals = locals.expect("`cloned` splits");
+        assert!(locals.contains(&nest_ty), "`nest` must stay one local");
+        assert_eq!(
+            locals.iter().filter(|ty| **ty == group).count(),
+            1,
+            "only `cloned` leaves a group"
+        );
+        assert!(!locals.contains(&string_type()));
     }
 
     #[test]
