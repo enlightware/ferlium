@@ -318,6 +318,38 @@ fn parent_lookup_visits_each_requirement_once() {
     assert_val_eq!(TestSession::new().run(&format!("{src}f(42)")), int(42));
 }
 
+/// As above, with output effects passed to the parents: the polarity of each trait's output effect
+/// is computed once, not once per path to it, of which the top traits have 2^40.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn output_effect_polarities_visit_each_trait_once() {
+    let levels = 40;
+    let mut src = String::from(
+        "trait Base<Self |-> ! E> { fn base(x: Self) -> int ! E; }\n\
+         impl Base for <Self = int |-> ! E = ()> { fn base(x: int) -> int { x } }\n",
+    );
+    let mut below = vec!["Base".to_string()];
+    for level in 1..=levels {
+        let names = [format!("A{level}"), format!("B{level}")];
+        for name in &names {
+            let parents = below
+                .iter()
+                .map(|parent| format!("{parent}<Self |-> ! E = E>"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            src += &format!(
+                "trait {name}<Self |-> ! E>: {parents} {{ fn m{name}(x: Self) -> int ! E; }}\n"
+            );
+            src += &format!(
+                "impl {name} for <Self = int |-> ! E = ()> {{ fn m{name}(x: int) -> int {{ x }} }}\n"
+            );
+        }
+        below = names.to_vec();
+    }
+    src += &format!("fn f<T>(x: T) -> int where T: A{levels}<! E = ()> {{ base(x) }}\n");
+    assert_val_eq!(TestSession::new().run(&format!("{src}f(42)")), int(42));
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn parent_lookup_keeps_requirements_that_differ_by_effects() {
