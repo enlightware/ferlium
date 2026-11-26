@@ -195,6 +195,30 @@ Such a function currently publishes all its implied requirements, used or not.
 In a written requirement, `_` stands for an output to infer, as in `S: Seq<Item = _>`.
 Implementation headers and type and trait definitions do not allow it.
 
+#### Rationale
+
+Annotations are progressive: what is unwritten is inferred, what is written holds, and `_` marks one thing left to infer.
+Types follow this rule, as `x: [_]` fixes the array and infers its element, and requirements follow it too: no clause, a clause ending with `..`, a complete clause.
+A reader takes a `where` clause for the list of what callers must supply, as a written signature is in Haskell, Rust, Swift or Scala.
+Were the clause only a lower bound, the contract of an item would depend on its body, and on the private helpers the body calls.
+
+A missing clause stays inferred, because generic code composes requirements that nobody would write, such as those of the iterator combinators.
+A complete clause is therefore a choice of the author, and it is a directive, not only a check: it decides who selects an impl.
+Whoever writes one accepts that:
+
+- the impls visible at the definition win, even over a more specific one that a caller sees;
+- whether the definition is accepted depends on the impls visible there, not on its body alone;
+- a dictionary that the definition derives is built at each call, where the caller of a partial clause could pass a constant;
+- a type that carries a requirement must have a name: a generic of the signature, one bound to an output of a written requirement, or one that ascribes a value of the body.
+
+The last point is why there is no projection syntax for the outputs of a trait: binding an output to a generic already names it, and with traits of several inputs a projection would repeat the whole requirement.
+
+Structural requirements are left out of the clause because they describe a type and not a choice of impl: the type itself answers them, by its declaration, wherever it becomes known.
+
+The rest of a list is written `..`, as in a pattern `S { a, .. }`, while `_` stands for one thing, so `where T: Ord, ..` and `Seq<Item = _>` each use the mark that fits.
+An empty list cannot be written and no clause means inferred, so the empty complete clause needs a word.
+`nothing` is an identifier that the parser recognizes after `where`, not a reserved word: `where nothing: Trait` remains a requirement on a type named `nothing`.
+
 ## Type relations
 
 The structural solver in `src/types/type_inference/unify.rs` uses three relations:
