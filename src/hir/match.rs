@@ -33,42 +33,120 @@ use crate::{
     types::typing_env::TypingEnv,
 };
 
+/// Whether `ty` has no value: `!` has none, a product none if a member has none, a variant none if
+/// none of its cases has one, and a named type none if its shape has none. A recursive type has
+/// one unless it has none without going around its recursion: this is the least fixpoint of
+/// these rules, computed over the types `ty` reaches, each once, as a walk along paths would go
+/// through each path, and types that hold another twice have exponentially many.
+/// A variant with a case that plainly has a value is settled without the types it reaches.
 fn is_definitely_uninhabited(ty: Type, env: &TypingEnv) -> bool {
-    fn go(ty: Type, env: &TypingEnv, seen: &mut Vec<Type>) -> bool {
-        if seen.contains(&ty) {
-            return false;
-        }
-        let kind = {
-            let data = ty.data();
-            match &*data {
-                TypeKind::Never => return true,
+    /// Whether `ty` has a value by its own structure: a type that is no `!` and holds no other
+    /// type that could lack values, or a product of such types.
+    fn is_plainly_inhabited(ty: Type) -> bool {
+        fn is_leaf(ty: Type) -> bool {
+            matches!(
+                &*ty.data(),
                 TypeKind::Variable(_)
-                | TypeKind::Native(_)
-                | TypeKind::Function(_)
-                | TypeKind::Subscript(_) => return false,
-                _ => data.clone(),
-            }
-        };
-
-        seen.push(ty);
-        let result = match kind {
-            TypeKind::Tuple(fields) => fields.into_iter().any(|ty| go(ty, env, seen)),
-            TypeKind::Record(fields) => fields.into_iter().any(|(_, ty)| go(ty, env, seen)),
-            TypeKind::Variant(variants) => variants
-                .into_iter()
-                .all(|(_, payload)| go(payload, env, seen)),
-            TypeKind::Named(named) => go(named.instantiated_shape(&env.module_env), env, seen),
-            TypeKind::Never
-            | TypeKind::Variable(_)
+                    | TypeKind::Native(_)
+                    | TypeKind::Function(_)
+                    | TypeKind::Subscript(_)
+            )
+        }
+        match &*ty.data() {
+            TypeKind::Tuple(fields) => fields.iter().all(|ty| is_leaf(*ty)),
+            TypeKind::Record(fields) => fields.iter().all(|(_, ty)| is_leaf(*ty)),
+            _ => is_leaf(ty),
+        }
+    }
+    /// How a type has no value, given its children.
+    enum Rule {
+        Never,
+        Inhabited,
+        AnyChild,
+        AllChildren,
+    }
+    let mut index = FxHashMap::default();
+    let mut rules = Vec::new();
+    let mut reached = Vec::new();
+    let mut pending = vec![ty];
+    while let Some(current) = pending.pop() {
+        if index.contains_key(&current) {
+            continue;
+        }
+        index.insert(current, rules.len());
+        let kind = current.data().clone();
+        let (rule, children) = match kind {
+            TypeKind::Never => (Rule::Never, vec![]),
+            TypeKind::Variable(_)
             | TypeKind::Native(_)
             | TypeKind::Function(_)
-            | TypeKind::Subscript(_) => unreachable!(),
+            | TypeKind::Subscript(_) => (Rule::Inhabited, vec![]),
+            TypeKind::Tuple(fields) => (Rule::AnyChild, fields),
+            TypeKind::Record(fields) => (
+                Rule::AnyChild,
+                fields.into_iter().map(|(_, ty)| ty).collect(),
+            ),
+            // Most variants have a case that plainly has a value, such as one without payload:
+            // they need none of the types their other cases reach.
+            TypeKind::Variant(cases) if cases.iter().any(|(_, ty)| is_plainly_inhabited(*ty)) => {
+                (Rule::Inhabited, vec![])
+            }
+            TypeKind::Variant(cases) => (
+                Rule::AllChildren,
+                cases.into_iter().map(|(_, ty)| ty).collect(),
+            ),
+            TypeKind::Named(named) => (
+                Rule::AnyChild,
+                vec![named.instantiated_shape(&env.module_env)],
+            ),
         };
-        seen.pop();
-        result
+        pending.extend(children.iter().copied());
+        rules.push(rule);
+        reached.push(children);
     }
-
-    go(ty, env, &mut Vec::new())
+    // From no type uninhabited, each type proved uninhabited may prove those that hold it: a
+    // product through any member, a variant once all its cases are. Each edge is followed once.
+    let mut holders = vec![Vec::new(); rules.len()];
+    let mut inhabited_cases = vec![0usize; rules.len()];
+    for (node, tys) in reached.iter().enumerate() {
+        for ty in tys {
+            holders[index[ty]].push(node);
+        }
+        inhabited_cases[node] = tys.len();
+    }
+    let mut uninhabited = vec![false; rules.len()];
+    let mut proved = Vec::new();
+    for (node, rule) in rules.iter().enumerate() {
+        let known = match rule {
+            Rule::Never => true,
+            Rule::AllChildren => reached[node].is_empty(),
+            Rule::Inhabited | Rule::AnyChild => false,
+        };
+        if known {
+            uninhabited[node] = true;
+            proved.push(node);
+        }
+    }
+    while let Some(node) = proved.pop() {
+        for &holder in &holders[node] {
+            if uninhabited[holder] {
+                continue;
+            }
+            let known = match rules[holder] {
+                Rule::AnyChild => true,
+                Rule::AllChildren => {
+                    inhabited_cases[holder] -= 1;
+                    inhabited_cases[holder] == 0
+                }
+                Rule::Never | Rule::Inhabited => unreachable!("a type without parts"),
+            };
+            if known {
+                uninhabited[holder] = true;
+                proved.push(holder);
+            }
+        }
+    }
+    uninhabited[index[&ty]]
 }
 
 impl TypeInference {

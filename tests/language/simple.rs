@@ -991,6 +991,44 @@ fn match_omits_uninhabited_named_enum_variants() {
         .expect_type_mismatch("A (int) | B (bool)", "A (B)");
 }
 
+/// Whether a matched type has values is decided over the types it reaches, each once: here a ring
+/// of enums each holding the next twice, which a walk along paths would go through 2^32 times.
+/// Their other case holds a named type, so that none plainly has a value.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn match_on_a_recursive_type_reaching_its_members_twice_is_prompt() {
+    let n = 32;
+    let ring = (0..n)
+        .map(|i| format!("enum R{i} {{ A(R{j}, R{j}), N(Leaf) }}\n", j = (i + 1) % n))
+        .collect::<String>();
+    let src = format!(
+        "enum Leaf {{ L(int) }}\n{ring}fn f() -> int {{\n    \
+         let v = R0::A(R1::N(Leaf::L(1)), R1::N(Leaf::L(2)));\n    \
+         match v {{ A(x, y) => match y {{ N(z) => match z {{ L(k) => k }}, A(a, b) => 0 }}, \
+         N(x) => 0 }}\n}}\nf()"
+    );
+    assert_val_eq!(TestSession::new().run(&src), int(2));
+    // A recursive type is uninhabited through an uninhabited part, not through its recursion.
+    let program = |second_case: &str| {
+        format!(
+            "enum Empty {{}}\nenum T {{ A(T, Empty), {second_case} }}\n\
+             enum Choice {{ Stop(int), Go(T) }}\n\
+             fn f(c: Choice) -> int {{ match c {{ Stop(x) => x }} }}\nf(Choice::Stop(3))"
+        )
+    };
+    assert_val_eq!(TestSession::new().run(&program("B(Empty)")), int(3));
+    let expect_go_arm = |second_case: &str| {
+        TestSession::new()
+            .fail_compilation(&program(second_case))
+            .expect_type_mismatch("Go (T) | Stop (int)", "Stop (B)");
+    };
+    expect_go_arm("B(int)");
+    // `B(T)` has no value only if `T` has none, which is what is asked: the recursion proves
+    // nothing, so `T` counts as having values, although no case can be built. `C` is there for
+    // the declaration, which rejects a type whose every case refers back to it.
+    expect_go_arm("B(T), C(Empty)");
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn empty_match_on_uninhabited_named_enum_is_never() {
