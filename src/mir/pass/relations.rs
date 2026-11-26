@@ -49,6 +49,7 @@ use std::{
     collections::BinaryHeap,
     fmt,
     ops::Deref,
+    rc::Rc,
 };
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -128,10 +129,6 @@ struct PlaceNode {
     /// The field position this slot sits at in its parent, so a path can be rebuilt when one has
     /// to be replayed against a different base.
     field: Option<ProjectionIndex>,
-    /// The slots inside this one that have been named. Forgetting a slot walks this rather than
-    /// every slot the body has, which is the difference between linear and quadratic in body size:
-    /// a definition forgets what is inside it, and definitions are most of what the analysis does.
-    children: Vec<PlaceId>,
 }
 
 /// The storage slots one analysis run has named, as a tree.
@@ -157,7 +154,6 @@ impl Places {
             return *id;
         }
         let id = self.push(self.nodes[base.as_index()].root, Some(base), Some(index));
-        self.nodes[base.as_index()].children.push(id);
         self.fields.insert((base, index), id);
         id
     }
@@ -173,7 +169,6 @@ impl Places {
             root,
             parent,
             field,
-            children: Vec::new(),
         });
         id
     }
@@ -204,14 +199,6 @@ impl Places {
         }
         path.reverse();
         path
-    }
-
-    /// Visits every slot strictly inside `place`.
-    fn inside(&self, place: PlaceId, visit: &mut impl FnMut(PlaceId)) {
-        for child in &self.nodes[place.as_index()].children {
-            visit(*child);
-            self.inside(*child, visit);
-        }
     }
 }
 
@@ -653,22 +640,72 @@ pub(crate) enum Fact {
     },
 }
 
-/// Captured before a storage transfer invalidates either place's current definitions.
-struct PlaceContents {
-    value: Option<Fact>,
-    fields: Vec<(Vec<ProjectionIndex>, Fact)>,
+/// The symbols supplying a place and the slots inside it.
+///
+/// Never changed once built, and shared: a copy makes its destination refer to what its source
+/// holds, since the value copied is the same value and has its symbols already. So a state grows
+/// with what a body writes, not with the size of the values it copies, and two states share what
+/// neither wrote since they parted.
+#[derive(PartialEq, Eq, Debug)]
+struct Bound {
+    /// The symbol supplying the place itself, or `None` if only slots inside it were written,
+    /// which leaves it its contents on entry.
+    symbol: Option<SymbolId>,
+    /// The slots inside that something is bound in, sorted by field.
+    fields: Vec<(ProjectionIndex, Rc<Bound>)>,
 }
+
+impl Bound {
+    fn field(&self, field: ProjectionIndex) -> Option<&Rc<Bound>> {
+        self.position(field).ok().map(|index| &self.fields[index].1)
+    }
+
+    fn position(&self, field: ProjectionIndex) -> Result<usize, usize> {
+        self.fields
+            .binary_search_by_key(&field.as_u32(), |(field, _)| field.as_u32())
+    }
+
+    /// `slot`, or what `slot` holds along `path` if there is one, replaced by `contents`. A slot
+    /// left with nothing bound in it is no slot at all, so that equal bindings are equal trees.
+    fn with(
+        slot: Option<&Rc<Bound>>,
+        path: &[ProjectionIndex],
+        contents: Option<Rc<Bound>>,
+    ) -> Option<Rc<Bound>> {
+        let Some((field, path)) = path.split_first() else {
+            return contents;
+        };
+        let (symbol, mut fields) = match slot {
+            Some(slot) => (slot.symbol, slot.fields.clone()),
+            None => (None, Vec::new()),
+        };
+        let position = fields.binary_search_by_key(&field.as_u32(), |(field, _)| field.as_u32());
+        let inner = position.ok().map(|index| fields[index].1.clone());
+        match (position, Self::with(inner.as_ref(), path, contents)) {
+            (Ok(index), Some(inner)) => fields[index].1 = inner,
+            (Ok(index), None) => {
+                fields.remove(index);
+            }
+            (Err(index), Some(inner)) => fields.insert(index, (*field, inner)),
+            (Err(_), None) => {}
+        }
+        (symbol.is_some() || !fields.is_empty()).then(|| Rc::new(Bound { symbol, fields }))
+    }
+}
+
+/// What a place holds, taken before a storage transfer redefines it: `None` for a place that is
+/// not tracked, whose contents nothing names.
+struct PlaceContents(Option<Rc<Bound>>);
 
 /// The relational state at one program point.
 #[derive(Clone, PartialEq, Eq, Default, Debug)]
 pub(crate) struct State {
     /// The symbol currently supplying each tracked place — the symbol itself rather than the
-    /// definition that minted it, so that reading a slot is one lookup on a word key instead of a
-    /// lookup followed by an interning of a composite name.
+    /// definition that minted it — as one tree per root, by the root's place.
     ///
-    /// A place absent from here has never been written in this function, and takes
+    /// A place nothing is bound in has never been written in this function, and takes
     /// [`DefSite::Entry`].
-    current: FxHashMap<PlaceId, SymbolId>,
+    current: FxHashMap<PlaceId, Rc<Bound>>,
     /// What is known about a symbol. A symbol absent from here is an unknown quantity, which is
     /// still a quantity: it can be named, and two uses of it are the same value.
     facts: FxHashMap<SymbolId, Fact>,
@@ -679,51 +716,79 @@ pub(crate) struct State {
 
 impl State {
     fn place_contents(&mut self, place: Option<PlaceId>, interner: &mut Interner) -> PlaceContents {
-        let value = place.map(|place| self.place_value_fact(place, interner));
-        let fields = place
-            .map(|place| {
-                self.within(place, interner.places())
-                    .into_iter()
-                    .map(|inner| {
-                        let fact = self.place_value_fact(inner, interner);
-                        (interner.places().path_from(place, inner), fact)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        PlaceContents { value, fields }
+        PlaceContents(place.map(|place| {
+            let symbol = self.symbol_of(place, interner);
+            match self.bound(place, interner.places()) {
+                Some(bound) if bound.symbol.is_some() => bound.clone(),
+                // Only slots inside it were written: its own contents are those it had on entry.
+                bound => Rc::new(Bound {
+                    symbol: Some(symbol),
+                    fields: bound.map(|bound| bound.fields.clone()).unwrap_or_default(),
+                }),
+            }
+        }))
     }
 
-    fn place_value_fact(&mut self, place: PlaceId, interner: &mut Interner) -> Fact {
-        let symbol = self.symbol_of(place, interner);
-        self.fact(symbol)
-            .cloned()
-            .unwrap_or_else(|| Fact::Value(Affine::symbol(symbol)))
-    }
-
+    /// Makes `place` hold `contents`: the same value, so the same symbols, in it and in its slots.
+    /// Contents nothing names make it a definition of its own.
     fn define_contents(
         &mut self,
         place: PlaceId,
         def: DefSite,
         interner: &mut Interner,
-        mut contents: PlaceContents,
+        contents: PlaceContents,
     ) {
-        self.define(place, def, interner, contents.value);
-        // A parent definition forgets its children, so install shallowest fields first.
-        contents.fields.sort_by_key(|(path, _)| path.len());
-        for (path, fact) in contents.fields {
-            let mut inner = place;
-            for index in path {
-                inner = interner.place_field(inner, index);
-            }
-            self.define(inner, def, interner, Some(fact));
+        match contents.0 {
+            Some(bound) => self.bind(place, Some(bound), interner.places()),
+            None => self.define(place, def, interner, None),
         }
+    }
+
+    /// What is bound in `place` and in the slots inside it, if anything is.
+    fn bound(&self, place: PlaceId, places: &Places) -> Option<&Rc<Bound>> {
+        match places.parent(place) {
+            None => self.current.get(&place),
+            Some(parent) => {
+                let field = places.nodes[place.as_index()]
+                    .field
+                    .expect("a slot inside another is one of its fields");
+                self.bound(parent, places)?.field(field)
+            }
+        }
+    }
+
+    /// Replaces what is bound in `place` and in the slots inside it.
+    fn bind(&mut self, place: PlaceId, contents: Option<Rc<Bound>>, places: &Places) {
+        let mut root = place;
+        let mut path = Vec::new();
+        while let Some(parent) = places.parent(root) {
+            path.push(
+                places.nodes[root.as_index()]
+                    .field
+                    .expect("a slot inside another is one of its fields"),
+            );
+            root = parent;
+        }
+        path.reverse();
+        match Bound::with(self.current.get(&root), &path, contents) {
+            Some(bound) => {
+                self.current.insert(root, bound);
+            }
+            None => {
+                self.current.remove(&root);
+            }
+        }
+    }
+
+    /// The symbol bound in `place` itself, if one is.
+    fn bound_symbol(&self, place: PlaceId, places: &Places) -> Option<SymbolId> {
+        self.bound(place, places)?.symbol
     }
 
     /// The symbol a place's current contents are.
     pub(crate) fn symbol_of(&self, place: PlaceId, interner: &mut Interner) -> SymbolId {
-        match self.current.get(&place) {
-            Some(symbol) => *symbol,
+        match self.bound_symbol(place, interner.places()) {
+            Some(symbol) => symbol,
             None => interner.symbol(Symbol::Stored(place, DefSite::Entry)),
         }
     }
@@ -826,31 +891,31 @@ impl State {
     /// Before falling back to that, the ancestors are consulted: a range iterator's yield is
     /// recorded on the `Option` as a whole, so reading the payload — however deep inside the option
     /// it sits — has to find it.
+    ///
+    /// A yield speaks for the slots inside its option only until something is written there: a
+    /// definition of the option forgets what its slots held, so a slot that something is bound in,
+    /// the place itself or one between it and the option, was written since and holds that. This
+    /// is so whether or not anything is known of what was written, such as an unknown integer
+    /// copied over the payload.
     pub(crate) fn place_affine(&self, place: PlaceId, interner: &mut Interner) -> Affine {
         let symbol = self.symbol_of(place, interner);
         if let Some(Fact::Value(affine)) = self.fact(symbol) {
             return *affine;
         }
-        let mut ancestor = place;
-        while let Some(above) = interner.places.parent(ancestor) {
-            ancestor = above;
-            let symbol = self.symbol_of(ancestor, interner);
-            if let Some(Fact::Yield { value, .. }) = self.fact(symbol) {
-                return Affine::symbol(*value);
+        let places = interner.places();
+        if self.bound_symbol(place, places).is_none() {
+            let mut ancestor = place;
+            while let Some(above) = places.parent(ancestor) {
+                ancestor = above;
+                if let Some(written) = self.bound_symbol(ancestor, places) {
+                    if let Some(Fact::Yield { value, .. }) = self.fact(written) {
+                        return Affine::symbol(*value);
+                    }
+                    break;
+                }
             }
         }
         Affine::symbol(symbol)
-    }
-
-    /// Every tracked slot inside `place`.
-    fn within(&self, place: PlaceId, places: &Places) -> Vec<PlaceId> {
-        let mut inside = Vec::new();
-        places.inside(place, &mut |child| {
-            if self.current.contains_key(&child) {
-                inside.push(child);
-            }
-        });
-        inside
     }
 
     /// Rebinds `place` to a definition, and forgets what was known about the slots inside it.
@@ -865,28 +930,34 @@ impl State {
         interner: &mut Interner,
         fact: Option<Fact>,
     ) {
-        // Only the subtree, not every slot in the body: `inside` walks the interned tree.
-        let mut forgotten = Vec::new();
-        interner
-            .places
-            .inside(place, &mut |child| forgotten.push(child));
-        for child in forgotten {
-            self.current.remove(&child);
-        }
         let symbol = interner.symbol(Symbol::Stored(place, def));
-        self.current.insert(place, symbol);
+        let bound = Rc::new(Bound {
+            symbol: Some(symbol),
+            fields: Vec::new(),
+        });
+        self.bind(place, Some(bound), interner.places());
         self.set_fact(symbol, fact);
     }
 
     /// Stops tracking a place whose storage lifetime has ended.
     fn forget(&mut self, place: PlaceId, interner: &mut Interner) {
-        let mut forgotten = vec![place];
-        interner
-            .places
-            .inside(place, &mut |child| forgotten.push(child));
-        for child in forgotten {
-            self.current.remove(&child);
+        self.bind(place, None, interner.places());
+    }
+
+    /// Every symbol bound in a place, once per place it is bound in.
+    #[cfg(test)]
+    fn bound_symbols(&self) -> Vec<SymbolId> {
+        fn collect(bound: &Bound, symbols: &mut Vec<SymbolId>) {
+            symbols.extend(bound.symbol);
+            for (_, inner) in &bound.fields {
+                collect(inner, symbols);
+            }
         }
+        let mut symbols = Vec::new();
+        for bound in self.current.values() {
+            collect(bound, &mut symbols);
+        }
+        symbols
     }
 
     fn common_facts_and_predicates(
@@ -1108,23 +1179,32 @@ impl Analysis {
         // The places holding the symbol itself or a copy of it: a loop's yielded value lives on in
         // the payload it was copied into after the cursor has moved past it.
         let copy = Fact::Value(Affine::symbol(symbol));
+        // Only a root or a place a register names can be a holder, so only these are looked up:
+        // the places a state binds may be many more, as copied values share theirs.
+        let tree = self.interner.places();
         let mut places: Vec<PlaceId> = state
             .current
-            .iter()
-            .filter(|(_, current)| **current == symbol || state.fact(**current) == Some(&copy))
-            .map(|(place, _)| *place)
+            .keys()
+            .chain(self.interner.register_places.values())
+            .copied()
+            .collect::<FxHashSet<_>>()
+            .into_iter()
+            .filter(|place| {
+                state
+                    .bound_symbol(*place, tree)
+                    .is_some_and(|current| current == symbol || state.fact(current) == Some(&copy))
+            })
             .collect();
         match *self.interner.symbols().name(symbol) {
             Symbol::Register(register) => {
                 return vec![Holder::Value(mir::Value::Register(register))];
             }
-            Symbol::Stored(place, DefSite::Entry) if !state.current.contains_key(&place) => {
+            Symbol::Stored(place, DefSite::Entry) if state.bound_symbol(place, tree).is_none() => {
                 places.push(place);
             }
             Symbol::Stored(..) => {}
         }
         places.sort_by_key(|place| place.as_index());
-        let tree = self.interner.places();
         let mut holders: Vec<Holder> = places
             .iter()
             .filter(|place| tree.is_root(**place))
@@ -2304,31 +2384,30 @@ fn site(block: BlockId, index: usize) -> DefSite {
 fn rejoin(existing: &State, incoming: &State, block: BlockId, interner: &mut Interner) -> State {
     let mut current = FxHashMap::default();
     // Places the edges fill with different symbols holding one value: the join's own symbol for
-    // the place inherits that value, or a copy made on each path would lose what both copied.
+    // the place inherits that value, or a value computed on each path would lose what both hold.
     let mut agreed = Vec::new();
-    for (place, symbol) in &existing.current {
-        let symbol = match incoming.current.get(place) {
-            Some(incoming) if incoming == symbol => *symbol,
-            Some(incoming_symbol) => {
-                let joined = interner.symbol(Symbol::Stored(*place, DefSite::Join(block)));
-                if let Some(fact) = common_value(existing, *symbol, incoming, *incoming_symbol) {
-                    agreed.push((joined, fact));
-                }
-                joined
-            }
-            None => interner.symbol(Symbol::Stored(*place, DefSite::Join(block))),
-        };
-        current.insert(*place, symbol);
-    }
-    // A place present only on the incoming edge disagrees just as one present only on the existing
-    // edge does. Visit it once; chaining both key sets made every place present on both sides take
-    // the disagreement path twice.
-    for place in incoming.current.keys() {
-        if existing.current.contains_key(place) {
-            continue;
+    let roots: FxHashSet<PlaceId> = existing
+        .current
+        .keys()
+        .chain(incoming.current.keys())
+        .copied()
+        .collect();
+    let mut join = Join {
+        existing,
+        incoming,
+        block,
+        interner,
+        agreed: &mut agreed,
+    };
+    for root in roots {
+        let joined = join.bound(
+            root,
+            existing.current.get(&root),
+            incoming.current.get(&root),
+        );
+        if let Some(joined) = joined {
+            current.insert(root, joined);
         }
-        let symbol = interner.symbol(Symbol::Stored(*place, DefSite::Join(block)));
-        current.insert(*place, symbol);
     }
     let (mut facts, known) = existing.common_facts_and_predicates(incoming);
     facts.extend(agreed);
@@ -2336,6 +2415,77 @@ fn rejoin(existing: &State, incoming: &State, block: BlockId, interner: &mut Int
         current,
         facts,
         known,
+    }
+}
+
+/// One join of two edges, see [`rejoin`].
+struct Join<'a> {
+    existing: &'a State,
+    incoming: &'a State,
+    block: BlockId,
+    interner: &'a mut Interner,
+    agreed: &'a mut Vec<(SymbolId, Fact)>,
+}
+
+impl Join<'_> {
+    /// What the join binds in `place` and in the slots inside it. What both edges share is kept
+    /// as it is, without a visit: only what either wrote since they parted is walked.
+    fn bound(
+        &mut self,
+        place: PlaceId,
+        existing: Option<&Rc<Bound>>,
+        incoming: Option<&Rc<Bound>>,
+    ) -> Option<Rc<Bound>> {
+        if let (Some(existing), Some(incoming)) = (existing, incoming)
+            && Rc::ptr_eq(existing, incoming)
+        {
+            return Some(existing.clone());
+        }
+        let symbol = match (
+            existing.and_then(|bound| bound.symbol),
+            incoming.and_then(|bound| bound.symbol),
+        ) {
+            (None, None) => None,
+            (Some(existing), Some(incoming)) if existing == incoming => Some(existing),
+            (Some(existing), Some(incoming)) => {
+                let joined = self.join_symbol(place);
+                if let Some(fact) = common_value(self.existing, existing, self.incoming, incoming) {
+                    self.agreed.push((joined, fact));
+                }
+                Some(joined)
+            }
+            // A place bound on one edge only disagrees just as one bound differently does.
+            _ => Some(self.join_symbol(place)),
+        };
+        let no_fields = Vec::new();
+        let ours = existing.map_or(&no_fields, |bound| &bound.fields);
+        let theirs = incoming.map_or(&no_fields, |bound| &bound.fields);
+        let mut fields = Vec::with_capacity(ours.len().max(theirs.len()));
+        let (mut our, mut their) = (0, 0);
+        while our < ours.len() || their < theirs.len() {
+            let our_field = ours.get(our).map(|(field, _)| field.as_u32());
+            let their_field = theirs.get(their).map(|(field, _)| field.as_u32());
+            let (field, existing, incoming) = match (our_field, their_field) {
+                (Some(a), Some(b)) if a == b => {
+                    (ours[our].0, Some(&ours[our].1), Some(&theirs[their].1))
+                }
+                (Some(a), Some(b)) if a < b => (ours[our].0, Some(&ours[our].1), None),
+                (Some(_), None) => (ours[our].0, Some(&ours[our].1), None),
+                _ => (theirs[their].0, None, Some(&theirs[their].1)),
+            };
+            our += usize::from(existing.is_some());
+            their += usize::from(incoming.is_some());
+            let inner = self.interner.place_field(place, field);
+            if let Some(joined) = self.bound(inner, existing, incoming) {
+                fields.push((field, joined));
+            }
+        }
+        (symbol.is_some() || !fields.is_empty()).then(|| Rc::new(Bound { symbol, fields }))
+    }
+
+    fn join_symbol(&mut self, place: PlaceId) -> SymbolId {
+        self.interner
+            .symbol(Symbol::Stored(place, DefSite::Join(self.block)))
     }
 }
 
@@ -3346,6 +3496,90 @@ mod tests {
         );
     }
 
+    /// A yield speaks for the payload of its option until the payload is written. An unknown
+    /// integer copied over it is bound there under its own symbol, with no fact: the payload must
+    /// read as that integer, not as the cursor, whose bounds it does not have.
+    #[test]
+    fn a_copy_over_a_yielded_payload_is_not_the_yield() {
+        let mut interner = Interner::default();
+        let mut state = State::default();
+        let option = interner.place_root(Root::Alloca(ValueId::from_index(0)));
+        let payload = interner.place_field(option, ProjectionIndex::from_index(1));
+        let inside = interner.place_field(payload, ProjectionIndex::from_index(0));
+        let unknown = interner.place_root(Root::Parameter(ParameterId::from_index(0)));
+        let cursor = interner.symbol(Symbol::Register(ValueId::from_index(1)));
+        let block = BlockId::from_index(0);
+        let yielded = Fact::Yield {
+            value: cursor,
+            present_when: Vec::new(),
+        };
+        state.define(option, site(block, 0), &mut interner, Some(yielded));
+        assert_eq!(
+            state.place_affine(inside, &mut interner),
+            Affine::symbol(cursor)
+        );
+
+        let contents = state.place_contents(Some(unknown), &mut interner);
+        state.define_contents(payload, site(block, 1), &mut interner, contents);
+        let copied = state.symbol_of(unknown, &mut interner);
+        assert_eq!(
+            state.place_affine(payload, &mut interner),
+            Affine::symbol(copied)
+        );
+        // Nor does a slot inside the written payload hold the cursor.
+        let entry = state.symbol_of(inside, &mut interner);
+        assert_eq!(
+            state.place_affine(inside, &mut interner),
+            Affine::symbol(entry)
+        );
+        // The option itself is still the yield.
+        let option_symbol = state.symbol_of(option, &mut interner);
+        assert!(matches!(
+            state.fact(option_symbol),
+            Some(Fact::Yield { .. })
+        ));
+    }
+
+    /// A copy binds no place and names no symbol of its own: its destination holds the value its
+    /// source does. So values that each hold the previous one, all live, cost the analysis what the
+    /// body writes, not the sum of their sizes, which grows with the square of their number.
+    #[test]
+    fn copied_values_share_what_their_source_holds() {
+        let count = 24;
+        let mut src = String::from("struct D0 { a: int, b: int }\n");
+        for i in 1..count {
+            src += &format!("struct D{i} {{ x: D{}, y: (int, int, int, int) }}\n", i - 1);
+        }
+        src += "fn nest(i: int, xs: [int]) -> int {\n    let v0 = D0 { a: i, b: i };\n";
+        for i in 1..count {
+            src += &format!(
+                "    let v{i} = D{i} {{ x: v{}, y: (i, i, i, i) }};\n",
+                i - 1
+            );
+        }
+        let last = count - 1;
+        src += &format!("    let held = [v{last}, v{last}];\n    xs[i] + held[0].y.0\n}}\n");
+        with_analysis_at_stage(
+            &src,
+            "nest",
+            MirOptimization::Disabled,
+            |function, analysis, _| {
+                let operations: usize = function
+                    .blocks()
+                    .map(|block| function.block(block).operations().len())
+                    .sum();
+                // Without sharing, each value's fields are bound again in the next one, under new
+                // symbols: 2016 places and 1708 symbols for these 24 values.
+                let places = analysis.interner.places().nodes.len();
+                let symbols = analysis.symbols().len();
+                assert!(
+                    places <= operations && symbols <= operations,
+                    "{places} places and {symbols} symbols for {operations} operations"
+                );
+            },
+        );
+    }
+
     /// Writing a slot must not silently update the facts stated about what it held, and must not
     /// carry the old contents forward either.
     #[test]
@@ -3359,7 +3593,7 @@ mod tests {
                     let Some(state) = analysis.entry_state(block) else {
                         continue;
                     };
-                    seen.extend(state.current.values().copied());
+                    seen.extend(state.bound_symbols());
                 }
                 assert!(
                     analysis.symbols().len() > seen.len(),
