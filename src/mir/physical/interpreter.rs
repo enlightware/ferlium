@@ -2424,8 +2424,11 @@ impl<'a, 'p> Interpreter<'a, 'p> {
                 if let Some([size, align]) = witnessed_layout {
                     self.memory.check_layout(source, size, align)?;
                 }
-                // Replacement exchanges ownership of the same type; it is not a structural cast.
-                if self.memory.overlaps(source, destination)? || source.ty != destination.ty {
+                // Replacement exchanges ownership of the same storage type; it is not a
+                // structural cast. A callable replaces one of a supertype of its own.
+                if self.memory.overlaps(source, destination)?
+                    || !same_storage_type(source.ty, destination.ty)
+                {
                     return Err(invalid("invalid replacement storage"));
                 }
                 self.memory.replace_value(source, destination)?;

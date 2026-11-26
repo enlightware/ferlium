@@ -24,6 +24,7 @@ use crate::{
         OperationResult, ParameterId, ParameterKind, ResultTransport, ValueId,
         dominance::Dominance,
         operation::{SourceFallibility, accepts_value_argument, is_scalar_value_type},
+        physical,
         results::{call_result_transport, is_zero_sized_result},
         role::{self, MirType, ValueRole, ValueRoles},
         terminator::TerminatorKind,
@@ -33,7 +34,6 @@ use crate::{
     types::{
         r#type::{CallImplType, CallResultConvention, FnType, Type, TypeKind},
         type_like::TypeLike,
-        type_mapper::EffectErasingMapper,
         type_properties::concrete_type_is_trivial_copy,
     },
 };
@@ -345,11 +345,11 @@ impl StorageState {
     }
 }
 
-/// Whether two types are those of one storage. A place may hold a callable whose effects are
-/// included in those of its type, so a replaced place can carry the type of its new content on
-/// one path only.
+/// Whether two types are those of one storage. A place may hold a callable that is a subtype of
+/// its type, by its effects or by the members of a subscript, so a replaced place can carry the
+/// type of its new content on one path only.
 fn same_storage_type(left: Type, right: Type) -> bool {
-    left == right || left.map(&mut EffectErasingMapper) == right.map(&mut EffectErasingMapper)
+    physical::same_storage_type(left, right)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

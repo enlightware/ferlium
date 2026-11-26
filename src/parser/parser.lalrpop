@@ -1,5 +1,5 @@
 use crate::{SourceId, Location, LocatedError};
-use crate::ast::{UstrSpan, Path, UseTree, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, Pattern, PatternKind as PatK, PatternVar, PLetPattern as LetPattern, LetPatternKind as LetPatK, LetRecordPatternField, MapLiteralEntry, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PSubscriptDefinition as SubscriptDefinition, SubscriptMember, SubscriptMemberMode, PTraitDefinition as TraitDefinition, TraitAssociatedConstDecl, TraitAssociatedConstImpl, TraitDefinitionItem, TraitImplItem, TraitMethod, TraitMethodArg, PTraitImpl as TraitImpl, PTraitImplFor as TraitImplForHeader, PTypeConstraint as TypeConstraint, PTypeConstraintInput as TypeConstraintInput, PTypeConstraintOutput as TypeConstraintOutput, TypeConstraintEffectOutput, WhereClauseKind, GenericParams, PTypeDef as TypeDef, TypeAlias, PType as Type, PFnType as FnType, PFnEffects, PEffect, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg, PExprArena, PExprId};
+use crate::ast::{UstrSpan, Path, UseTree, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, Pattern, PatternKind as PatK, PatternVar, PLetPattern as LetPattern, LetPatternKind as LetPatK, LetRecordPatternField, MapLiteralEntry, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PSubscriptDefinition as SubscriptDefinition, SubscriptMember, SubscriptMemberMode, PTraitDefinition as TraitDefinition, TraitAssociatedConstDecl, TraitAssociatedConstImpl, TraitDefinitionItem, TraitImplItem, TraitMethod, TraitMethodArg, PTraitImpl as TraitImpl, PTraitImplFor as TraitImplForHeader, PTypeConstraint as TypeConstraint, PTypeConstraintInput as TypeConstraintInput, PTypeConstraintOutput as TypeConstraintOutput, TypeConstraintEffectOutput, WhereClauseKind, GenericParams, PTypeDef as TypeDef, TypeAlias, PType as Type, PFnType as FnType, PSubscriptType as SubscriptType, PFnEffects, PEffect, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg, PExprArena, PExprId};
 use crate::hir::value::LiteralValue;
 use crate::types::r#type::{
     Type as IrType,
@@ -396,12 +396,14 @@ Type<P, R, F>: Type = {
     PlaceholderType if P != "",
     NonFunctionType<P, R>,
     FunctionType<P, R, F>,
+    SubscriptType<P, F>,
     PathType<P>,
 }
 
 NonPathType<P, R, F>: Type = {
     NonFunctionType<P, R>,
     FunctionType<P, R, F>,
+    SubscriptType<P, F>,
 }
 
 NonFunctionType<P, R>: Type = {
@@ -444,6 +446,43 @@ FunctionType<P, R, F>: Type = {
         nested_type(Type::function_type(FnType::new(vec![arg], ret.0, ret.1))),
     "(" <arg0:ArgType<P, R, "F">> "," <args:Sep<ArgType<P, R, "F">, ",">> ")" <ret:EffFnRet<P, F>> =>?
         nested_type(Type::function_type(FnType::new(ext_f(arg0, args), ret.0, ret.1))),
+}
+
+// The type of a first-class subscript: its signature, then its members.
+SubscriptType<P, F>: Type = {
+    "subscript" "(" <args:Sep<ArgType<P, "", "F">, ",">> ")" "->" <ret:Sp<SubscriptRetType<P>>> <members:SubscriptTypeMembers<P, F>> =>?
+        nested_type(Type::subscript_type(SubscriptType::new(args, ret, members.0, members.1))),
+}
+
+// A function or subscript type takes parentheses there: the members after it would read as its
+// own.
+SubscriptRetType<P>: Type = {
+    PlaceholderType if P != "",
+    NonFunctionType<P, "">,
+    PathType<P>,
+}
+
+// The members of a subscript type, `ref` then `mut`, each with its effects. `ref mut` gives both
+// members the same effects.
+SubscriptTypeMembers<P, F>: (Option<PFnEffects>, Option<PFnEffects>) = {
+    "ref" <effects:SubscriptTypeMemberEffects<P, F>> => (Some(effects), None),
+    "mut" <effects:SubscriptTypeMemberEffects<P, F>> => (None, Some(effects)),
+    "ref" "mut" <effects:SubscriptTypeMemberEffects<P, F>> => (Some(effects.clone()), Some(effects)),
+    "ref" <ref_effects:FnEffectsAnnotation> "mut" <mut_effects:SubscriptTypeMemberEffects<P, F>> if F != "" =>
+        (Some(ref_effects.0), Some(mut_effects)),
+}
+
+#[inline]
+SubscriptTypeMemberEffects<P, F>: PFnEffects = {
+    <effects:FnEffectsAnnotation?> <implicit:SubscriptTypeImplicitEffects<P>> if F != "" =>
+        effects.map(|(effects, _)| effects).unwrap_or(implicit),
+    <SubscriptTypeImplicitEffects<P>> if F == "",
+}
+
+#[inline]
+SubscriptTypeImplicitEffects<P>: PFnEffects = {
+    () if P != "" => PFnEffects::implicit(true),
+    () if P == "" => PFnEffects::implicit(false),
 }
 
 #[inline]

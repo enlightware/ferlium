@@ -41,7 +41,7 @@ use crate::{
         value::{
             VALUE_ALIGN_ASSOC_CONST_INDEX, VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX,
             VALUE_SIZE_ASSOC_CONST_INDEX, dynamic_product_member_layouts,
-            function_value_method_name, type_has_static_layout,
+            function_value_method_name, product_member_types, type_has_static_layout,
             value_layout_associated_const_values, value_layout_getter_entry,
         },
     },
@@ -1771,10 +1771,18 @@ impl<'a> Emitter<'a> {
             self.store(node.span, empty, d);
             return;
         }
+        // A field is storage of its type in the aggregate, which the value it takes may only be
+        // a subtype of: a subscript whose members are caller-rooted places in a field of
+        // yielded ones.
+        let member_tys = product_member_types(node.ty, &self.env);
         for (i, n) in fields.iter().enumerate() {
             let field = &self.hir_arena[*n];
             let index = self.int_constant(i as isize);
-            let projection = self.product_subfield(field.span, d.clone(), index, field.ty, node.ty);
+            let field_ty = member_tys
+                .as_ref()
+                .and_then(|tys| tys.get(i).copied())
+                .unwrap_or(field.ty);
+            let projection = self.product_subfield(field.span, d.clone(), index, field_ty, node.ty);
             let f = self.insert(projection).unwrap();
             self.lower_value_into(field, Some(f));
         }

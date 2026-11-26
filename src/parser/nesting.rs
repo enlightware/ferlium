@@ -17,7 +17,7 @@ use crate::{
     Location,
     ast::{
         ExprKind, LetPatternKind, MapLiteralEntry, PExprArena, PExprId, PExprKind, PFnType,
-        PLetPattern, PType, UseTree,
+        PLetPattern, PSubscriptType, PType, UseTree,
     },
     compiler::error::LocatedError,
     hir::value::LiteralValue,
@@ -121,6 +121,11 @@ fn for_each_type_child<'a>(ty: &'a PType, f: &mut dyn FnMut(&'a (PType, Location
         Array(element) => f(element.as_ref()),
         Function(fn_type) => {
             let PFnType { args, ret, .. } = &**fn_type;
+            args.iter().for_each(|arg| f(&arg.ty));
+            f(ret);
+        }
+        Subscript(subscript_type) => {
+            let PSubscriptType { args, ret, .. } = &**subscript_type;
             args.iter().for_each(|arg| f(&arg.ty));
             f(ret);
         }

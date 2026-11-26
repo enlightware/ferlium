@@ -259,6 +259,12 @@ fn reject_variant_name_conflicts_in_type(
             }
             reject_variant_name_conflicts_in_type(&fn_type.ret.0, ty_names)?;
         }
+        Subscript(subscript_type) => {
+            for arg in &subscript_type.args {
+                reject_variant_name_conflicts_in_type(&arg.ty.0, ty_names)?;
+            }
+            reject_variant_name_conflicts_in_type(&subscript_type.ret.0, ty_names)?;
+        }
         Never | Unit | Resolved(_) | Infer | Path(_) => {}
     }
     Ok(())
@@ -396,6 +402,20 @@ fn validate_regular_generic_refs_in_type(
                 ty_refs,
             )?;
         }
+        Subscript(subscript_type) => {
+            for arg in &subscript_type.args {
+                validate_regular_generic_refs_in_type(
+                    &arg.ty.0, arg.ty.1, scope, scc_set, ty_refs,
+                )?;
+            }
+            validate_regular_generic_refs_in_type(
+                &subscript_type.ret.0,
+                subscript_type.ret.1,
+                scope,
+                scc_set,
+                ty_refs,
+            )?;
+        }
         Never | Unit | Resolved(_) | Infer | Path(_) => {}
     }
     Ok(())
@@ -463,6 +483,12 @@ impl TypeCycleInfo {
                     self.collect_from_type(&arg.ty.0, scope, guarded);
                 }
                 self.collect_from_type(&fn_type.ret.0, scope, guarded);
+            }
+            Subscript(subscript_type) => {
+                for arg in &subscript_type.args {
+                    self.collect_from_type(&arg.ty.0, scope, guarded);
+                }
+                self.collect_from_type(&subscript_type.ret.0, scope, guarded);
             }
             Never | Unit | Resolved(_) | Infer => {}
         }

@@ -95,6 +95,9 @@ use transport::Transports;
 /// Callable effects and argument access modes do not distinguish stored values,
 /// including nested signatures. Static typing checks access permissions; callable
 /// entries use a uniform pointer ABI and retain their actual parameter conventions.
+/// The members of a subscript do not either: a subscript value is its descriptor whatever
+/// members and result conventions its type gives it, and storage of a subscript type may hold
+/// a subscript of a subtype, such as caller-rooted places where yielded ones are asked for.
 /// A Never leaf within a callable signature can also have a wider usable view;
 /// it describes a call contract, not a value stored in the callable descriptor.
 /// Never outside a signature remains distinct from every inhabited storage type.
@@ -149,13 +152,7 @@ pub(super) fn same_storage_type(left: Type, right: Type) -> bool {
                 pending.extend(a.args.iter().zip(&b.args).map(|(a, b)| (a.ty, b.ty, true)));
                 pending.push((a.ret, b.ret, true));
             }
-            (Subscript(a), Subscript(b))
-                if a.args.len() == b.args.len()
-                    && a.ref_member.as_ref().map(|m| m.result_convention)
-                        == b.ref_member.as_ref().map(|m| m.result_convention)
-                    && a.mut_member.as_ref().map(|m| m.result_convention)
-                        == b.mut_member.as_ref().map(|m| m.result_convention) =>
-            {
+            (Subscript(a), Subscript(b)) if a.args.len() == b.args.len() => {
                 pending.extend(a.args.iter().zip(&b.args).map(|(a, b)| (a.ty, b.ty, true)));
                 pending.push((a.ret, b.ret, true));
             }

@@ -926,7 +926,7 @@ impl FormatWith<QualifiedNameEnv<'_>> for FnType {
             arg.fmt_with(f, env)?;
         }
         write!(f, ") -> ")?;
-        self.ret.fmt_with(f, env)?;
+        fmt_fn_ret(self.ret, f, |ty, f| ty.fmt_with(f, env))?;
         if !self.effects.is_empty() {
             write!(f, " ! ")?;
             format_effect_binding_value(&self.effects, f)?;
@@ -954,7 +954,7 @@ impl FormatWith<QualifiedNameEnv<'_>> for CallImplType {
         if self.returns_place() {
             write!(f, "place ")?;
         }
-        self.fn_ty.ret.fmt_with(f, env)?;
+        fmt_fn_ret(self.fn_ty.ret, f, |ty, f| ty.fmt_with(f, env))?;
         if !self.fn_ty.effects.is_empty() {
             write!(f, " ! ")?;
             format_effect_binding_value(&self.fn_ty.effects, f)?;
@@ -977,7 +977,7 @@ where
         arg.fmt_with(f, env)?;
     }
     write!(f, ") -> ")?;
-    function.ret.fmt_with(f, env)?;
+    fmt_fn_ret(function.ret, f, |ty, f| ty.fmt_with(f, env))?;
     format_function_effect_suffix_with_env(&env.displayed_effects(&function.effects), f, env)
 }
 
@@ -1002,7 +1002,7 @@ where
     if function.returns_place() {
         write!(f, "place ")?;
     }
-    function.fn_ty.ret.fmt_with(f, env)?;
+    fmt_fn_ret(function.fn_ty.ret, f, |ty, f| ty.fmt_with(f, env))?;
     format_function_effect_suffix_with_env(&env.displayed_effects(&function.fn_ty.effects), f, env)
 }
 
@@ -1022,8 +1022,13 @@ where
         |arg, f| arg.fmt_with(f, env),
         |ty, f| ty.fmt_with(f, env),
     )?;
-    fmt_subscript_type_members(subscript, f, |effects, f| {
-        format_function_effect_suffix_with_env(&env.displayed_effects(effects), f, env)
+    fmt_subscript_type_members(subscript, f, |effects, explicit, f| {
+        let effects = env.displayed_effects(effects);
+        if explicit && effects.is_empty() {
+            write!(f, " ! ()")
+        } else {
+            format_function_effect_suffix_with_env(&effects, f, env)
+        }
     })
 }
 
@@ -1038,8 +1043,11 @@ fn fmt_subscript_type_with_qualified_name_env(
         |arg, f| arg.fmt_with(f, env),
         |ty, f| ty.fmt_with(f, env),
     )?;
-    fmt_subscript_type_members(subscript, f, |effects, f| {
+    fmt_subscript_type_members(subscript, f, |effects, explicit, f| {
         if effects.is_empty() {
+            if explicit {
+                write!(f, " ! ()")?;
+            }
             Ok(())
         } else {
             write!(f, " ! ")?;
@@ -1054,7 +1062,7 @@ fn fmt_subscript_type_signature(
     mut fmt_arg: impl FnMut(&FnArgType, &mut fmt::Formatter) -> fmt::Result,
     mut fmt_ret: impl FnMut(Type, &mut fmt::Formatter) -> fmt::Result,
 ) -> fmt::Result {
-    write!(f, "subscript (")?;
+    write!(f, "subscript(")?;
     for (i, arg) in subscript.args.iter().enumerate() {
         if i > 0 {
             write!(f, ", ")?;
@@ -1062,40 +1070,70 @@ fn fmt_subscript_type_signature(
         fmt_arg(arg, f)?;
     }
     write!(f, ") -> ")?;
-    fmt_ret(subscript.ret, f)
+    // The members after a function or subscript type would read as its own.
+    if subscript.ret.is_function() || subscript.ret.is_subscript() {
+        write!(f, "(")?;
+        fmt_ret(subscript.ret, f)?;
+        write!(f, ")")
+    } else {
+        fmt_ret(subscript.ret, f)
+    }
 }
 
+/// Write the members of a subscript type as its source syntax does, `ref mut` standing for two
+/// members that are the same. A member that is a caller-rooted place says so, which the syntax
+/// cannot: a written member is a yielded one.
+///
+/// `fmt_effects` writes the effects of a member, with their leading ` ! `, and nothing for no
+/// effect unless told to be explicit: a `ref` member without effects is then written `ref ! ()`
+/// before a `mut` member, as `ref mut` would give it the effects of that one.
 fn fmt_subscript_type_members(
     subscript: &SubscriptType,
     f: &mut fmt::Formatter,
-    mut fmt_effects: impl FnMut(&EffType, &mut fmt::Formatter) -> fmt::Result,
+    mut fmt_effects: impl FnMut(&EffType, bool, &mut fmt::Formatter) -> fmt::Result,
 ) -> fmt::Result {
-    write!(f, " {{")?;
-    let mut needs_separator = false;
-    if let Some(member) = &subscript.ref_member {
-        write!(f, " ref")?;
-        format_subscript_member_result_convention(member.result_convention, f)?;
-        fmt_effects(&member.effects, f)?;
-        needs_separator = true;
-    }
-    if let Some(member) = &subscript.mut_member {
-        if needs_separator {
-            write!(f, ";")?;
+    let mut fmt_member =
+        |name: &str, member: &SubscriptMemberType, explicit: bool, f: &mut fmt::Formatter| {
+            write!(f, " {name}")?;
+            if member.result_convention == SubscriptResultConvention::AddressorPlace {
+                write!(f, " place")?;
+            }
+            fmt_effects(&member.effects, explicit, f)
+        };
+    match (&subscript.ref_member, &subscript.mut_member) {
+        (Some(ref_member), Some(mut_member)) if ref_member == mut_member => {
+            fmt_member("ref mut", ref_member, false, f)
         }
-        write!(f, " mut")?;
-        format_subscript_member_result_convention(member.result_convention, f)?;
-        fmt_effects(&member.effects, f)?;
+        (ref_member, mut_member) => {
+            if let Some(member) = ref_member {
+                fmt_member("ref", member, mut_member.is_some(), f)?;
+            }
+            if let Some(member) = mut_member {
+                fmt_member("mut", member, false, f)?;
+            }
+            Ok(())
+        }
     }
-    write!(f, " }}")
 }
 
-fn format_subscript_member_result_convention(
-    convention: SubscriptResultConvention,
+/// Write the return type of a function type. A subscript type whose members have effects takes
+/// parentheses there: effects written last in a return type are those of the function.
+fn fmt_fn_ret(
+    ret: Type,
     f: &mut fmt::Formatter,
+    fmt_ty: impl FnOnce(Type, &mut fmt::Formatter) -> fmt::Result,
 ) -> fmt::Result {
-    match convention {
-        SubscriptResultConvention::YieldedOnce => write!(f, " yielded"),
-        SubscriptResultConvention::AddressorPlace => write!(f, " place"),
+    let grouped = matches!(
+        &*ret.data(),
+        TypeKind::Subscript(subscript)
+            if subscript.members().any(|member| !member.effects.is_empty())
+    );
+    if grouped {
+        write!(f, "(")?;
+        fmt_ty(ret, f)?;
+        write!(f, ")")
+    } else {
+        fmt_ty(ret, f)
     }
 }
 
@@ -1119,7 +1157,7 @@ where
         arg_ty.fmt_with(f, env)?;
     }
     write!(f, ") -> ")?;
-    fn_ty.ret.fmt_with(f, env)?;
+    fmt_fn_ret(fn_ty.ret, f, |ty, f| ty.fmt_with(f, env))?;
     format_function_effect_suffix_with_env(&env.displayed_effects(&fn_ty.effects), f, env)
 }
 
@@ -1146,7 +1184,7 @@ where
     if call_ty.returns_place() {
         write!(f, "place ")?;
     }
-    call_ty.fn_ty.ret.fmt_with(f, env)?;
+    fmt_fn_ret(call_ty.fn_ty.ret, f, |ty, f| ty.fmt_with(f, env))?;
     format_function_effect_suffix_with_env(&env.displayed_effects(&call_ty.fn_ty.effects), f, env)
 }
 

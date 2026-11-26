@@ -34,6 +34,8 @@
     appliedPathType,
     fnRetNoEffects,
     fnRetWithEffects,
+    subscriptMemberNoEffects,
+    subscriptMemberWithEffects,
     namedSubscriptNoArgs,
     namedSubscriptWithArgs
 }
@@ -218,6 +220,7 @@ TypeAllowRecordVariant {
     | recordType
     | variantTypeAllowRecord
     | tupleOrFnTypeAllowRecord
+    | subscriptType
 }
 
 TypeNoRecordVariant {
@@ -231,6 +234,7 @@ NonPathTypeNoRecordVariant {
     | recordType
     | variantTypeNoRecord
     | tupleOrFnTypeNoRecord
+    | subscriptType
 }
 
 AliasType {
@@ -239,6 +243,7 @@ AliasType {
     | recordType
     | variantTypeAllowRecord
     | tupleOrFnTypeAllowRecord
+    | subscriptType
 }
 
 PathType {
@@ -264,6 +269,32 @@ tupleOrFnTypeAllowRecord {
 tupleOrFnTypeNoRecord {
     '(' ')' fnRet?
     | '(' (argTypeNoRecord ',')* argTypeNoRecord? ')' fnRet?
+}
+
+// The type of a first-class subscript: its signature, then its members.
+subscriptType {
+    kw<'subscript'> '(' (argTypeNoRecord ',')* argTypeNoRecord? ')' '->' subscriptRetType subscriptTypeMembers
+}
+
+// A function or subscript type takes parentheses there: the members after it would read as its own.
+subscriptRetType {
+    placeholderType
+    | PathType
+    | arrayType
+    | recordType
+    | variantTypeNoRecord
+    | '(' (argTypeNoRecord ',')* argTypeNoRecord? ')'
+}
+
+subscriptTypeMembers {
+    kw<'ref'> !subscriptMemberNoEffects
+    | kw<'ref'> fnEffects !subscriptMemberWithEffects
+    | kw<'mut'> !subscriptMemberNoEffects
+    | kw<'mut'> fnEffects !subscriptMemberWithEffects
+    | kw<'ref'> kw<'mut'> !subscriptMemberNoEffects
+    | kw<'ref'> kw<'mut'> fnEffects !subscriptMemberWithEffects
+    | kw<'ref'> fnEffects kw<'mut'> !subscriptMemberNoEffects
+    | kw<'ref'> fnEffects kw<'mut'> fnEffects !subscriptMemberWithEffects
 }
 
 fnRet {

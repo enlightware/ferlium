@@ -1,12 +1,14 @@
 // Copyright 2026 Enlightware GmbH
 // SPDX-License-Identifier: Apache-2.0
 
-use super::harness::{RunMode, TestSession, expected_array_infer, expected_tuple, int, string};
+use super::harness::{
+    RunMode, TestSession, expected_array_infer, expected_tuple, int, signature, string,
+};
 use ferlium::{
     SourceId,
     ast::{ModuleDisplay, PExprKind, SubscriptMemberMode},
     compiler::error::{
-        CompilationErrorImpl, FieldAccessSite, InvalidRecordFieldContext,
+        CompilationError, CompilationErrorImpl, FieldAccessSite, InvalidRecordFieldContext,
         InvalidSubscriptDefinitionKind, InvalidYieldKind, MutabilityMustBeWhat, RuntimeErrorKind,
         SourceFailureKind, SubscriptDefinitionSubject, UnsupportedSubscriptFeatureKind,
     },
@@ -3059,6 +3061,299 @@ fn first_class_subscript_assignment_requires_mut_member() {
             );
         }
         other => panic!("expected invalid subscript use error, got {other:?}"),
+    }
+}
+
+/// The subscripts that the tests of subscript type ascriptions pass around.
+const ASCRIBED_SUBSCRIPTS: &str = indoc! { r#"
+    subscript first(values: &mut [int]) -> int {
+        ref mut {
+            values[0]
+        }
+    }
+
+    subscript cell(slot: &mut int) -> int {
+        mut {
+            let mut local = slot;
+            yield local;
+            slot = local
+        }
+    }
+"# };
+
+fn run_with_ascribed_subscripts(src: &str) -> ferlium::hir::value::Value {
+    run_experimental_subscript_source(&format!("{ASCRIBED_SUBSCRIPTS}\n{src}"))
+}
+
+fn fail_with_ascribed_subscripts(src: &str) -> CompilationError {
+    experimental_session().fail_compilation(&format!("{ASCRIBED_SUBSCRIPTS}\n{src}"))
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn subscript_type_ascribes_a_parameter_by_its_members() {
+    let value = run_with_ascribed_subscripts(indoc! { r#"
+        fn read(slot: subscript(&mut [int]) -> int ref) -> int {
+            let mut values = [9];
+            values->[slot]
+        }
+
+        fn bump(accessor: subscript(&mut int) -> int mut) -> int {
+            let mut slot = 5;
+            slot->[accessor] += 7;
+            slot
+        }
+
+        fn swap_in(slot: subscript(&mut [int]) -> int ref mut, values: &mut [int]) {
+            values->[slot] = values->[slot] + 1
+        }
+
+        let mut values = [1];
+        swap_in(first, values);
+        (read(first), bump(cell), values[0])
+    "# });
+
+    assert_val_eq!(value, expected_tuple([int(9), int(12), int(2)]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn subscript_type_members_take_their_own_effects() {
+    let value = run_with_ascribed_subscripts(indoc! { r#"
+        fn separate(
+            slot: subscript(&mut [int]) -> int ref ! fallible mut ! fallible,
+            values: &mut [int],
+        ) {
+            values->[slot] = values->[slot] + 1
+        }
+
+        fn shared(slot: subscript(&mut [int]) -> int ref mut ! fallible, values: &mut [int]) {
+            values->[slot] = values->[slot] + 1
+        }
+
+        fn pure_read(slot: subscript(&mut [int]) -> int ref ! () mut ! fallible) { () }
+
+        let mut values = [1];
+        separate(first, values);
+        shared(first, values);
+        values[0]
+    "# });
+
+    assert_val_eq!(value, int(3));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn subscript_type_ascribes_returns_bindings_aliases_and_fields() {
+    let value = run_with_ascribed_subscripts(indoc! { r#"
+        type Slot = subscript(&mut [int]) -> int ref mut ! fallible;
+
+        struct Lens {
+            slot: subscript(&mut [int]) -> int ref ! fallible mut ! fallible,
+        }
+
+        fn pick() -> subscript(&mut [int]) -> int ref mut {
+            first
+        }
+
+        fn through_alias(slot: Slot) -> int {
+            let mut values = [3];
+            values->[slot]
+        }
+
+        fn through_field(lens: Lens, values: &mut [int]) {
+            let slot: Slot = lens.slot;
+            values->[slot] += 10
+        }
+
+        let picked = pick();
+        let ascribed: subscript(&mut [int]) -> int ref mut = first;
+        let chooser: (bool) -> subscript(&mut [int]) -> int ref mut = |unused| first;
+        let mut values = [1];
+        values->[picked] += 1;
+        values->[ascribed] += 1;
+        let chosen: subscript(&mut [int]) -> int ref mut = chooser(true);
+        values->[chosen] += 1;
+        through_field(Lens { slot: first }, values);
+        (values[0], through_alias(first))
+    "# });
+
+    assert_val_eq!(value, expected_tuple([int(14), int(3)]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn subscript_type_storage_holds_subscripts_of_a_subtype() {
+    // An ascribed member is a yielded one, and storage of that type holds a subscript with more
+    // members or with caller-rooted places: built into a field, or replacing the one there.
+    let value = run_with_ascribed_subscripts(indoc! { r#"
+        subscript second(values: &mut [int]) -> int {
+            ref mut {
+                values[1]
+            }
+        }
+
+        subscript whole(slot: &mut int) -> int {
+            ref mut {
+                slot
+            }
+        }
+
+        struct Lens {
+            slot: subscript(&mut [int]) -> int ref mut ! fallible,
+        }
+
+        enum Holder {
+            Held(subscript(&mut [int]) -> int ref ! fallible),
+            Empty,
+        }
+
+        let mut values = [1, 5];
+
+        let mut lens = Lens { slot: first };
+        let slot: subscript(&mut [int]) -> int ref mut ! fallible = lens.slot;
+        values->[slot] += 10;
+        lens.slot = second;
+        let slot: subscript(&mut [int]) -> int ref mut ! fallible = lens.slot;
+        values->[slot] += 20;
+
+        let mut read_only: subscript(&mut [int]) -> int ref ! fallible = first;
+        let before = values->[read_only];
+        read_only = second;
+        let after = values->[read_only];
+
+        let held = match Holder::Held(second) {
+            Held(held) => {
+                let held: subscript(&mut [int]) -> int ref ! fallible = held;
+                values->[held]
+            },
+            Empty => 0,
+        };
+
+        let mut scalar = 5;
+        let mut accessor: subscript(&mut int) -> int mut = whole;
+        scalar->[accessor] += 2;
+        accessor = cell;
+        scalar->[accessor] += 2;
+
+        (values[0], values[1], before, after, held, scalar)
+    "# });
+
+    assert_val_eq!(
+        value,
+        expected_tuple([int(11), int(25), int(11), int(25), int(25), int(9)])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn subscript_type_is_printed_as_it_is_written() {
+    // A signature is printed as its source: a `ref` member without effects before a `mut` member
+    // with some says so, as `ref mut` would share them, and a subscript type whose members have
+    // effects is grouped as a return type, where effects written last are those of the function.
+    let src = format!(
+        "{ASCRIBED_SUBSCRIPTS}\n{}",
+        indoc! { r#"
+            fn pure_ref(slot: subscript(&mut [int]) -> int ref ! () mut ! fallible) { () }
+            fn pure_mut(slot: subscript(&mut [int]) -> int ref ! fallible mut ! ()) { () }
+            fn shared(slot: subscript(&mut [int]) -> int ref ! fallible mut ! fallible) { () }
+            fn callback(slot: subscript(&mut [int]) -> ((int) -> int ! ()) ref ! ()) { () }
+            fn pick() -> (subscript(&mut [int]) -> int ref mut ! fallible) { first }
+        "# }
+    );
+    for (name, expected) in [
+        (
+            "pure_ref",
+            "fn pure_ref(slot: subscript(&mut [int]) -> int ref ! () mut ! fallible) -> ()",
+        ),
+        (
+            "pure_mut",
+            "fn pure_mut(slot: subscript(&mut [int]) -> int ref ! fallible mut) -> ()",
+        ),
+        (
+            "shared",
+            "fn shared(slot: subscript(&mut [int]) -> int ref mut ! fallible) -> ()",
+        ),
+        (
+            "callback",
+            "fn callback(slot: subscript(&mut [int]) -> ((int) -> int) ref) -> ()",
+        ),
+        (
+            "pick",
+            "fn pick() -> (subscript(&mut [int]) -> int ref mut ! fallible)",
+        ),
+    ] {
+        assert_eq!(signature(&mut experimental_session(), &src, name), expected);
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn subscript_type_rejects_a_subscript_without_the_ascribed_member() {
+    fail_with_ascribed_subscripts(indoc! { r#"
+        fn read(accessor: subscript(&mut int) -> int ref) -> int {
+            let mut slot = 5;
+            slot->[accessor]
+        }
+
+        read(cell)
+    "# })
+    .expect_type_mismatch(
+        "subscript(&mut int) -> int mut",
+        "subscript(&mut int) -> int ref ! e₀",
+    );
+
+    match fail_with_ascribed_subscripts(indoc! { r#"
+        fn write(slot: subscript(&mut [int]) -> int ref) {
+            let mut values = [5];
+            values->[slot] = 3
+        }
+
+        write(first)
+    "# })
+    .into_inner()
+    {
+        CompilationErrorImpl::InvalidSubscriptUse { name, kind, .. } => {
+            assert_eq!(name, ustr("slot"));
+            assert_eq!(
+                kind,
+                ferlium::compiler::error::InvalidSubscriptUseKind::MissingMember(
+                    ferlium::module::SubscriptMemberKind::Mut,
+                )
+            );
+        }
+        other => panic!("expected invalid subscript use error, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn subscript_type_takes_members_and_a_parenthesized_callable_result() {
+    // A function or subscript type as the result takes parentheses: the members after it would
+    // read as its own.
+    run_with_ascribed_subscripts(indoc! { r#"
+        fn nested(
+            outer: subscript(&mut [int]) -> (subscript(&mut int) -> int ref) mut,
+            callback: subscript(&mut [int]) -> ((int) -> int) ref,
+        ) {
+            ()
+        }
+
+        ()
+    "# });
+
+    for ty in [
+        "subscript(&mut [int]) -> int",
+        "subscript(&mut [int]) -> subscript(&mut int) -> int ref mut",
+        "subscript(&mut [int]) -> (int) -> int ref",
+        "subscript(&mut [int]) -> int mut ref",
+    ] {
+        match fail_with_ascribed_subscripts(&format!("fn ascribed(slot: {ty}) {{ () }}\n()"))
+            .into_inner()
+        {
+            CompilationErrorImpl::ParsingFailed(_) => {}
+            other => panic!("expected `{ty}` not to parse, got {other:?}"),
+        }
     }
 }
 

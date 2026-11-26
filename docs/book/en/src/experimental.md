@@ -144,3 +144,45 @@ values
 
 Here, `bump_chosen` receives two subscripts and chooses which one to use.
 The subscript value is still distinct from a function value: it describes place access, not an ordinary call that returns a value.
+
+### Subscript types
+
+The type of a subscript is written like its declaration, without the names and the bodies: the keyword `subscript`, the parameter types, the type of the place, then the members.
+The members are `ref`, `mut`, or `ref mut` for both:
+
+```ferlium,experimental
+subscript first(values: &mut [int]) -> int {
+    ref mut {
+        values[0]
+    }
+}
+
+struct Lens {
+    slot: subscript(&mut [int]) -> int ref mut ! fallible,
+}
+
+fn get(values: &mut [int], slot: subscript(&mut [int]) -> int ref) -> int {
+    values->[slot]
+}
+
+fn bump(values: &mut [int], lens: Lens) {
+    let slot: subscript(&mut [int]) -> int ref mut ! fallible = lens.slot;
+    values->[slot] += 1
+}
+
+let mut values = [5, 12];
+bump(values, Lens { slot: first });
+get(values, first)
+```
+
+A subscript type asks for the members it lists, and a subscript with more members is accepted: `get` only reads through `slot`, and takes `first`, which can also write.
+Writing through `slot` in `get` would be rejected, as its type has no `mut` member.
+
+Each member can be followed by its effects, as a function type can: `ref ! (fallible) mut ! (read, write)` gives each member its own, and `ref mut ! fallible` gives the same to both.
+Effects that are not written are inferred in annotations, and absent in type definitions, as for function types.
+
+If the place itself holds a function or a subscript, put its type in parentheses: `subscript(&mut [int]) -> ((int) -> int) ref`.
+Without them, `ref` would look like it belongs to the inner type.
+
+The same goes for the effects of the members.
+In the return type of a function or in a type argument, an effect written last belongs to the enclosing function or type, so wrap the whole subscript type in parentheses to keep it: `fn pick() -> (subscript(&mut [int]) -> int ref mut ! fallible)`.

@@ -9,8 +9,9 @@ use crate::compiler::error::{
 use crate::std::{array::array_type_def, value::NO_DERIVE_VALUE_ATTRIBUTE};
 use crate::types::never::reject_reserved_name;
 use crate::types::r#type::{
-    BareNativeTypeB, NamedType, PRIVATE_REPR_ATTRIBUTE, TypeAliasEntry, TypeDef as HirTypeDef,
-    TypeKind, store_types,
+    BareNativeTypeB, NamedType, PRIVATE_REPR_ATTRIBUTE, SubscriptMemberType,
+    SubscriptResultConvention, SubscriptType, TypeAliasEntry, TypeDef as HirTypeDef, TypeKind,
+    store_types,
 };
 use crate::types::type_substitution::{instantiate_type, instantiate_type_in_graph};
 
@@ -267,8 +268,26 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
         &mut self,
         fn_type: &ast::PFnType,
     ) -> Result<FnType, InternalCompilationError> {
-        let args = fn_type
-            .args
+        let (args, ret) = self.desugar_signature(&fn_type.args, &fn_type.ret)?;
+        let effects = desugar_fn_effects(&fn_type.effects, None)?;
+        Ok(FnType::new(args, ret, effects))
+    }
+
+    fn desugar_subscript_type(
+        &mut self,
+        subscript_type: &ast::PSubscriptType,
+    ) -> Result<SubscriptType, InternalCompilationError> {
+        let (args, ret) = self.desugar_signature(&subscript_type.args, &subscript_type.ret)?;
+        desugar_subscript_members(subscript_type, args, ret, None)
+    }
+
+    /// Desugar the argument and return types of a function or subscript type.
+    fn desugar_signature(
+        &mut self,
+        args: &[ast::PFnArgType],
+        ret: &ast::TypeSpan<Parsed>,
+    ) -> Result<(Vec<FnArgType>, Type), InternalCompilationError> {
+        let args = args
             .iter()
             .map(|arg| {
                 let ty = self.desugar_type(&arg.ty.0, arg.ty.1, false, None)?;
@@ -280,9 +299,8 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
                 Ok(FnArgType::new(ty, mut_ty))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let ret = self.desugar_type(&fn_type.ret.0, fn_type.ret.1, false, None)?;
-        let effects = desugar_fn_effects(&fn_type.effects, None)?;
-        Ok(FnType::new(args, ret, effects))
+        let ret = self.desugar_type(&ret.0, ret.1, false, None)?;
+        Ok((args, ret))
     }
 
     fn variant_name_conflicts_with_type(
@@ -403,6 +421,10 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
             Function(fn_type) => {
                 let fn_type = self.desugar_fn_type(fn_type)?;
                 self.store_kind(TypeKind::Function(b(fn_type)), slot)
+            }
+            Subscript(subscript_type) => {
+                let subscript_type = self.desugar_subscript_type(subscript_type)?;
+                self.store_kind(TypeKind::Subscript(b(subscript_type)), slot)
             }
         })
     }
@@ -780,21 +802,9 @@ impl ast::PFnType {
         generic_eff_params: Option<&GenericEffParams>,
         modules_used: &mut FxHashSet<ModuleId>,
     ) -> Result<FnType, InternalCompilationError> {
-        let args = self
-            .args
-            .iter()
-            .map(|arg| {
-                arg.desugar_with_ty_and_eff_params(
-                    env,
-                    generic_ty_params,
-                    generic_eff_params,
-                    modules_used,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let ret = self.ret.0.desugar_with_ty_and_eff_params(
-            self.ret.1,
-            false,
+        let (args, ret) = desugar_signature_with_ty_and_eff_params(
+            &self.args,
+            &self.ret,
             env,
             generic_ty_params,
             generic_eff_params,
@@ -803,6 +813,85 @@ impl ast::PFnType {
         let effects = desugar_fn_effects(&self.effects, generic_eff_params)?;
         Ok(FnType::new(args, ret, effects))
     }
+}
+
+impl ast::PSubscriptType {
+    fn desugar_with_ty_and_eff_params(
+        &self,
+        env: &ModuleEnv<'_>,
+        generic_ty_params: &GenericTyParams,
+        generic_eff_params: Option<&GenericEffParams>,
+        modules_used: &mut FxHashSet<ModuleId>,
+    ) -> Result<SubscriptType, InternalCompilationError> {
+        let (args, ret) = desugar_signature_with_ty_and_eff_params(
+            &self.args,
+            &self.ret,
+            env,
+            generic_ty_params,
+            generic_eff_params,
+            modules_used,
+        )?;
+        desugar_subscript_members(self, args, ret, generic_eff_params)
+    }
+}
+
+/// Desugar the argument and return types of a function or subscript type.
+fn desugar_signature_with_ty_and_eff_params(
+    args: &[ast::PFnArgType],
+    ret: &ast::TypeSpan<Parsed>,
+    env: &ModuleEnv<'_>,
+    generic_ty_params: &GenericTyParams,
+    generic_eff_params: Option<&GenericEffParams>,
+    modules_used: &mut FxHashSet<ModuleId>,
+) -> Result<(Vec<FnArgType>, Type), InternalCompilationError> {
+    let args = args
+        .iter()
+        .map(|arg| {
+            arg.desugar_with_ty_and_eff_params(
+                env,
+                generic_ty_params,
+                generic_eff_params,
+                modules_used,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let ret = ret.0.desugar_with_ty_and_eff_params(
+        ret.1,
+        false,
+        env,
+        generic_ty_params,
+        generic_eff_params,
+        modules_used,
+    )?;
+    Ok((args, ret))
+}
+
+/// The subscript type of the desugared signature `args` and `ret`, with the members written in
+/// `subscript_type`. A written member is a yielded one, which every member of its kind
+/// satisfies.
+fn desugar_subscript_members(
+    subscript_type: &ast::PSubscriptType,
+    args: Vec<FnArgType>,
+    ret: Type,
+    generic_eff_params: Option<&GenericEffParams>,
+) -> Result<SubscriptType, InternalCompilationError> {
+    let member = |effects: &Option<PFnEffects>| {
+        effects
+            .as_ref()
+            .map(|effects| {
+                Ok(SubscriptMemberType::new(
+                    desugar_fn_effects(effects, generic_eff_params)?,
+                    SubscriptResultConvention::YieldedOnce,
+                ))
+            })
+            .transpose()
+    };
+    Ok(SubscriptType::new(
+        args,
+        ret,
+        member(&subscript_type.ref_member)?,
+        member(&subscript_type.mut_member)?,
+    ))
 }
 
 impl ast::PType {
@@ -1024,6 +1113,14 @@ impl ast::PType {
                 generic_eff_params,
                 modules_used,
             )?),
+            Subscript(subscript_type) => {
+                Type::subscript_type(subscript_type.desugar_with_ty_and_eff_params(
+                    env,
+                    generic_ty_params,
+                    generic_eff_params,
+                    modules_used,
+                )?)
+            }
         };
         // Each node is built from checked children, so the first node to exceed a limit is
         // the one reported, at its span; an alias is the type it stands for.
@@ -1266,6 +1363,22 @@ fn collect_trait_impl_generic_ty_params_from_ty(
             }
             collect_trait_impl_generic_ty_params_from_ty(
                 &fn_ty.ret.0,
+                env,
+                generic_ty_params,
+                next_index,
+            )?;
+        }
+        Subscript(subscript_ty) => {
+            for arg in &subscript_ty.args {
+                collect_trait_impl_generic_ty_params_from_ty(
+                    &arg.ty.0,
+                    env,
+                    generic_ty_params,
+                    next_index,
+                )?;
+            }
+            collect_trait_impl_generic_ty_params_from_ty(
+                &subscript_ty.ret.0,
                 env,
                 generic_ty_params,
                 next_index,

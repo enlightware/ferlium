@@ -1203,3 +1203,22 @@ fn an_inlined_variant_of_a_generic_type_keeps_its_store() {
         );
     }
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_callable_is_replaced_with_one_of_a_subtype() {
+    // `f` takes its argument mutably and `g` by value: `g` is a subtype of the type of `f`, and
+    // replaces the callable stored there.
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { "
+            fn g(x: int) -> int { x + 1 }
+            fn h(x: &mut int) -> int { x }
+            let mut f = h;
+            f = g;
+            let mut a = 1;
+            f(a)
+        " }),
+        int(2)
+    );
+}

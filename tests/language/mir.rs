@@ -1633,7 +1633,7 @@ fn place_annotations_name_non_atomic_lowered_types_without_pointer_syntax() {
 
     assert!(out.contains("place (Left (int) | Right (bool)) = alloca Left (int) | Right (bool)"));
     assert!(out.contains(
-        "place (subscript (&mut int) -> int { ref place; mut place }) = alloca subscript (&mut int) -> int { ref place; mut place }"
+        "place (subscript(&mut int) -> int ref mut place) = alloca subscript(&mut int) -> int ref mut place"
     ));
     assert!(out.contains("place (() -> int) = alloca () -> int"));
 }

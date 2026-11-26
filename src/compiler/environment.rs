@@ -103,6 +103,12 @@ impl EnvironmentCollector<'_> {
                 }
                 self.ty(&function.ret.0);
             }
+            PType::Subscript(subscript) => {
+                for arg in &subscript.args {
+                    self.ty(&arg.ty.0);
+                }
+                self.ty(&subscript.ret.0);
+            }
             PType::Resolved(ty) => self.resolved_type(ty),
             PType::Never | PType::Unit | PType::Infer => {}
         }

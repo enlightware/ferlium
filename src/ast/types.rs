@@ -198,6 +198,75 @@ impl FormatWith<ModuleEnv<'_>> for PFnType {
     }
 }
 
+/// The type of a first-class subscript: the signature of its declaration, then its members.
+#[derive(Debug, Clone, PartialEq, Eq, new)]
+pub struct PSubscriptType {
+    pub args: Vec<PFnArgType>,
+    pub ret: TypeSpan<Parsed>,
+    /// The effects of the `ref` member, if the subscript has one.
+    pub ref_member: Option<PFnEffects>,
+    /// The effects of the `mut` member, if the subscript has one.
+    pub mut_member: Option<PFnEffects>,
+}
+
+impl PSubscriptType {
+    /// Collect indices of types in ty_names that are referenced in this type.
+    pub fn collect_refs(
+        &self,
+        name: Ustr,
+        ty_names: &FxHashMap<Ustr, usize>,
+        collected: &mut FxHashSet<usize>,
+    ) -> Result<(), InternalCompilationError> {
+        for arg in &self.args {
+            arg.ty.0.collect_refs(name, ty_names, collected)?;
+        }
+        self.ret.0.collect_refs(name, ty_names, collected)
+    }
+}
+
+impl FormatWith<ModuleEnv<'_>> for PSubscriptType {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
+        write!(f, "subscript(")?;
+        for (i, arg) in self.args.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            arg.fmt_with(f, env)?;
+        }
+        write!(f, ") -> ")?;
+        // The members after a function or subscript type would read as its own.
+        if matches!(self.ret.0, PType::Function(_) | PType::Subscript(_)) {
+            write!(f, "(")?;
+            self.ret.0.fmt_with(f, env)?;
+            write!(f, ")")?;
+        } else {
+            self.ret.0.fmt_with(f, env)?;
+        }
+        let mut member = |name: &str, effects: &PFnEffects| {
+            write!(f, " {name}")?;
+            if let PFnEffects::Explicit(effects) = effects {
+                write!(f, " ! ")?;
+                format_effect_binding_value(effects, f)?;
+            }
+            Ok(())
+        };
+        match (&self.ref_member, &self.mut_member) {
+            (Some(ref_member), Some(mut_member)) if ref_member == mut_member => {
+                member("ref mut", ref_member)
+            }
+            (ref_member, mut_member) => {
+                if let Some(effects) = ref_member {
+                    member("ref", effects)?;
+                }
+                if let Some(effects) = mut_member {
+                    member("mut", effects)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 /// AST-level type representation before resolution
 #[derive(Debug, Clone, PartialEq, Eq, EnumAsInner)]
 pub enum PType {
@@ -227,6 +296,8 @@ pub enum PType {
     Array(Box<TypeSpan<Parsed>>),
     /// Function type (args -> return)
     Function(B<PFnType>),
+    /// Subscript type (args -> return, then members)
+    Subscript(B<PSubscriptType>),
 }
 impl PType {
     /// The span of the first `_` in this type, a type to infer, if there is one.
@@ -248,7 +319,17 @@ impl PType {
                 .map(|arg| &arg.ty)
                 .chain([&fn_type.ret])
                 .find_map(|(ty, span)| ty.first_hole(*span)),
+            Subscript(subscript_type) => subscript_type
+                .args
+                .iter()
+                .map(|arg| &arg.ty)
+                .chain([&subscript_type.ret])
+                .find_map(|(ty, span)| ty.first_hole(*span)),
         }
+    }
+
+    pub fn subscript_type(subscript_type: PSubscriptType) -> Self {
+        PType::Subscript(b(subscript_type))
     }
 
     pub fn function_type(fn_type: PFnType) -> Self {
@@ -314,6 +395,7 @@ impl PType {
                 .try_for_each(|(_, (ty, _))| ty.collect_refs(name, ty_names, collected))?,
             Array(inner) => inner.0.collect_refs(name, ty_names, collected)?,
             Function(fn_type) => fn_type.collect_refs(name, ty_names, collected)?,
+            Subscript(subscript_type) => subscript_type.collect_refs(name, ty_names, collected)?,
             _ => (),
         }
         Ok(())
@@ -396,6 +478,7 @@ impl FormatWith<ModuleEnv<'_>> for PType {
                 write!(f, "]")
             }
             Function(fn_type) => fn_type.fmt_with(f, env),
+            Subscript(subscript_type) => subscript_type.fmt_with(f, env),
         }
     }
 }
