@@ -409,6 +409,8 @@ pub(crate) fn remove_dead_proven_calls(
 struct DiscardedTrivialAllocation {
     definition: DeadResultCandidate,
     removable_uses: FxHashMap<BlockId, FxHashSet<OperationIndex>>,
+    /// The allocations this one is copied or moved into: those copies go only if they do.
+    copied_into: Vec<ValueId>,
     invalid: bool,
 }
 
@@ -425,7 +427,9 @@ struct ConsumingDefinition {
 /// writes, even though the caller never reads it. This extends the ordinary storage cleanup with
 /// one linear place-tree proof: an eligible allocation and every place derived from it may only be
 /// used as a `store`, `memcpy` or move destination, be cleared, or derive another subfield. Those operations
-/// can all disappear while the computations which produced their inputs remain.
+/// can all disappear while the computations which produced their inputs remain. An allocation may
+/// also be the source of a `memcpy` or a move into another one that is removed, so that a chain of
+/// unread values, each copied into the next, goes in one edit.
 ///
 /// The complete root type must be concrete `TrivialCopy`. That is what makes deleting a variant
 /// shell store ownership-safe; variant producers whose every use disappears are removed in the
@@ -470,6 +474,7 @@ pub(crate) fn remove_discarded_trivial_copy_results(
                         DiscardedTrivialAllocation {
                             definition: site,
                             removable_uses: FxHashMap::default(),
+                            copied_into: Vec::new(),
                             invalid: false,
                         },
                     );
@@ -522,6 +527,35 @@ pub(crate) fn remove_discarded_trivial_copy_results(
                 let Some(root) = root else {
                     continue;
                 };
+                // A copy or a move out of a candidate into another one reads it only for that
+                // one: it goes if its destination does, which is decided once all uses are known.
+                let copy_destination = (position == 0
+                    && matches!(
+                        operation.kind,
+                        OperationKind::Memcpy
+                            | OperationKind::Move
+                            | OperationKind::MoveBytes { .. }
+                    ))
+                .then(|| match operation.operands.get(1) {
+                    Some(mir::Value::Register(destination)) => candidates
+                        .contains_key(destination)
+                        .then_some(*destination)
+                        .or_else(|| derived_roots.get(destination).copied()),
+                    _ => None,
+                })
+                .flatten();
+                if let Some(destination) = copy_destination {
+                    let candidate = candidates
+                        .get_mut(&root)
+                        .expect("a derived place root is a candidate allocation");
+                    candidate.copied_into.push(destination);
+                    candidate
+                        .removable_uses
+                        .entry(block)
+                        .or_default()
+                        .insert(site);
+                    continue;
+                }
                 let removable = match operation.kind {
                     OperationKind::Subfield { .. }
                     | OperationKind::AddressOffset { .. }
@@ -572,6 +606,31 @@ pub(crate) fn remove_discarded_trivial_copy_results(
                     .get_mut(&root)
                     .expect("a derived place root is a candidate allocation")
                     .invalid = true;
+            }
+        }
+    }
+
+    // An allocation copied into one that stays is read, so it stays too, and so on up a chain of
+    // copies. Allocations only copied into each other are read by nothing, and all go.
+    let mut sources = FxHashMap::<ValueId, Vec<ValueId>>::default();
+    for (source, candidate) in &candidates {
+        for destination in &candidate.copied_into {
+            sources.entry(*destination).or_default().push(*source);
+        }
+    }
+    let mut kept: Vec<ValueId> = candidates
+        .iter()
+        .filter(|(_, candidate)| candidate.invalid)
+        .map(|(root, _)| *root)
+        .collect();
+    while let Some(destination) = kept.pop() {
+        for source in sources.get(&destination).into_iter().flatten() {
+            let candidate = candidates
+                .get_mut(source)
+                .expect("a copy source is a candidate allocation");
+            if !candidate.invalid {
+                candidate.invalid = true;
+                kept.push(*source);
             }
         }
     }

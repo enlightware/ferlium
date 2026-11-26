@@ -178,7 +178,8 @@ fn normalize_physical(
         dead_store::remove_overwritten_trivial_copy_stores(f, env).map(Rewrite::settled)
     };
     // An unread `TrivialCopy` local goes with the writes into it, such as the element a drop loop
-    // takes out of its buffer. That can leave the local moved or copied into it only written.
+    // takes out of its buffer. The pass removes a chain of such locals, each copied into the next,
+    // in one run; removing them can still leave another local only written.
     let discarded_results = |f: &Function| {
         dce::remove_discarded_trivial_copy_results(f, env).map(|body| Rewrite {
             body,

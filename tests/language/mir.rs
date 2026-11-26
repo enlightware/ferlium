@@ -3247,6 +3247,36 @@ fn discarded_record_construction_lowers_into_throwaway_temp() {
     );
 }
 
+/// Values that nothing reads, each holding the previous one, are removed in one run of the
+/// cleanup of discarded results: removing one leaves the previous one unread, and a run per value
+/// would exceed the normalization's cap on pass runs, which leaves values behind.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_unread_chain_of_nested_values_is_removed_at_once() {
+    let n = 40;
+    let enums = (1..n)
+        .map(|i| format!("enum D{i} {{ A(D{}), N }}\n", i - 1))
+        .collect::<String>();
+    let lets = (1..n)
+        .map(|i| format!("    let v{i} = D{i}::A(v{});\n", i - 1))
+        .collect::<String>();
+    let src = format!(
+        "enum D0 {{ A(int), N }}\n{enums}fn f() -> int {{\n    let v0 = D0::A(1);\n{lets}    1\n}}\nf()"
+    );
+    let mut session = TestSession::new();
+    assert_val_eq!(session.run(&src), int(1));
+    let module_id = session.compile(&src).module_id;
+    let mir = session
+        .session()
+        .emit_physical_mir_module(module_id)
+        .expect("physical MIR preparation failed");
+    let (_, f) = mir
+        .split_once("\nfn f() -> int:\n")
+        .unwrap_or_else(|| panic!("expected `f` in the physical MIR:\n{mir}"));
+    let f = f.split_once("\n\n").map_or(f, |(f, _)| f);
+    assert!(!f.contains("alloca"), "`f` keeps unread values:\n{f}");
+}
+
 // Each discarded literal must still *evaluate* every element, so a side effect inside an element
 // (here a counter mutation) is observable after the discarded construction.
 
