@@ -104,16 +104,8 @@ fn clamp_non_negative(x: int) -> int {
 clamp_non_negative(-3)
 ```
 
-The returned expression must have the function's return type. A `return` exits the current function or lambda, even when it appears inside a nested block, `if`, or `match` arm.
-
-```ferlium
-let f = |x| {
-    if x { return 1 };
-    2
-};
-
-f(true)
-```
+The returned expression must have the function's return type.
+A `return` exits the current function, even when it appears inside a nested block, `if`, or `match` arm.
 
 ## Loop expressions
 
@@ -138,7 +130,7 @@ let answer = loop {
 };
 ```
 
-If a loop has no reachable `break`, its type is `never`.
+If a loop has no reachable `break`, it never produces a value, and its type is `never`.
 
 ### Loop labels
 

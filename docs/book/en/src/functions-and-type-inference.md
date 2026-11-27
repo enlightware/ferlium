@@ -103,6 +103,28 @@ Ferlium cannot enforce at compile time that recursive functions terminate.
 If a function calls itself indefinitely, execution will fail at runtime.
 It is the programmer's responsibility to ensure that recursion progresses toward a base case.
 
+## Effects
+
+The inferred type of a function also records what calling it may do beyond computing a value.
+These are its effects, and there are three:
+
+- `read`: it may read state provided by the environment that runs the program;
+- `write`: it may modify that state;
+- `fallible`: it may fail at run time, for example by dividing by zero.
+
+Effects are about the environment and about failure.
+Changing a `mut` variable of the program itself is not an effect.
+
+```ferlium
+fn ratio(a: float, b: float) { a / b }
+```
+
+The type of `ratio` is shown as `(float, float) -> float ! fallible`: it takes two floats, returns a float, and may fail in case of division by 0.
+A function that calls `ratio` may fail too, so effects carry over from the functions it calls.
+
+You rarely write effects: like the rest of the type, they are inferred.
+The chapter on [Effects](./effects.md) covers them in detail.
+
 ## Pipeline calls with `|>`
 
 Ferlium provides a pipeline operator, `|>`, as a lightweight way to write function application left to right.

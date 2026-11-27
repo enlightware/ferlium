@@ -58,7 +58,7 @@ let before_last = xs[-2];
 Indexing out of bounds is a runtime error.
 
 A loop that is certain to index out of bounds may report that error before it runs its iterations, so that the indices of a whole loop can be checked once rather than on every access.
-The values the loop would have modified are then unspecified, including as seen by subscript code that runs while the error propagates.
+The values the loop would have modified are then unspecified.
 If the loop would have failed first at another access, including another index out of bounds, or exhausted its execution limits, the reported index error may be a later one.
 A loop that can stop before its failing access, for example with `break` or `return`, runs as far as it gets.
 

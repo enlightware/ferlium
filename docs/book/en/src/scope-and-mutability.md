@@ -79,9 +79,6 @@ value // 7
 You can write `values[i] += values[j]`. However, replacing `+=` with an expanded assignment
 can change the result if the right-hand side also changes the value being updated.
 
-Custom subscript code runs after the right-hand side. While it is still using a mutable argument,
-a nested access cannot use the same argument independently—even when reading through the subscript.
-
 ## Scope
 
 Every block introduces a new [scope](https://en.wikipedia.org/wiki/Scope_(computer_science)).
@@ -262,6 +259,7 @@ horizontal + vertical
 
 ### Named structs
 
+Structs, introduced in [User-Defined Types](./user-defined-types.md), are destructured in the same two ways.
 Tuple structs use tuple-style destructuring:
 
 ```ferlium

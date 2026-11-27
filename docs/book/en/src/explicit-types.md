@@ -147,6 +147,10 @@ match value {
 }
 ```
 
+A `struct` or an `enum` can also declare effect parameters, written after `!` as on a function.
+A type alias cannot.
+In a recursive type, recursive references must pass its effect parameters through unchanged, as they do its type parameters.
+
 ### `where` clauses in nominal types
 
 Generic named types can have `where` clauses.

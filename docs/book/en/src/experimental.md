@@ -82,6 +82,8 @@ As with functions, ordinary subscript parameter and result types may be inferred
 
 Array indexing is implemented through the same subscript mechanism, and it composes with custom and named subscripts.
 
+In an assignment, custom subscript code runs after the right-hand side.
+
 ## Scoped subscripts
 
 Some projections cannot return a place directly.

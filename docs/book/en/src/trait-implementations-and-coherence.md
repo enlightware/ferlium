@@ -143,6 +143,7 @@ where
 }
 
 impl<I, T, O ! MapperEffect> Iterator for <Self = TransformIter<I, T, O ! MapperEffect> |-> Item = O ! NextEffect = MapperEffect> {
+    // `&mut`: `next` may modify the iterator in place.
     fn next(it: &mut TransformIter<I, T, O ! MapperEffect>) -> Option<O> {
         match next(it.iterator) {
             Some(value) => Some(it.mapper(value)),

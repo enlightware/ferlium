@@ -29,6 +29,16 @@ let add = |x, y| x + y;
 ```
 
 Like other expressions, lambda bodies can be single expressions or blocks.
+A `return` inside a lambda exits that lambda, not the function around it:
+
+```ferlium
+let f = |x| {
+    if x { return 1 };
+    2
+};
+
+f(true)
+```
 
 ## Functions are values
 
@@ -51,10 +61,10 @@ transform(3)
 This is the key shift: functions are first-class values.
 They are not special syntax that only works at declaration sites.
 
-## Named functions and trait methods are values
+## Named functions are values
 
 Named functions can also be used directly as values.
-This includes functions provided by traits.
+This includes functions of the standard library that work on several types, such as `add`.
 
 ```ferlium
 fn apply2(f, left, right) {
@@ -64,10 +74,11 @@ fn apply2(f, left, right) {
 apply2(add, 20, 22)
 ```
 
-Here `add` is the method from the standard-library `Num` trait.
-The call to `apply2` constrains the argument types so Ferlium can choose the right `Num` implementation.
+Here `add` is the standard library's addition, which works on every number type.
+The call to `apply2` fixes the argument types, so Ferlium knows which addition to use.
+The next chapter explains how such functions are defined, as methods of traits.
 
-You can also bind a trait method to a local name before calling it:
+You can also bind such a function to a local name before calling it:
 
 ```ferlium
 fn double_with_add(value) {

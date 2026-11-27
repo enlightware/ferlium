@@ -309,7 +309,7 @@ struct NodeData<T> {
 Recursive product types are rejected unless the cycle goes through a sum type with a terminating branch.
 For example, `struct Node { next: Node }` has no finite value, while `Tree` works because `Leaf` stops the recursion.
 
-For generic recursive types, recursive references must pass the type and effect parameters through unchanged.
+For generic recursive types, recursive references must pass the generic parameters through unchanged.
 For example, `Tree<T>` is supported, but `Tree<(T, T)>` in the recursive position is rejected.
 
 Recursive structural types are also inferred from unannotated recursive function bodies, under the same rules: the recursion must go through a variant with a terminating branch.
