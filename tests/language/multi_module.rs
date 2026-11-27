@@ -2334,6 +2334,26 @@ fn a_private_requirement_chain_beyond_the_reduction_limit_is_an_error() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_private_requirement_chain_without_an_end_is_checked_once_per_layer() {
+    // No impl ends the chain, so every layer's requirement finds no impl below it. Checking each
+    // layer twice would take time exponential in the layers.
+    let mut source = "trait Hidden<Self> { fn hidden(x: Self) -> string ! fallible; }\n".to_owned();
+    for index in 0..40 {
+        let next = index + 1;
+        source.push_str(&format!(
+            "struct Layer{index}<T>(T)
+            impl<T> Hidden for Layer{index}<T> where Layer{next}<T>: Hidden, .. {{
+                fn hidden(x: Layer{index}<T>) -> string {{ hidden(Layer{next}(x.0)) }}
+            }}\n"
+        ));
+    }
+    source.push_str("struct Layer40<T>(T)\n");
+    let mut session = TestSession::new();
+    session.try_compile_module("a", &source).expect("the chain");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn a_possible_specialization_prevents_private_derivation() {
     let mut session = TestSession::new();
     assert!(

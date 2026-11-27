@@ -3564,6 +3564,110 @@ pick(Cb(g), W(0))
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_effect_of_an_earlier_requirement_does_not_rule_out_an_impl() {
+    // With the effect that `Learn` has, the first requirement of the first impl of `Pick` tells
+    // that `T` is `int`, and its second one then finds no impl. Without it, `T` stays unknown
+    // and the impl may apply: the effect must not rule it out, so the last literal is not
+    // inferred to be a float from the other impl, whichever effect is asked.
+    for effect in ["fallible", "()"] {
+        let source = formatdoc! { r#"
+struct Key<T>(T)
+struct Duo<T, U>(T, U)
+struct W<T>(T)
+trait Learn<Self |-> ! E> {{ fn learn(x: Self) -> int ! E; }}
+impl Learn for <Self = Key<int> |-> ! E = fallible> {{ fn learn(x) {{ 1 }} }}
+trait Check<Self> {{ fn check(x: Self) -> int; }}
+impl<V> Check for Duo<bool, V> {{ fn check(x) {{ 1 }} }}
+impl<V> Check for Duo<string, V> {{ fn check(x) {{ 2 }} }}
+trait Pick<A, B, C> {{ fn pick(a: A, b: B, c: C) -> int; }}
+impl<T, V> Pick for <A = Key<T>, B = W<V>, C = W<int>> where Key<T>: Learn<! E = {effect}>, Duo<T, V>: Check, .. {{
+ fn pick(a: Key<T>, b: W<V>, c: W<int>) -> int {{ 1 }}
+}}
+impl<T, V> Pick for <A = Key<T>, B = W<V>, C = W<float>> {{
+ fn pick(a: Key<T>, b: W<V>, c: W<float>) -> int {{ 2 }}
+}}
+pick(Key(0), W(0), W(0))
+"# };
+        let error = TestSession::new().fail_compilation(&source);
+        assert!(
+            matches!(&*error, CompilationErrorImpl::TraitImplNotFound { .. }),
+            "{effect}: {error:?}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_effect_of_an_earlier_requirement_does_not_fix_a_generic() {
+    // With the effect that `Sync` has, the first requirement of the first impl of `Pick` leaves
+    // `A`, a written generic of `f`, apart from `T`, and `Gate` then finds no impl for `T` as
+    // `int`. Without it, the two are one type, which stays polymorphic, and the impl may apply:
+    // the effect must not rule it out, so `z` stays generic, whichever effect is asked.
+    for effect in ["fallible", "()"] {
+        TestSession::new().compile(&formatdoc! { r#"
+struct Key<T>(T)
+struct Duo<T, U>(T, U)
+struct W<T>(T)
+trait Sync<Self |-> Out> {{ fn sync(a: Self) -> Out; }}
+impl<T> Sync for <Self = Duo<T, T> |-> Out = W<(() -> int ! ())>> {{
+ fn sync(a: Duo<T, T>) -> W<(() -> int ! ())> {{ W(|| 1) }}
+}}
+trait Learn<Self> {{ fn learn(x: Self) -> int; }}
+impl Learn for Key<int> {{ fn learn(x) {{ 1 }} }}
+trait Check<Self> {{ fn check(x: Self) -> int; }}
+impl<V> Check for Duo<bool, V> {{ fn check(x) {{ 1 }} }}
+impl<V> Check for Duo<string, V> {{ fn check(x) {{ 2 }} }}
+trait Gate<Self> {{ fn gate(a: Self) -> int; }}
+impl<T, V> Gate for Duo<T, V> where Key<T>: Learn, Duo<T, V>: Check, .. {{
+ fn gate(a: Duo<T, V>) -> int {{ 1 }}
+}}
+trait Pick<A, B, C, D> {{ fn pick(a: A, b: B, c: C, d: D) -> int; }}
+impl<A, T, V> Pick for <A = W<A>, B = Key<T>, C = W<V>, D = W<int>> where Duo<A, T>: Sync<Out = W<(() -> int ! {effect})>>, Duo<T, V>: Gate, .. {{
+ fn pick(a: W<A>, b: Key<T>, c: W<V>, d: W<int>) -> int {{ 1 }}
+}}
+impl<A, T, V> Pick for <A = W<A>, B = Key<T>, C = W<V>, D = W<float>> {{
+ fn pick(a: W<A>, b: Key<T>, c: W<V>, d: W<float>) -> int {{ 2 }}
+}}
+fn f<A>(a: A, z) -> int {{ pick(W(a), Key(0), W(0), W(z)) }}
+fn g<B>(z: B) -> int {{ f(true, z) }}
+1
+"# });
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn what_a_ruled_out_impl_bound_is_undone() {
+    // The first impl of `Pick` binds `T` to `Wide<int>`, which makes `Wide<T>` larger than a
+    // type can be, before its requirement finds no impl. The binding goes with the impl.
+    assert_val_eq!(
+        TestSession::new().run(indoc! { r#"
+type Pair<T> = (T, T);
+type Wide<T> = Pair<Pair<Pair<Pair<Pair<Pair<T>>>>>>;
+struct W<T>(T)
+trait Missing<Self> {}
+trait Pick<A, B, C> { fn pick(a: A, b: B, c: C) -> int; }
+impl<R, U> Pick for <A = R, B = W<Wide<int>>, C = W<U>> where W<U>: Missing {
+ fn pick(a: R, b: W<Wide<int>>, c: W<U>) -> int { 1 }
+}
+impl<R, U> Pick for <A = R, B = W<int>, C = W<U>> {
+ fn pick(a: R, b: W<int>, c: W<U>) -> int { 2 }
+}
+fn f<T, U>(a: Wide<T>, b: W<T>, c: W<U>) -> int { pick(a, b, c) }
+let v0 = (1, 1);
+let v1 = (v0, v0);
+let v2 = (v1, v1);
+let v3 = (v2, v2);
+let v4 = (v3, v3);
+let v5 = (v4, v4);
+f(v5, W(1), W(true))
+"# }),
+        int(2)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn structural_selection_erases_effects_through_nested_prerequisites() {
     for source in [
         indoc! { r#"

@@ -210,6 +210,10 @@ const NO_RUNTIME_REQUIREMENT: usize = usize::MAX;
 pub(super) enum BlanketImplMatch {
     /// The blanket impl is definitely incompatible.
     No,
+    /// The blanket impl is incompatible, and until it was found so, the match did nothing that
+    /// depends on its mode: improvement found no impl for a requirement before any
+    /// requirement was solved.
+    NoInAnyMode,
     /// The blanket impl may still match later, but some nested trait
     /// constraints remain unresolved.
     Unknown,
@@ -550,6 +554,8 @@ impl<'a> TraitSolver<'a> {
             .collect();
         let mut runtime_requirements = Vec::new();
         let structural = mode.by_structure;
+        // Whether a requirement was solved, which a match by structure does without effects.
+        let mut solved_any = false;
         let scratch = mode.unresolved != UnresolvedConstraints::Unknown;
 
         // Then unify the instantiated blanket input types against the requested trait
@@ -703,6 +709,7 @@ impl<'a> TraitSolver<'a> {
                 if let Ok(Some(repr)) =
                     query.repr_of_head_query(trait_id, &constraint_inputs, fn_span)
                 {
+                    solved_any = true;
                     let repr = if structural {
                         repr.map(&mut EffectErasingMapper)
                     } else {
@@ -747,7 +754,13 @@ impl<'a> TraitSolver<'a> {
                             fn_span,
                             arena,
                         )? {
-                            TraitImprovementMatch::No => return Ok(BlanketImplMatch::No),
+                            TraitImprovementMatch::No => {
+                                return Ok(if solved_any {
+                                    BlanketImplMatch::No
+                                } else {
+                                    BlanketImplMatch::NoInAnyMode
+                                });
+                            }
                             TraitImprovementMatch::Unknown => {}
                             TraitImprovementMatch::Yes => {}
                         }
@@ -756,6 +769,7 @@ impl<'a> TraitSolver<'a> {
                     still_remaining.push((*constraint_index, substituted_constraint));
                     continue;
                 }
+                solved_any = true;
                 let (solved_outputs, solved_output_effs) = if query
                     .is_compiler_provided_no_output_trait_query(
                         trait_id,

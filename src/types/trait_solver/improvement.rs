@@ -64,15 +64,51 @@ pub(super) enum TraitImprovementCandidate {
     },
 }
 
-/// Whether a visible impl candidate is compatible with the current partially known trait application.
+/// What the visible impls tell of a partially known trait application.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TraitImprovementMatch {
-    /// The candidate is definitely incompatible.
+    /// No impl applies, whatever the effects are.
     No,
+    /// An impl might still match later, but some blanket constraints are not resolved enough yet.
+    Unknown,
+    /// A single impl can already be matched with the current information.
+    Yes,
+}
+
+/// Whether a visible impl candidate is compatible with the current partially known trait application.
+enum CandidateMatch {
+    /// The candidate is incompatible, perhaps by its effects alone.
+    No,
+    /// The candidate is incompatible, and matching it by structure would do the same again.
+    NoByStructure,
     /// The candidate might still match later, but some blanket constraints are not resolved enough yet.
     Unknown,
-    /// The candidate can already be matched uniquely with the current information.
+    /// The candidate matches with the current information.
     Yes,
+}
+
+impl TraitImprovementCandidate {
+    /// Whether erasing the effects of this blanket candidate and of the application leaves both
+    /// as they are, so that matching them by structure is matching them.
+    fn is_without_effects(&self, input_tys: &[Type], output_tys: Option<&[Type]>) -> bool {
+        let Self::Blanket {
+            input_tys: candidate_inputs,
+            output_tys: candidate_outputs,
+            output_effs,
+            constraints,
+            ..
+        } = self
+        else {
+            return false;
+        };
+        let unchanged = |tys: &[Type]| tys.iter().all(|ty| ty.map(&mut EffectErasingMapper) == *ty);
+        output_effs.is_empty()
+            && unchanged(candidate_inputs)
+            && unchanged(candidate_outputs)
+            && unchanged(input_tys)
+            && output_tys.is_none_or(unchanged)
+            && instantiate_types(constraints, &mut EffectErasingMapper) == *constraints
+    }
 }
 
 impl<'a> TraitSolver<'a> {
@@ -212,7 +248,7 @@ impl<'a> TraitSolver<'a> {
         assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
-    ) -> Result<TraitImprovementMatch, InternalCompilationError> {
+    ) -> Result<CandidateMatch, InternalCompilationError> {
         match candidate {
             TraitImprovementCandidate::Concrete {
                 input_tys: candidate_inputs,
@@ -228,7 +264,7 @@ impl<'a> TraitSolver<'a> {
                     ))?
                     .is_none()
                     {
-                        return Ok(TraitImprovementMatch::No);
+                        return Ok(CandidateMatch::No);
                     }
                 }
                 if let Some(output_tys) = output_tys {
@@ -245,7 +281,7 @@ impl<'a> TraitSolver<'a> {
                         )?
                         .is_none()
                         {
-                            return Ok(TraitImprovementMatch::No);
+                            return Ok(CandidateMatch::No);
                         }
                     }
                 }
@@ -264,11 +300,11 @@ impl<'a> TraitSolver<'a> {
                         )
                         .is_err()
                         {
-                            return Ok(TraitImprovementMatch::No);
+                            return Ok(CandidateMatch::No);
                         }
                     }
                 }
-                Ok(TraitImprovementMatch::Yes)
+                Ok(CandidateMatch::Yes)
             }
             TraitImprovementCandidate::Blanket {
                 input_tys: candidate_inputs,
@@ -296,9 +332,16 @@ impl<'a> TraitSolver<'a> {
                     arena,
                     BlanketConstraintMode::with_effects(UnresolvedConstraints::Unknown),
                 )? {
-                    BlanketImplMatch::No => TraitImprovementMatch::No,
-                    BlanketImplMatch::Unknown => TraitImprovementMatch::Unknown,
-                    BlanketImplMatch::Yes { .. } => TraitImprovementMatch::Yes,
+                    BlanketImplMatch::No => CandidateMatch::No,
+                    // Without effects to erase, the match by structure is this one again.
+                    BlanketImplMatch::NoInAnyMode
+                        if candidate.is_without_effects(input_tys, output_tys) =>
+                    {
+                        CandidateMatch::NoByStructure
+                    }
+                    BlanketImplMatch::NoInAnyMode => CandidateMatch::No,
+                    BlanketImplMatch::Unknown => CandidateMatch::Unknown,
+                    BlanketImplMatch::Yes { .. } => CandidateMatch::Yes,
                 },
             ),
         }
@@ -357,7 +400,10 @@ impl<'a> TraitSolver<'a> {
                     arena,
                     BlanketConstraintMode::by_structure(UnresolvedConstraints::Unknown),
                 )?;
-                return Ok(!matches!(matched, BlanketImplMatch::No));
+                return Ok(!matches!(
+                    matched,
+                    BlanketImplMatch::No | BlanketImplMatch::NoInAnyMode
+                ));
             }
         };
         Ok(!matches!(
@@ -373,7 +419,7 @@ impl<'a> TraitSolver<'a> {
                 fn_span,
                 arena,
             )?,
-            TraitImprovementMatch::No
+            CandidateMatch::No | CandidateMatch::NoByStructure
         ))
     }
 
@@ -657,7 +703,7 @@ impl<'a> TraitSolver<'a> {
                 && !undecided
                 && !found_multiple_candidates
                 && unique_candidate.is_none()
-                && matches!(matched, TraitImprovementMatch::Yes)
+                && matches!(matched, CandidateMatch::Yes)
                 && speculation.declared_generics_intact(&generics)?
             {
                 speculation.keep();
@@ -668,43 +714,49 @@ impl<'a> TraitSolver<'a> {
             }
             // Effects never decide which candidates there are: one ruled out by them alone remains,
             // with what it would teach unknown.
-            let matched = if matches!(matched, TraitImprovementMatch::No) {
-                speculation.restart();
-                let by_structure = match &candidate {
-                    TraitImprovementCandidate::Concrete { .. } => {
-                        Self::improvement_candidate_applies_by_structure(
-                            &mut NeverProbe,
-                            &mut speculation,
-                            &candidate,
-                            input_tys,
-                            output_tys,
-                            assumptions,
-                            fn_span,
-                            arena,
-                        )?
+            // One that matching by structure would rule out the same way is not matched again:
+            // that would match again all that it requires, at every level.
+            let matched = match matched {
+                CandidateMatch::Yes => TraitImprovementMatch::Yes,
+                CandidateMatch::Unknown => TraitImprovementMatch::Unknown,
+                // What it bound is undone with the speculation.
+                CandidateMatch::NoByStructure => continue,
+                CandidateMatch::No => {
+                    speculation.restart();
+                    let by_structure = match &candidate {
+                        TraitImprovementCandidate::Concrete { .. } => {
+                            Self::improvement_candidate_applies_by_structure(
+                                &mut NeverProbe,
+                                &mut speculation,
+                                &candidate,
+                                input_tys,
+                                output_tys,
+                                assumptions,
+                                fn_span,
+                                arena,
+                            )?
+                        }
+                        TraitImprovementCandidate::Blanket { .. } => {
+                            let mut query = LazyTraitSolverProbe::new(self);
+                            Self::improvement_candidate_applies_by_structure(
+                                &mut query,
+                                &mut speculation,
+                                &candidate,
+                                input_tys,
+                                output_tys,
+                                assumptions,
+                                fn_span,
+                                arena,
+                            )?
+                        }
+                    };
+                    speculation.restart();
+                    if by_structure {
+                        TraitImprovementMatch::Unknown
+                    } else {
+                        TraitImprovementMatch::No
                     }
-                    TraitImprovementCandidate::Blanket { .. } => {
-                        let mut query = LazyTraitSolverProbe::new(self);
-                        Self::improvement_candidate_applies_by_structure(
-                            &mut query,
-                            &mut speculation,
-                            &candidate,
-                            input_tys,
-                            output_tys,
-                            assumptions,
-                            fn_span,
-                            arena,
-                        )?
-                    }
-                };
-                speculation.restart();
-                if by_structure {
-                    TraitImprovementMatch::Unknown
-                } else {
-                    TraitImprovementMatch::No
                 }
-            } else {
-                matched
             };
             let improved_input_tys = speculation.substitute_in_types(input_tys)?;
             let improved_output_tys = output_tys
@@ -808,18 +860,23 @@ impl<'a> TraitSolver<'a> {
                 }
                 Ok(TraitImprovementMatch::Unknown)
             }
-            TraitImprovementMatch::Yes => Self::improvement_candidate_matches(
-                self,
-                ty_inf,
-                &candidate,
-                &output_polarities,
-                input_tys,
-                output_tys,
-                output_effs,
-                assumptions,
-                fn_span,
-                arena,
-            ),
+            // The candidate matched under speculation, and matches the same way now.
+            TraitImprovementMatch::Yes => {
+                let matched = Self::improvement_candidate_matches(
+                    self,
+                    ty_inf,
+                    &candidate,
+                    &output_polarities,
+                    input_tys,
+                    output_tys,
+                    output_effs,
+                    assumptions,
+                    fn_span,
+                    arena,
+                )?;
+                debug_assert!(matches!(matched, CandidateMatch::Yes));
+                Ok(TraitImprovementMatch::Yes)
+            }
         }
     }
 
