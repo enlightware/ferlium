@@ -76,7 +76,9 @@ The main phases are:
 
 The compiler limits what source can make grow without bound, such as how deeply code nests and how
 large types are, to keep a program from exhausting the compiler's stack, time or memory. Crossing a
-limit is a located compilation error.
+limit is a located compilation error. The limits are fixed constants, so that a program compiles the
+same on every host. Reaching one always fails the compilation: it never changes what the compiler
+infers or selects.
 
 MIR's structure and invariants are specified in [mir-ir.md](mir-ir.md); the rewriting passes, the
 order they run in, and the rules deciding where a pass belongs are in
