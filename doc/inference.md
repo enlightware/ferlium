@@ -405,7 +405,8 @@ The group is settled when every function gets its contract again: each body then
 contracts that it assumed, its own included, which is the rule for typing recursive definitions,
 so the result is sound however the contracts were found. What a round assumes is provisional:
 a function that fails in a round keeps its contract, and its error counts only once the contracts
-have settled. A group that does not settle within a bound on the rounds is rejected.
+have settled. A group that does not settle within a bound on the rounds is rejected. Falling back to joint
+inference at that point would let the compiler’s round limit determine the published signature.
 
 A requirement is of the function whose body makes it, and of a function that names another, at
 the effects of that reference. Sharing a type does not make two functions need the same effects:
