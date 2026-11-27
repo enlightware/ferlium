@@ -266,6 +266,7 @@ pub enum InvalidGenericParamsKind {
     DuplicateParam { name: Ustr },
     DuplicateEffectParam { name: Ustr },
     PrimitiveEffectParam { name: Ustr },
+    AliasEffectParam { name: Ustr },
     RestrictedTypeParameter { name: Ustr },
 }
 
@@ -287,6 +288,13 @@ impl InvalidGenericParamsKind {
                     "Duplicate generic effect parameter `{name}` in {}",
                     owner.description()
                 )
+            }
+            Self::AliasEffectParam { name } => {
+                let mut owner = owner.description();
+                if let Some(first) = owner.get_mut(..1) {
+                    first.make_ascii_uppercase();
+                }
+                format!("{owner} cannot declare effect parameter `{name}`")
             }
             Self::PrimitiveEffectParam { name } => {
                 format!(

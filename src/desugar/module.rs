@@ -187,18 +187,13 @@ impl NamedTypeData {
                     alias.generic_params.type_params(),
                     GenericParamsOwner::TypeAlias { name: alias.name.0 },
                 )?;
-                let generic_eff_params = extend_generic_eff_params(
-                    &GenericEffParams::default(),
-                    alias.generic_params.effect_params(),
-                    GenericParamsOwner::TypeAlias { name: alias.name.0 },
-                )?;
                 let ty_var_count = alias.generic_params.type_params().len() as u32;
                 let ty = alias.ty.0.desugar_with_ty_and_eff_params(
                     alias.ty.1,
                     false,
                     env,
                     &generic_ty_params,
-                    Some(&generic_eff_params),
+                    Some(&GenericEffParams::default()),
                     modules_used,
                 )?;
                 DesugaredNamedType::Alias(DesugaredTypeAlias {
@@ -287,6 +282,19 @@ fn is_regular_recursive_generic_application(
                 }
                 _ => false,
             })
+}
+
+/// A type alias declares no effect parameters: its uses give it none, so one would stay an effect
+/// that nothing chooses.
+fn reject_alias_effect_params(alias: &ast::TypeAlias) -> Result<(), InternalCompilationError> {
+    match alias.generic_params.effect_params().first() {
+        Some(param) => Err(internal_compilation_error!(InvalidGenericParams {
+            owner: GenericParamsOwner::TypeAlias { name: alias.name.0 },
+            kind: InvalidGenericParamsKind::AliasEffectParam { name: param.0 },
+            span: param.1,
+        })),
+        None => Ok(()),
+    }
 }
 
 /// Whether `effect_args`, given to a declaration of `target_effect_params` in the recursive SCC of
@@ -716,6 +724,9 @@ fn build_named_type_graph(
     {
         reject_reserved_name(name, span)?;
     }
+    for alias in &type_aliases {
+        reject_alias_effect_params(alias)?;
+    }
 
     // First gather all local aliases and type definitions into a single indexed
     // list. `ty_names` maps source names back to those indices so dependency
@@ -839,13 +850,6 @@ fn desugar_recursive_aliases_in_scc(
         let generic_ty_params = extend_generic_ty_params(
             &GenericTyParams::default(),
             alias.generic_params.type_params(),
-            owner,
-        )?;
-        // The group's types cannot refer to its effect parameters, whose names follow the rules of
-        // every declaration all the same.
-        extend_generic_eff_params(
-            &GenericEffParams::default(),
-            alias.generic_params.effect_params(),
             owner,
         )?;
         builder.set_generic_ty_params(generic_ty_params);

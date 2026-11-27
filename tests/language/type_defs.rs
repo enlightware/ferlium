@@ -2743,16 +2743,6 @@ fn effect_parameters_cannot_take_the_name_of_a_primitive_effect() {
             "read",
         ),
         (
-            "type R<! write> = End | Next(() -> int ! write);",
-            GenericParamsOwner::TypeAlias { name: ustr("R") },
-            "write",
-        ),
-        (
-            "type R<! read> = End | Next(R);",
-            GenericParamsOwner::TypeAlias { name: ustr("R") },
-            "read",
-        ),
-        (
             "fn f<! fallible>(g: () -> int ! fallible) -> int { g() }",
             GenericParamsOwner::Function { name: ustr("f") },
             "fallible",
@@ -2779,6 +2769,46 @@ fn effect_parameters_cannot_take_the_name_of_a_primitive_effect() {
             other => panic!("expected InvalidGenericParams for {src}, got {other:?}"),
         }
     }
+}
+
+/// A use of a type alias gives it no effect argument, so an effect parameter would stay an effect
+/// that nothing chooses.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn type_aliases_take_no_effect_parameters() {
+    let mut session = TestSession::new();
+    for src in [
+        "type R<! E> = End | Next(() -> int ! E);",
+        "type R<T, ! E> = (T, () -> int ! E);",
+        "type R<! E> = End | Next(R);",
+        "type A<! E> = End | Next(B);\ntype B = End | Next(A);",
+        // Not the recursive reference, which could not pass the parameter on.
+        "type R<T, ! E> = End | Next(T, R<T>);",
+    ] {
+        let error = session.fail_compilation(src);
+        let CompilationErrorImpl::InvalidGenericParams {
+            owner, kind, span, ..
+        } = error.into_inner()
+        else {
+            panic!("expected InvalidGenericParams for {src}");
+        };
+        assert!(
+            matches!(owner, GenericParamsOwner::TypeAlias { .. }),
+            "{src}"
+        );
+        assert_eq!(
+            kind,
+            InvalidGenericParamsKind::AliasEffectParam { name: ustr("E") },
+            "{src}"
+        );
+        assert_eq!(span.start_usize(), src.find("E>").unwrap(), "{src}");
+    }
+    // An alias may hold effects all the same.
+    assert_val_eq!(
+        session
+            .run("type Reader = () -> int ! read;\nfn call(f: Reader) -> int { f() }\ncall(|| 1)"),
+        int(1)
+    );
 }
 
 #[test]
